@@ -25,9 +25,16 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP"]
 
-# ↓ 以下是 T0 为让 A1（pip install -e）跑通而加的最小包发现配置。
+# ↓ 以下是 T0 为让 A1（pip install -e）跑通而加的构建配置。
 # 不属于 3.0 冻结的「依赖 / pytest / ruff」三块，不改任何契约字段、名字、默认值。
 # 原因：3.4 的目录布局在仓库根造了 evals/、docker/、config/，setuptools 平铺布局
 # 会把它们一并当成顶层包（docker/ 还会遮蔽 docker SDK 依赖），导致 flat-layout 报错。
 [tool.setuptools.packages.find]
 include = ["aite*"]
+
+# 显式声明构建后端：不写这段的话 pip 回退到 legacy 后端，五个 worktree + T4 的 CI
+# 各自依赖 pip 当时注入的 setuptools 版本，装出来的东西不可复现。
+# setuptools 是构建期依赖，不进 [project.dependencies]，运行期不引入任何新东西。
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

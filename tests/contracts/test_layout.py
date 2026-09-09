@@ -384,6 +384,17 @@ def test_pyproject_pytest_and_ruff_blocks_match_spec_30():
     assert tool["ruff"] == SPEC_30_RUFF
 
 
+def test_pyproject_build_system_is_frozen():
+    """构建后端也冻住：换后端 / 加构建期依赖都要先过总管。
+
+    §3.0 没写 [build-system]，这段是 T0 加的（回执里写明了理由）。既然加了，
+    就不能是个没人看的活口 —— 悄悄塞一条 requires 等于绕开「新依赖要停下来报告」。"""
+    assert _pyproject()["build-system"] == {
+        "requires": ["setuptools>=68"],
+        "build-backend": "setuptools.build_meta",
+    }
+
+
 def test_pyproject_has_no_undeclared_tool_blocks():
     """[tool.*] 里除了 §3.0 的 pytest/ruff 和那条写明理由的 setuptools，不许有别的段。"""
     extra = set(_pyproject()["tool"]) - {"pytest", "ruff"} - ALLOWED_EXTRA_TOOL_KEYS
