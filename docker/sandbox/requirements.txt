@@ -1,0 +1,13 @@
+# 沙箱镜像内的 pip 包（owner: T3）。
+#
+# 这些**不进** pyproject.toml：§3.0 冻结的是宿主进程的依赖，镜像里的包是
+# docker/sandbox/ 的事（派单里写明了这条豁免）。
+#
+# 版本钉死是为了「同一份 Dockerfile 两周后 build 出来还是同一个镜像」。
+# 本机是 aarch64（Apple Silicon），下面每一条都有 cp311 的 manylinux aarch64 wheel，
+# 不会在容器里退化成源码编译。
+pandas==2.2.3
+matplotlib==3.9.2
+openpyxl==3.1.5
+python-docx==1.1.2
+pillow==11.0.0
