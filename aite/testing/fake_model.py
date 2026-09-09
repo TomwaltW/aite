@@ -8,10 +8,16 @@
   把这种牌造出来让 T2/TΩ 验。
 * `error`：模型调用直接抛异常，演 §3.3 的「模型调用异常 / 5xx」
 
-`repeat: inf` 让最后一步无限重复，08_step_limit 用它把模型卡在 checklist_note 上。
+两个「不往前走」的旋钮是正交的，别混：
+
+* `repeat: inf` 是**无限出牌**：这一步反复出，脚本到此为止（08_step_limit 用它
+  把模型钉在 checklist_note 上，好撞到 max_steps）。
+* `hold_ticks` 是**这一次不返回**：`chat()` 先把控制权让回事件循环若干次再出牌
+  （07_commands 用它让任务在 `!status` / `!stop` 到达时还活着）。
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -45,6 +51,25 @@ class ScriptStep(BaseModel):
     repeat: int | Literal["inf"] = 1
     #: 非空则这一步抛 FakeModelError(error)
     error: str | None = None
+    #: 出牌前先把控制权让回事件循环几次（`await asyncio.sleep(0)` x N）。0 = 不让，立刻出牌。
+    #:
+    #: 为什么要有它：替身全是瞬时返回的，一次 `chat()` 里没有任何真会挂起的 await 点，
+    #: worker 被调度上之后就一口气把脚本跑到头 —— 投递协程根本插不进来。凡是「任务还
+    #: 活着的时候才有意义」的场景（`!status` / `!stop`）就此没得可测：07_commands 当初
+    #: 正是栽在这里。给某一步加上 hold_ticks，worker 就确定性地停在「下一次 chat」上，
+    #: 上一步的副作用（卡片、沙箱）都已经落地，而别的协程终于有机会跑。
+    #:
+    #: 让出的是事件循环 tick，不是墙钟时间 —— 不 sleep 真实时间，跑多少次结果都一样。
+    #: 让满 N 次就照常出牌（别的协程也可以调 `FakeModel.release_holds()` 提前放行），
+    #: 所以哪怕等的那件事永远不发生，场景也只会以断言失败收场，不会挂死。
+    hold_ticks: int = 0
+
+    @field_validator("hold_ticks")
+    @classmethod
+    def _check_hold_ticks(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"hold_ticks 必须是 >=0 的整数，收到 {v!r}")
+        return v
 
     @field_validator("repeat")
     @classmethod
@@ -73,6 +98,9 @@ class FakeModel:
         self._cursor = 0          # 指向下一个「还没用尽」的步骤
         self._served_here = 0     # 当前步骤已经出过几次牌
         self.turns_served = 0
+        self.holds = 0                # 进过几次 hold（见 ScriptStep.hold_ticks）
+        self.hold_ticks_yielded = 0   # 这些 hold 一共让出了多少个事件循环 tick
+        self.holds_released = False   # release_holds() 置位后，hold 一律立刻放行
 
     # ---- ModelPort ------------------------------------------------------
 
@@ -93,6 +121,8 @@ class FakeModel:
             temperature=temperature,
         )
         step = self._take()
+        if step.hold_ticks:
+            await self._hold(step.hold_ticks)
         if step.error:
             call.error = step.error
             raise FakeModelError(step.error)
@@ -117,7 +147,26 @@ class FakeModel:
         call.result = [tc.name for tc in tool_calls] or f"text:{step.text[:30]}"
         return turn
 
+    # ---- 给场景驱动用 -----------------------------------------------------
+
+    def release_holds(self) -> None:
+        """让正在 hold 的那一步立刻出牌，之后的 hold 步也不再挂。
+
+        07_commands 用不着它（那里靠 hold_ticks 的上限自己放行）。这条路留给
+        「要等的事已经发生了，别再空转」的调用方：置位后当前 hold 下一个 tick 就返回。
+        """
+        self.holds_released = True
+
     # ---- 内部 -----------------------------------------------------------
+
+    async def _hold(self, ticks: int) -> None:
+        """把控制权让回事件循环最多 `ticks` 次。语义见 ScriptStep.hold_ticks。"""
+        self.holds += 1
+        for _ in range(ticks):
+            if self.holds_released:
+                return
+            await asyncio.sleep(0)
+            self.hold_ticks_yielded += 1
 
     def _take(self) -> ScriptStep:
         if self._cursor >= len(self.script):
