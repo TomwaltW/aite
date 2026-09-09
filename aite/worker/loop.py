@@ -490,7 +490,20 @@ class AgentWorker:
                 "model": task.model or self._model.name,
             },
         )
+        # delivered / failed / cancelled 三条路都汇到这里，沙箱在这里还。
+        # 不还的话容器要挂到 reaper 的 idle_sec 空闲超时才被收，任务结束了还占着。
+        await self._release_gateway_sandbox(task.id)
         await self._save(task)
+
+    async def _release_gateway_sandbox(self, task_id: str) -> None:
+        """任务落终态：让 Gateway 释放沙箱并撤掉 session_token（幂等）。"""
+        fn = getattr(self._gateway, "release_task", None)
+        if not callable(fn):
+            return
+        try:
+            await fn(task_id)
+        except Exception:
+            log.exception("worker.gateway_release_failed task=%s", task_id)
 
     async def _save(self, task: Task) -> None:
         task.updated_at = datetime.now(UTC)
@@ -502,6 +515,10 @@ class AgentWorker:
             return None
         try:
             if task.sandbox_id is None:
+                # 产物是 run_python 在 Gateway 那个沙箱里写出来的，得先问它要。
+                # 不问就直接 acquire 的话拿到的是个全新的空容器，产物必然找不到。
+                task.sandbox_id = self._gateway_sandbox_id(task.id)
+            if task.sandbox_id is None:
                 cfg = self._config.sandbox
                 task.sandbox_id = await self._sandbox.acquire(
                     task.id, SandboxSpec(image=cfg.image, cpu=cfg.cpu, mem_mb=cfg.mem_mb)
@@ -509,6 +526,18 @@ class AgentWorker:
             return await self._sandbox.get_file(task.sandbox_id, path)
         except Exception:
             log.exception("worker.artifact_failed task=%s path=%s", task.id, path)
+            return None
+
+    def _gateway_sandbox_id(self, task_id: str) -> str | None:
+        """Gateway 手上这个 task 的沙箱。ToolGateway 协议（冻结）里没有这个访问器，
+        实现类有 `sandbox_id_of` 就用它，没有就当没有沙箱。"""
+        fn = getattr(self._gateway, "sandbox_id_of", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(task_id)
+        except Exception:
+            log.exception("worker.gateway_sandbox_id_failed task=%s", task_id)
             return None
 
 

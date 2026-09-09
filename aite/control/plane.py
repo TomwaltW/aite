@@ -78,6 +78,7 @@ class InProcessControlPlane:
         self._evidence = evidence
         self._config = config
         self._sandbox = sandbox
+        self._gateway = gateway
         self._clock = clock
         self._sleep = sleep
         self._reaper_interval = reaper_interval_sec
@@ -459,9 +460,11 @@ class InProcessControlPlane:
                 await self._sandbox.release(task.sandbox_id)
 
         session = await self._store.get_session(task.session_id)
-        # 任务正在 worker 手里跑：证据与收卡片交给它下一步开头做，
+        # 任务正在 worker 手里跑：证据、收卡片、还沙箱都交给它下一步开头做，
         # 那边拿到的步数才是准的，也免得同一条链上写两次 cancelled。
+        # 反过来，没在跑的任务 worker 不会再收尾，Gateway 手上那个沙箱只能在这里还。
         if not running:
+            await self._release_gateway_sandbox(task.id)
             await self._evidence.append(
                 task.id, EvidenceKind.cancelled, {"by": "stop", "steps": task.steps}
             )
@@ -488,6 +491,21 @@ class InProcessControlPlane:
                 )
             )
         return task
+
+    async def _release_gateway_sandbox(self, task_id: str) -> None:
+        """让 Gateway 释放它给这个 task 建的沙箱并撤掉 token。
+
+        沙箱是 Gateway 按 task_id 自己记着的（`Task.sandbox_id` 只记 worker 兜底建的
+        那种），协议 ToolGateway 是冻结的、没有这个方法，实现类有 `release_task`
+        就用它。
+        """
+        fn = getattr(self._gateway, "release_task", None)
+        if not callable(fn):
+            return
+        try:
+            await fn(task_id)
+        except Exception:
+            log.exception("control.gateway_release_failed task=%s", task_id)
 
     # ---- 小工具 ----------------------------------------------------------
 

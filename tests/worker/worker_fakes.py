@@ -168,6 +168,7 @@ class FakeSandbox:
         self.files = dict(files or {})
         self.acquired: list[str] = []
         self.released: list[str] = []
+        self.get_file_calls: list[tuple[str, str]] = []
         self.reap_calls: list[int] = []
         self.reap_returns: list[str] = []
 
@@ -183,6 +184,9 @@ class FakeSandbox:
         self.files[path] = data
 
     async def get_file(self, sandbox_id: str, path: str) -> bytes:
+        # 这个替身故意不按 sandbox_id 分桶（T2 只测取产物这条链，不测隔离），
+        # 所以「取错沙箱」看 files 是看不出来的 —— 记下来让测试能断言取的是哪个。
+        self.get_file_calls.append((sandbox_id, path))
         return self.files[path]
 
     async def list_files(self, sandbox_id: str) -> list[str]:
@@ -200,21 +204,53 @@ class FakeSandbox:
 
 
 class FakeGateway:
-    """按工具名返回预置 ToolResult；没预置的按 not_found 处理。"""
+    """按工具名返回预置 ToolResult；没预置的按 not_found 处理。
 
-    def __init__(self, results: dict[str, ToolResult] | None = None) -> None:
+    沙箱归属那两个方法（`sandbox_id_of` / `release_task`）跟真实现
+    （aite/gateway/tool_gateway.py）同名同义：产物是 Gateway 建的沙箱里写出来的，
+    worker 取产物前得先问它要，任务落终态时再让它还。冻结的 ToolGateway 协议里
+    没有这两个方法，两边都按鸭子类型接。
+    """
+
+    def __init__(
+        self, results: dict[str, ToolResult] | None = None, *, sandbox: "FakeSandbox | None" = None
+    ) -> None:
         self.results = results or {}
         self.calls: list[tuple[ToolContext, ToolCallRequest]] = []
+        self.sandbox = sandbox
+        self.released_tasks: list[str] = []
+        self._sandbox_of: dict[str, str] = {}
 
     def catalog(self, ctx: ToolContext) -> list[ToolSpec]:
         return list(GATEWAY_TOOLS)
 
+    #: 这些工具真跑起来会让 Gateway 建沙箱（run_python 执行代码、下载附件要落到 /work）
+    SANDBOX_TOOLS = ("run_python", "download_attachment")
+
     async def call(self, ctx: ToolContext, req: ToolCallRequest) -> ToolResult:
         self.calls.append((ctx, req))
+        if req.name in self.SANDBOX_TOOLS:
+            self.hold_sandbox(ctx.task_id)
         preset = self.results.get(req.name)
         if preset is None:
             return ToolResult(call_id=req.call_id, name=req.name, ok=True, content=f"{req.name} ok")
         return preset.model_copy(update={"call_id": req.call_id})
+
+    # ---- 沙箱归属 --------------------------------------------------------
+
+    def hold_sandbox(self, task_id: str, sandbox_id: str = "sb_gateway") -> str:
+        """演「某个工具调用已经给这个 task 建过沙箱了」。"""
+        self._sandbox_of[task_id] = sandbox_id
+        return sandbox_id
+
+    def sandbox_id_of(self, task_id: str) -> str | None:
+        return self._sandbox_of.get(task_id)
+
+    async def release_task(self, task_id: str) -> None:
+        self.released_tasks.append(task_id)
+        sandbox_id = self._sandbox_of.pop(task_id, None)
+        if sandbox_id is not None and self.sandbox is not None:
+            await self.sandbox.release(sandbox_id)
 
 
 # ---- 构造器 --------------------------------------------------------------

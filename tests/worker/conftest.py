@@ -47,8 +47,9 @@ def sandbox() -> FakeSandbox:
 
 
 @pytest.fixture
-def gateway() -> FakeGateway:
-    return FakeGateway()
+def gateway(sandbox) -> FakeGateway:
+    # 接上 sandbox：Gateway 建的沙箱要还得回去（release_task），不接就测不出来
+    return FakeGateway(sandbox=sandbox)
 
 
 @pytest.fixture

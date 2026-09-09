@@ -176,6 +176,23 @@ class FakeToolGateway:
         files = await self.sandbox.list_files(sandbox_id)
         return "\n".join(files) if files else "(空)", {"files": files}
 
+    # ---- 沙箱归属（与 ToolGateway 实现类同名同义）--------------------------
+    #
+    # 冻结的 ToolGateway 协议里只有 catalog / call，沙箱归属没进协议 —— 但产物是
+    # 在这里建的沙箱里写出来的，worker 取产物、控制面 !stop 都得问得到它。真实现
+    # （aite/gateway/tool_gateway.py）给了这两个方法，替身缺了就不等价：worker 会
+    # 以为没有沙箱、自己 acquire 一个空的，04_csv_to_chart 的产物就此丢掉。
+
+    def sandbox_id_of(self, task_id: str) -> str | None:
+        """这个 task 现在用的沙箱（还没建就是 None）。"""
+        return self._sandbox_of.get(task_id)
+
+    async def release_task(self, task_id: str) -> None:
+        """释放这个 task 的沙箱（幂等）。"""
+        sandbox_id = self._sandbox_of.pop(task_id, None)
+        if sandbox_id is not None:
+            await self.sandbox.release(sandbox_id)
+
     # ---- 内部 -----------------------------------------------------------
 
     async def _sandbox_for(self, ctx: ToolContext) -> str:
