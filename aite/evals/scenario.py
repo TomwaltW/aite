@@ -56,6 +56,19 @@ class AttachmentSpec(BaseModel):
     mime: str | None = None
 
 
+#: 冻结契约 C-T5T6-1：投这条事件之前先等什么
+#:
+#:   none     不等，紧接上一条投。**默认值**
+#:   idle     等系统静默：在跑的任务都收了、待处理队列空了，再投
+#:   running  等上一条事件起的那个任务真的被 worker 领走、开始跑了，再投
+#:
+#: 判据在 aite/evals/wiring.py。三条硬约束：默认必须是 none 且 none 的行为与
+#: 引入本字段之前逐字节一致；等不到就以 phase="dispatch" 失败收场、不许继续投
+#: （「等不到就接着投」测出来的绿是假的）；running 判的是「worker 真的领走了」，
+#: 任务建好但还躺在队列里不算 —— 07_commands 就是栽在这个区别上。
+AfterMode = Literal["none", "idle", "running"]
+
+
 class EventSpec(BaseModel):
     """一条投给 ControlPlane 的事件。默认是「群里 @Aite 的一条真人消息」。"""
 
@@ -79,6 +92,10 @@ class EventSpec(BaseModel):
     card_action: CardAction | None = None
     #: 相对 BASE_TIME 的秒偏移；不写就用事件在列表里的下标
     at_sec: int | None = None
+    #: 投这条事件之前先等什么（C-T5T6-1，取值见 AfterMode）
+    after: AfterMode = "none"
+    #: 上面那个等待的上限（秒）。超了就失败，不会硬着头皮往下投
+    after_timeout_sec: float = 5.0
 
     def build(self, index: int) -> NormalizedEvent:
         message_id = self.message_id or f"om_{self.event_id}"

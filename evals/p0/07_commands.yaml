@@ -1,10 +1,27 @@
 # dev-spec §3.8 / 07_commands
 # !status 列出活跃任务；!stop 后 task cancelled、release 被调用
 #
-# 为什么第一个任务用「永不收敛」的脚本：!status / !stop 只有在任务还活着的时候才有意义。
-# 脚本化模型是瞬时返回的，普通任务几个 tick 就 delivered 了，命令一到就没得可停。
-# 所以第一个任务先 run_python 拿到沙箱，然后死循环 checklist_note（repeat: inf），
-# 配合 max_steps: 200 保证它在命令到达前不会自己结束 —— 停下它的只能是 !stop。
+# 这个场景的难处不在断言，在**时序**：!status / !stop 只有在任务还活着的时候才有意义，
+# 而「活着」这件事在全替身的评测里得自己造出来。两个假设不能用：
+#
+#   × 「配合 max_steps: 200 保证它在命令到达前不会自己结束」——- 老注释里这句是错的。
+#     脚本化模型瞬时返回，200 步在毫秒级就跑完了；命令到达时任务早已 failed。
+#   × 「三条事件挨着投就行」——- 挨着投的话三条在同一个 tick 里处理完，worker 协程
+#     还没被调度上，任务就已经 cancelled 了：一次 model_call 都没有，卡片一张没发。
+#
+# 现在靠两件事把时序钉死，两件都不看墙钟、跑多少次结果都一样：
+#
+#   1. e2/e3 的 `after: running`（冻结契约 C-T5T6-1）——- 等 e1 起的任务真的被 worker
+#      领走、开始跑了再投。判据是「任务离开 created」，躺在队列里的不算。
+#   2. 模型脚本第 2 步的 `hold_ticks` ——- 这一步的 chat() 先把控制权让回事件循环
+#      若干次再出牌。替身都是瞬时的，一次 chat() 里没有任何真会挂起的 await 点，
+#      worker 一旦被调度上就会一口气跑到步数上限；hold 给了它一个确定的让出点。
+#      让出时第 1 步（run_python）已经跑完：卡片发了（W3）、沙箱建了，
+#      任务正停在「下一次 chat」上 ——- 这就是「命令到达时任务确实还活着」。
+#
+# 收尾这一段归控制面和 worker 分工（不是本场景造出来的）：!stop 落在正在跑的任务上时，
+# 控制面只置 cancelled + 回帖，卡片终态和还沙箱交给 worker 下一轮循环开头做
+# （§3.3 的 cancel 路径）——- 卡片 cancelled 与 sandbox.release 这两条断言就是从那里来的。
 name: 07_commands
 title: "!status 与 !stop"
 verifies: "!status 列出活跃任务；!stop 后 task cancelled、release 被调用"
@@ -12,7 +29,9 @@ spec_ref: "§3.8 07_commands；§3.5 R5；§3.3 !stop 那一行"
 
 config:
   worker:
-    max_steps: 200
+    # 步数上限只是兜底：万一时序假设又不成立了（命令始终等不到任务），
+    # 让它几步就撞上限 failed，报告里一眼看得出，而不是空转两百步。
+    max_steps: 8
     card_update_min_interval_ms: 0
 
 sandbox:
@@ -31,18 +50,27 @@ events:
     text: "!status"
     mentioned: true
     thread_id: om_e1
+    # C-T5T6-1：等 e1 那个任务真的被 worker 领走再投，否则 !status 列的是一个
+    # 还没开始跑的任务，!stop 停的也是个没建沙箱、没发卡片的空壳
+    after: running
   - event_id: e3
     text: "!stop #A1"
     mentioned: true
     thread_id: om_e1
+    after: running
 
 model_script:
+  # 第 1 步：占住一个沙箱，同时逼出 working 卡片（W3：第一个非 final 的 tool_call 之前先发卡片）
   - tool_calls:
       - name: run_python
         arguments:
           code: "while True: pass  # 占个沙箱"
           timeout_sec: 5
-  - tool_calls:
+  # 第 2 步：卡在这里不返回，把控制权让回事件循环，投递协程才轮得上把命令送进来。
+  # repeat: inf 是另一回事（无限出牌），留着是为了「命令万一晚到，下一步照样 hold」——
+  # 每出一次牌 worker 都会回到循环开头重新看 is_cancelled，取消一到就收尾。
+  - hold_ticks: 200
+    tool_calls:
       - name: checklist_note
         arguments: {text: 还在算}
     repeat: inf
@@ -55,3 +83,8 @@ expect:
   - {check: sandbox_calls, method: release, min: 1}
   - {check: cards, final_status: cancelled}
   - {check: store, tasks_equals: 1}
+  # 任务确实活着跑过：卡片是 worker 发的（不是控制面补的），沙箱也真建了。
+  # 少了这两条，将来时序再退化成「命令到达时任务还没跑」时，上面几条可能靠别的路径
+  # 侥幸变绿，坑就又被埋回去了。
+  - {check: cards, distinct_equals: 1}
+  - {check: sandbox_calls, method: acquire, min: 1}

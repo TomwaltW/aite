@@ -1,13 +1,15 @@
-"""FakeModel 自测：脚本化出牌、repeat、§3.3 那条纯文本兜底的牌造得出来。"""
+"""FakeModel 自测：脚本化出牌、repeat、hold、§3.3 那条纯文本兜底的牌造得出来。"""
 from __future__ import annotations
 
+import asyncio
 import inspect
+import time
 
 import pytest
 
 from aite.contracts import ALL_MODEL_TOOLS, Message, Usage
 from aite.contracts.ports import ModelPort
-from aite.testing import FakeModel, FakeModelError, ScriptExhausted
+from aite.testing import FakeModel, FakeModelError, ScriptExhausted, ScriptStep
 
 MSGS = [Message(role="user", content="你好")]
 
@@ -120,3 +122,88 @@ async def test_tool_names_emitted_counts_local_and_gateway_tools():
 def test_bad_repeat_is_rejected_at_load_time():
     with pytest.raises(ValueError, match="repeat"):
         FakeModel([{"text": "x", "repeat": 0}])
+
+
+# --- 卡住一步（hold_ticks）---------------------------------------------------
+#
+# 这一组钉的是能力本身，不是哪个场景：替身全是瞬时返回的，一次 chat() 里没有任何真会
+# 挂起的 await 点，worker 被调度上就会一口气跑到步数上限。凡是「任务还活着的时候才有
+# 意义」的验证（!status / !stop）都要靠这一步卡住，别的协程才轮得上跑。
+
+
+async def test_hold_ticks_lets_another_coroutine_run_before_the_turn_comes_back():
+    """卡住的这一步没返回之前，别的协程能跑完自己的事 —— 07_commands 靠的就是这条。"""
+    m = FakeModel([{"text": "终于出牌", "hold_ticks": 50}])
+    marks: list[str] = []
+
+    async def meanwhile() -> None:
+        for i in range(3):
+            await asyncio.sleep(0)
+            marks.append(f"别的协程{i}")
+
+    async def ask() -> str:
+        turn = await chat(m)
+        marks.append("chat 返回")
+        return turn.message.content
+
+    content, _ = await asyncio.gather(ask(), meanwhile())
+    assert content == "终于出牌"
+    assert marks[:3] == ["别的协程0", "别的协程1", "别的协程2"]
+    assert marks[-1] == "chat 返回", f"chat 没被卡住，实际次序：{marks}"
+
+
+async def test_hold_lets_go_when_the_budget_runs_out():
+    """等的那件事永远不发生也不能挂死：让满 N 次就照常出牌。"""
+    m = FakeModel([{"text": "牌还是出了", "hold_ticks": 5}])
+    turn = await chat(m)
+    assert turn.message.content == "牌还是出了"
+    assert m.holds == 1
+    assert m.hold_ticks_yielded == 5
+
+
+async def test_hold_spends_event_loop_ticks_not_wall_clock():
+    """确定性的根据：让出的是事件循环 tick，不是 sleep 真实时间。"""
+    m = FakeModel([{"text": "x", "hold_ticks": 20_000}])
+    started = time.perf_counter()
+    await chat(m)
+    assert m.hold_ticks_yielded == 20_000
+    assert time.perf_counter() - started < 1.0, "两万个 tick 花了一秒以上，八成 sleep 了真实时间"
+
+
+async def test_release_holds_cuts_a_long_hold_short():
+    """要等的事已经发生了就别再空转：release_holds() 让当前这一步立刻出牌。"""
+    m = FakeModel([{"text": "x", "hold_ticks": 10_000_000}])
+
+    async def releaser() -> None:
+        await asyncio.sleep(0)
+        m.release_holds()
+
+    turn, _ = await asyncio.gather(chat(m), releaser())
+    assert turn.message.content == "x"
+    assert m.hold_ticks_yielded < 10_000_000
+
+
+async def test_hold_and_repeat_inf_are_two_different_knobs():
+    """repeat: inf 是「无限出牌」，hold_ticks 是「这一次不返回」—— 正交，可以叠。"""
+    m = FakeModel([{
+        "tool_calls": [{"name": "checklist_note", "arguments": {"text": "再想想"}}],
+        "hold_ticks": 3,
+        "repeat": "inf",
+    }])
+    for _ in range(4):
+        turn = await chat(m)
+        assert turn.message.tool_calls[0].name == "checklist_note"
+    assert m.holds == 4 and m.hold_ticks_yielded == 12
+
+
+async def test_no_hold_by_default_costs_nothing():
+    """默认不挂：没写 hold_ticks 的步骤一个 tick 都不该让。"""
+    assert ScriptStep(text="x").hold_ticks == 0
+    m = FakeModel([{"text": "x"}])
+    await chat(m)
+    assert m.holds == 0 and m.hold_ticks_yielded == 0
+
+
+def test_negative_hold_ticks_is_rejected_at_load_time():
+    with pytest.raises(ValueError, match="hold_ticks"):
+        FakeModel([{"text": "x", "hold_ticks": -1}])

@@ -117,6 +117,21 @@ def test_07_uses_bang_commands(scenarios_by_name):
     assert any(t.startswith("!stop") for t in texts)
 
 
+def test_07_keeps_the_task_alive_until_the_commands_arrive(scenarios_by_name):
+    """07 靠两件事保证命令到达时任务还活着，少一件断言就成了摆设。
+
+    一是命令事件的 `after: running`（C-T5T6-1）——- 等 e1 起的任务真的被 worker
+    领走再投；二是模型脚本里有一步卡住不返回（hold_ticks）——- 替身瞬时返回，
+    worker 一旦被调度上就会一口气跑到步数上限，没有这个让出点，命令永远赶不上。
+    老版本写的是「max_steps: 200 保证它不会自己结束」，那句是错的：200 步毫秒级就跑完了。
+    """
+    sc = scenarios_by_name["07_commands"]
+    e1, e2, e3 = sc.events
+    assert e1.after == "none"
+    assert (e2.after, e3.after) == ("running", "running")
+    assert any(step.hold_ticks > 0 for step in sc.model_script), "07 没有一步是卡住的"
+
+
 def test_08_model_never_finishes(scenarios_by_name):
     """08 靠 repeat: inf 把模型钉死，否则任务会自己 delivered，测不到上限。"""
     sc = scenarios_by_name["08_step_limit"]

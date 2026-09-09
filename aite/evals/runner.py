@@ -24,7 +24,17 @@ from ..contracts import CONTRACT_VERSION
 from ..testing import FakeModel
 from .checks import run_checks
 from .scenario import Scenario
-from .wiring import Deps, PhaseError, brief, build_control_plane, build_deps, settle, start_loop, stop_loop
+from .wiring import (
+    Deps,
+    PhaseError,
+    brief,
+    build_control_plane,
+    build_deps,
+    settle,
+    start_loop,
+    stop_loop,
+    wait_before_dispatch,
+)
 
 #: 测试 / TΩ 可以绕过运行时发现，直接给一个造 ControlPlane 的工厂
 PlaneFactory = Callable[[Deps], Any]
@@ -107,13 +117,30 @@ async def _execute(sc: Scenario, deps: Deps, plane_factory: PlaneFactory | None 
 
     loop_task = await start_loop(plane)
     try:
-        for ev in sc.build_events():
+        # C-T5T6-1：after == "none"（默认）时这个循环与引入该字段之前逐字节等价 ——
+        # 不等、不多调一次替身。只有写了 after 的事件才进 wait_before_dispatch。
+        known_tasks: set[str] = set(deps.store.tasks)
+        last_started: str | None = None
+        for spec, ev in zip(sc.events, sc.build_events(), strict=True):
+            if spec.after != "none":
+                await wait_before_dispatch(
+                    spec.after,
+                    deps,
+                    plane,
+                    task_id=last_started,
+                    timeout_sec=spec.after_timeout_sec,
+                )
             try:
                 await deps.platform.emit(ev)
             except Exception as exc:
                 raise PhaseError(
                     "dispatch", f"handle_event({ev.event_id}) 抛了：{brief(exc)}"
                 ) from exc
+            # 这条事件起了新任务的话，下一条 after: running 等的就是它
+            fresh = set(deps.store.tasks) - known_tasks
+            if fresh:
+                known_tasks |= fresh
+                last_started = max(fresh, key=lambda tid: deps.store.tasks[tid].created_at)
         settled_by = await settle(plane, deps, loop_task, timeout_sec=sc.timeout_sec)
     finally:
         await stop_loop(loop_task)

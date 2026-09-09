@@ -19,10 +19,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..contracts import AiteConfig
+from ..contracts import AiteConfig, TaskStatus
 from ..testing import (
     FakeEvidenceWriter,
     FakeModel,
@@ -39,6 +40,13 @@ CANDIDATE_MODULES = ("aite.control", "aite.control.plane")
 CANDIDATE_FACTORIES = ("build_control_plane", "make_control_plane", "create_control_plane")
 #: 队列排空的接口名，按顺序试
 DRAIN_METHODS = ("drain", "run_until_idle", "process_pending", "run_once")
+
+#: 「系统静默」的判据：activity 连续这么久没变就算不干活了。settle() 与
+#: after: idle 共用同一套数，两边对「静默」的定义必须是一个。
+IDLE_MS = 150
+POLL_MS = 5
+#: 任务还活着的状态（与 SessionStore.list_active_tasks 一致）
+ACTIVE_TASK_STATUSES = (TaskStatus.created, TaskStatus.planning, TaskStatus.working)
 
 #: 依赖名 -> 构造函数里可能用的参数名
 PARAM_ALIASES: dict[str, tuple[str, ...]] = {
@@ -203,6 +211,126 @@ async def build_control_plane(deps: Deps) -> Any:
 
 
 # --------------------------------------------------------------------------
+# 投递时序：冻结契约 C-T5T6-1 的 after / after_timeout_sec
+# --------------------------------------------------------------------------
+#
+# 这一段是 T5 与 T6 共用的契约。字段在 EventSpec 上，判据在这里，runner 的投递
+# 循环按 EventSpec.after 调 `wait_before_dispatch`。三条硬约束（照派单原文）：
+#
+#   1. 默认值是 "none"，且 "none" 的行为与引入本字段之前逐字节一致 —— 走到
+#      `wait_before_dispatch` 之前就被 runner 短路掉，一行多余的代码都不执行。
+#   2. 等不到就失败，不许继续投：超时抛 PhaseError("dispatch", ...)，reason 里写清
+#      等的是什么、等了多久。「等不到就接着投」测出来的绿是假的。
+#   3. "running" 判的是「worker 真的领走了」，不是「store 里有一行 task」。
+
+
+def _pending_count(plane: Any) -> int:
+    """待处理队列里还剩几个任务。plane 没暴露就当 0（判据退回到 activity + 任务状态）。"""
+    n = getattr(plane, "pending", None)
+    return int(n) if isinstance(n, int) else 0
+
+
+def _live_tasks(deps: Deps) -> list[str]:
+    """还活着的任务（created / planning / working）。"""
+    return [t.id for t in deps.store.tasks.values() if t.status in ACTIVE_TASK_STATUSES]
+
+
+def _worker_took_it(deps: Deps, task_id: str | None) -> bool:
+    """worker 真的领走了那个任务没有？
+
+    判据取的是**从外面看得见的行为**：worker 一进主循环就把任务从 created 推到
+    planning 并写回 store（§3.6）。控制面建完任务只是 created 并入队 —— 躺在队列里
+    的不算 running，这正是 07_commands 当初的坑。
+    """
+    tasks = deps.store.tasks
+    if task_id is not None:
+        task = tasks.get(task_id)
+        return task is not None and task.status is not TaskStatus.created
+    # 上一条事件没起新任务（比如它本身就是条命令）：退回到「有任务被领走过」
+    return any(t.status is not TaskStatus.created for t in tasks.values())
+
+
+async def _wait_until(
+    predicate: Callable[[], bool], *, what: str, timeout_sec: float, spin_ticks: int = 500
+) -> None:
+    """轮询到 predicate() 为真；超时抛 PhaseError('dispatch', 一行人话)。
+
+    先按事件循环 tick 空转（`sleep(0)`）：替身都是瞬时的，要等的事通常几个 tick 就
+    发生了，这样最快、也不看墙钟。空转够了再退到小睡，免得等不到时把 CPU 烧满。
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + timeout_sec
+    spins = 0
+    while True:
+        if predicate():
+            return
+        if loop.time() >= deadline:
+            waited = loop.time() - started
+            raise PhaseError(
+                "dispatch",
+                f"等「{what}」超时：{timeout_sec}s 内没等到（实际等了 {waited:.2f}s），"
+                f"不再往下投事件",
+            )
+        await asyncio.sleep(0 if spins < spin_ticks else POLL_MS / 1000)
+        spins += 1
+
+
+async def wait_running(deps: Deps, *, task_id: str | None, timeout_sec: float) -> None:
+    """after: running —— 等上一条事件起的那个任务真的被 worker 领走、开始跑了。"""
+    await _wait_until(
+        lambda: _worker_took_it(deps, task_id),
+        what="任务被 worker 领走开始跑（after: running）",
+        timeout_sec=timeout_sec,
+    )
+
+
+async def wait_idle(deps: Deps, plane: Any, *, timeout_sec: float) -> None:
+    """after: idle —— 等系统静默：在跑的任务都收了、待处理队列空了。
+
+    静默本身沿用 settle() 那一套判据（`Deps.activity()` 连续 IDLE_MS 没变），
+    另外要求队列排空、没有还活着的任务 —— 光是「没人调替身」还不够，任务可能只是
+    卡在队列里没人领。
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + timeout_sec
+    last, quiet_since = deps.activity(), loop.time()
+    while loop.time() < deadline:
+        await asyncio.sleep(POLL_MS / 1000)
+        now = deps.activity()
+        if now != last:
+            last, quiet_since = now, loop.time()
+            continue
+        if (loop.time() - quiet_since) * 1000 < IDLE_MS:
+            continue
+        if _pending_count(plane) == 0 and not _live_tasks(deps):
+            return
+        # 不动了，但队列没排空 / 还有任务活着 —— 那不是静默，是卡住了。继续等到超时。
+        quiet_since = loop.time()
+    waited = loop.time() - started
+    raise PhaseError(
+        "dispatch",
+        f"等「系统静默（after: idle）」超时：{timeout_sec}s 内没等到"
+        f"（实际等了 {waited:.2f}s，队列还剩 {_pending_count(plane)} 个、"
+        f"活着的任务 {len(_live_tasks(deps))} 个），不再往下投事件",
+    )
+
+
+async def wait_before_dispatch(
+    mode: str, deps: Deps, plane: Any, *, task_id: str | None, timeout_sec: float
+) -> None:
+    """按 EventSpec.after 等到该等的事发生。mode == "none" 不该走到这里。"""
+    if mode == "running":
+        await wait_running(deps, task_id=task_id, timeout_sec=timeout_sec)
+        return
+    if mode == "idle":
+        await wait_idle(deps, plane, timeout_sec=timeout_sec)
+        return
+    raise PhaseError("dispatch", f"未知的 after={mode!r}，只能是 none / idle / running")
+
+
+# --------------------------------------------------------------------------
 # 驱动到静默
 # --------------------------------------------------------------------------
 
@@ -233,8 +361,8 @@ async def settle(
     loop_task: asyncio.Task | None,
     *,
     timeout_sec: float,
-    idle_ms: int = 150,
-    poll_ms: int = 5,
+    idle_ms: int = IDLE_MS,
+    poll_ms: int = POLL_MS,
 ) -> str:
     """等系统把手上的活干完。返回用了哪种方式（drain / quiesce）。"""
     for name in DRAIN_METHODS:
