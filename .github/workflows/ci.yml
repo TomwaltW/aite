@@ -1,0 +1,73 @@
+# Aite P0 CI（owner: T4，dev-spec §3.4 归属表）
+#
+# 门禁就是 §2.1 的 A1–A5 加 §2.3 的 C1/C2，一步一个 step，红了一眼能看出是哪条。
+# 命令按 spec 原文写 `python`（runner 上 setup-python 提供的就是 3.12 的 python）。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A1 —— §2.1
+      - name: "A1 pip install -e .[dev]"
+        run: python -m pip install -e ".[dev]"
+
+      # A2 —— §2.1，必须打印 p0.1
+      - name: "A2 契约版本"
+        run: |
+          set -e
+          version=$(python -c "import aite.contracts as c; print(c.CONTRACT_VERSION)")
+          echo "CONTRACT_VERSION=$version"
+          test "$version" = "p0.1"
+
+      # A3 / C2 —— 契约文件 hash 与 .contracts.lock 一致；任何 track 让它变红 = 该 track 失败
+      - name: "A3 契约锁 lock --check"
+        run: python -m aite.contracts.lock --check
+
+      # A4 —— 全仓 lint
+      - name: "A4 ruff check ."
+        run: ruff check .
+
+      # A5 —— 全仓可收集，无 ImportError / ModuleNotFoundError
+      - name: "A5 pytest -q --co"
+        run: python -m pytest -q --co
+
+      # C1 —— 契约测试通过数不得减少（基线 335，见 T0 回执）
+      - name: "C1 契约测试"
+        run: python -m pytest tests/contracts -q
+
+      - name: "T4 替身与 runner 自测"
+        run: python -m pytest tests/e2e -q
+
+      - name: "全量测试（各 track 合入后逐步变多）"
+        run: python -m pytest -q -m "not docker"
+
+      - name: "评测场景清单（§3.8 的 10 个）"
+        run: python -m aite.evals run evals/p0 --list
+
+      # B8 —— TΩ 才要求 passed 10/10 且退出码 0（§2.2）。
+      # 并行期间 T1/T2/T3 还没合进来，这里必然是 passed 0/10 退出码 1，
+      # 所以先设成不阻塞；TΩ 合流后把下面这行 continue-on-error 删掉，它就变成硬门禁。
+      - name: "B8 评测 run（TΩ 前不阻塞）"
+        continue-on-error: true
+        run: python -m aite.evals run evals/p0 --platform fake --model scripted
+
+      - name: "compose 配置可解析"
+        run: docker compose config

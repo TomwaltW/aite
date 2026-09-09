@@ -1,0 +1,57 @@
+# dev-spec §3.8 / 07_commands
+# !status 列出活跃任务；!stop 后 task cancelled、release 被调用
+#
+# 为什么第一个任务用「永不收敛」的脚本：!status / !stop 只有在任务还活着的时候才有意义。
+# 脚本化模型是瞬时返回的，普通任务几个 tick 就 delivered 了，命令一到就没得可停。
+# 所以第一个任务先 run_python 拿到沙箱，然后死循环 checklist_note（repeat: inf），
+# 配合 max_steps: 200 保证它在命令到达前不会自己结束 —— 停下它的只能是 !stop。
+name: 07_commands
+title: "!status 与 !stop"
+verifies: "!status 列出活跃任务；!stop 后 task cancelled、release 被调用"
+spec_ref: "§3.8 07_commands；§3.5 R5；§3.3 !stop 那一行"
+
+config:
+  worker:
+    max_steps: 200
+    card_update_min_interval_ms: 0
+
+sandbox:
+  exec_script:
+    - match: "while"
+      exit_code: 0
+      stdout: "running"
+
+events:
+  # 任务 #A1：起一个停不下来的活
+  - event_id: e1
+    text: 把全量数据重算一遍
+    mentioned: true
+  # R5：命令先于 R6/R7 判定，且只接受 mentioned 或已在话题内的消息
+  - event_id: e2
+    text: "!status"
+    mentioned: true
+    thread_id: om_e1
+  - event_id: e3
+    text: "!stop #A1"
+    mentioned: true
+    thread_id: om_e1
+
+model_script:
+  - tool_calls:
+      - name: run_python
+        arguments:
+          code: "while True: pass  # 占个沙箱"
+          timeout_sec: 5
+  - tool_calls:
+      - name: checklist_note
+        arguments: {text: 还在算}
+    repeat: inf
+
+expect:
+  # !status 的回帖里要有活跃任务的任务号（tenant 内第一个 task = #A1）
+  - {check: text, where: any, contains: "#A1"}
+  # !stop 之后任务落到 cancelled，沙箱被释放
+  - {check: task, which: any, status: cancelled}
+  - {check: sandbox_calls, method: release, min: 1}
+  - {check: cards, final_status: cancelled}
+  - {check: store, tasks_equals: 1}

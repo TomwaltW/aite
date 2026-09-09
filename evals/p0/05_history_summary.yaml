@@ -1,0 +1,47 @@
+# dev-spec §3.8 / 05_history_summary
+# read_group_history 返回含 bot 消息的历史 → 工具结果里无 bot 消息 → 回复引用 >=3 个 message_id
+#
+# 分工在这里被验掉：PlatformPort.read_history **不**过滤 sender_kind（契约注释写死），
+# 过滤归 Gateway 的 read_group_history 工具（§6 T3）。所以历史里故意混了 bot / app 消息，
+# 断言看的是工具结果里它们没了。
+name: 05_history_summary
+title: 汇总群历史且不把机器人播报当人话
+verifies: read_group_history 过滤非真人消息；回复引用 >=3 个 message_id
+spec_ref: "§3.8 05_history_summary；§3.6 W1；§2.4 M5"
+
+platform:
+  history:
+    - {message_id: om_h1, sender_id: ou_alice, sender_name: Alice, text: 对账脚本这周能上线吗}
+    - {message_id: om_h2, sender_id: cli_robot, sender_kind: bot, sender_name: 播报机器人,
+       text: "【机器人播报】今日构建 3 次全部通过"}
+    - {message_id: om_h3, sender_id: ou_bob, sender_name: Bob, text: 我这边等设计稿，周四给}
+    - {message_id: om_h4, sender_id: cli_monitor, sender_kind: app, sender_name: 监控,
+       text: "【机器人播报】磁盘使用率 71%"}
+    - {message_id: om_h5, sender_id: ou_carol, sender_name: Carol, text: 客户合同还差法务盖章}
+
+events:
+  - event_id: e1
+    text: 汇总本群本周开放事项
+    mentioned: true
+
+model_script:
+  - tool_calls:
+      - name: read_group_history
+        arguments: {limit: 50}
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: |
+            本周开放事项：
+            - 对账脚本上线时间待定（om_h1）
+            - 设计稿周四交付（om_h3）
+            - 客户合同待法务盖章（om_h5）
+
+expect:
+  - {check: gateway_calls, name: read_group_history, min: 1}
+  - {check: gateway_result, name: read_group_history, ok: true, not_contains: "【机器人播报】"}
+  - {check: gateway_result, name: read_group_history, contains: "[om_h1]"}
+  # 回复要引用到 >=3 条真实群消息
+  - {check: distinct_matches, source: last_text, pattern: "om_h[0-9]+", min: 3}
+  - {check: platform_calls, method: send_text, equals: 1}
+  - {check: task, which: last, status: delivered}

@@ -1,0 +1,49 @@
+# dev-spec §3.8 / 03_checklist_progress
+# send_card×1、update_card>=3、无第二条卡片
+#
+# 关于 card_update_min_interval_ms=0：§3.6 W4 要求同一任务 500ms 内的多次变更只调一次
+# update_card。脚本化模型每步都是瞬时返回的，四次 checklist 变更会全落进同一个 500ms 窗口，
+# 于是「原地更新了几次」这件事就被合并逻辑吃掉了，测不出来。把契约里这个配置字段调成 0
+# 关掉合并，测的才是 §3.8 要的那件事：一张卡片、原地更新 >=3 次、绝不新增第二条消息。
+# 合并逻辑本身归 T2 在 tests/worker/ 里单独验。
+name: 03_checklist_progress
+title: Checklist 卡片原地更新
+verifies: send_card×1、update_card>=3、无第二条卡片
+spec_ref: "§3.8 03_checklist_progress；§2.2 B3；§3.6 W3/W4"
+
+config:
+  worker:
+    card_update_min_interval_ms: 0
+
+events:
+  - event_id: e1
+    text: 把上个月的对账跑一遍
+    mentioned: true
+
+model_script:
+  # 第一次出现非 final 的 tool_call → W3 要求先 send_card(status=working) 再执行
+  - tool_calls:
+      - name: checklist_add
+        arguments:
+          items: [拉取账单, 逐笔比对, 生成报告]
+  - tool_calls:
+      - name: checklist_check
+        arguments: {id: c1}
+  - tool_calls:
+      - name: checklist_check
+        arguments: {id: c2}
+  - tool_calls:
+      - name: checklist_check
+        arguments: {id: c3}
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 对账完成，3 笔差异已列在报告里。
+
+expect:
+  - {check: platform_calls, method: send_card, equals: 1}
+  - {check: cards, distinct_equals: 1, updates_min: 3, final_status: delivered}
+  - {check: platform_calls, method: send_text, equals: 1}
+  - {check: model_tools, name: checklist_add, equals: 1}
+  - {check: model_tools, name: checklist_check, min: 3}
+  - {check: task, which: last, status: delivered}

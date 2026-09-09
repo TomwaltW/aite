@@ -1,0 +1,74 @@
+# dev-spec §3.8 / 04_csv_to_chart
+# 附件 → download_attachment → run_python → final(artifacts) → send_file×1 且内容为 PNG
+name: 04_csv_to_chart
+title: CSV 附件画成图发回线程
+verifies: 附件 → download_attachment → run_python → final(artifacts) → send_file×1 且内容为 PNG
+spec_ref: "§3.8 04_csv_to_chart；§3.6 W5；§2.4 M3"
+
+config:
+  worker:
+    card_update_min_interval_ms: 0
+
+platform:
+  files:
+    - message_id: om_e1
+      file_key: file_sales_csv
+      content: "builtin:csv"
+
+sandbox:
+  exec_script:
+    # 代码里出现 savefig 就当作画好了图，往 /work/out.png 写一张真 PNG
+    - match: savefig
+      exit_code: 0
+      stdout: "saved /work/out.png"
+      writes:
+        /work/out.png: "builtin:png"
+
+events:
+  - event_id: e1
+    text: 把这个 CSV 画成月度趋势图
+    mentioned: true
+    attachments:
+      - kind: file
+        file_key: file_sales_csv
+        name: sales.csv
+        mime: text/csv
+        size: 48
+
+model_script:
+  - tool_calls:
+      - name: checklist_add
+        arguments:
+          items: [下载数据, 画图, 交付]
+  - tool_calls:
+      - name: download_attachment
+        arguments: {file_key: file_sales_csv}
+  - tool_calls:
+      - name: run_python
+        arguments:
+          code: |
+            import pandas as pd, matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            df = pd.read_csv("/work/in/file_sales_csv")
+            df.plot(x="month", y="amount")
+            plt.savefig("/work/out.png")
+          timeout_sec: 120
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 月度趋势图见附件。
+          artifacts:
+            - path: /work/out.png
+              title: 月度趋势
+
+expect:
+  - {check: gateway_calls, name: download_attachment, min: 1}
+  - {check: gateway_result, name: download_attachment, ok: true, contains: /work/in/}
+  - {check: gateway_calls, name: run_python, min: 1}
+  - {check: gateway_result, name: run_python, ok: true, contains: "exit_code=0"}
+  # W5：final.artifacts 逐个 get_file → send_file，回到话题里
+  - {check: platform_calls, method: send_file, equals: 1}
+  - {check: file, index: 0, magic: "89504e470d0a1a0a"}
+  - {check: platform_calls, method: send_text, equals: 1}
+  - {check: task, which: last, status: delivered}
