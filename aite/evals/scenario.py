@@ -43,6 +43,20 @@ BASE_TIME = datetime(2026, 9, 9, 9, 0, 0, tzinfo=UTC)
 DEFAULT_CHAT_ID = "oc_demo"
 DEFAULT_WORKSPACE_ID = "cli_fake_app"
 
+#: 投这条事件之前先等什么（冻结契约 C-T5T6-1）。判据实现在 aite/evals/wiring.py：
+#:
+#:   none     不等，紧接上一条投（默认值）
+#:   idle     等系统静默：在跑的任务都收了、待处理队列空了，再投
+#:   running  等上一条事件起的那个任务真的被 worker 领走、开始跑了，再投
+#:
+#: 真实平台上两条消息之间必然隔着人打字的时间，评测里默认却是同一个事件循环 tick。
+#: 需要那段时间的场景把它显式写出来 —— 而不是反过来改控制面的路由去迁就场景。
+EventAfter = Literal["none", "idle", "running"]
+
+#: `after` 的等待上限（秒）。等不到就让场景以 dispatch 失败收场，绝不接着往下投 ——
+#: 「等不到就接着投」测出来的绿是假的。
+DEFAULT_AFTER_TIMEOUT_SEC = 5.0
+
 
 class ScenarioError(ValueError):
     """场景文件本身写错了（缺字段、名字对不上目录等）。"""
@@ -79,6 +93,10 @@ class EventSpec(BaseModel):
     card_action: CardAction | None = None
     #: 相对 BASE_TIME 的秒偏移；不写就用事件在列表里的下标
     at_sec: int | None = None
+    #: 投这条之前先等什么（C-T5T6-1），取值语义见 EventAfter
+    after: EventAfter = "none"
+    #: 上面那个等待的上限（秒）
+    after_timeout_sec: float = DEFAULT_AFTER_TIMEOUT_SEC
 
     def build(self, index: int) -> NormalizedEvent:
         message_id = self.message_id or f"om_{self.event_id}"
@@ -190,8 +208,12 @@ class Scenario(BaseModel):
     #: 来源文件，加载时填
     source: str = ""
 
+    def build_dispatch_plan(self) -> list[tuple[EventSpec, NormalizedEvent]]:
+        """(投递时序, 归一化事件) 逐条配对 —— runner 按 EventSpec.after 决定投之前等什么。"""
+        return [(e, e.build(i)) for i, e in enumerate(self.events)]
+
     def build_events(self) -> list[NormalizedEvent]:
-        return [e.build(i) for i, e in enumerate(self.events)]
+        return [ev for _, ev in self.build_dispatch_plan()]
 
     def build_history(self) -> list[HistoryMessage]:
         return [h.build(i) for i, h in enumerate(self.platform.history)]

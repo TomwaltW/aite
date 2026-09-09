@@ -22,7 +22,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Any
 
-from ..contracts import AiteConfig
+from ..contracts import AiteConfig, Task, TaskStatus
 from ..testing import (
     FakeEvidenceWriter,
     FakeModel,
@@ -31,7 +31,7 @@ from ..testing import (
     FakeSessionStore,
     FakeToolGateway,
 )
-from .scenario import Scenario
+from .scenario import EventAfter, Scenario
 
 #: 去哪儿找 ControlPlane
 CANDIDATE_MODULES = ("aite.control", "aite.control.plane")
@@ -262,6 +262,129 @@ async def settle(
         if (loop.time() - quiet_since) * 1000 >= idle_ms:
             return "quiesce"
     return "timeout" if loop.time() >= deadline else "quiesce"
+
+
+# --------------------------------------------------------------------------
+# 投事件前的等待（冻结契约 C-T5T6-1）
+# --------------------------------------------------------------------------
+#
+# 真实平台上两条消息之间隔着人打字的时间；投递循环默认零间隔连着投，两条消息落在
+# 同一个事件循环 tick 里，系统根本没机会消化第一条。02 就是这么红的：e2 投到时 e1
+# 的任务还在跑，控制面按 §3.5 R6 把它当 steer 合进当前任务，第二个 task 就没了。
+#
+# 要修的是 runner 怎么投，不是控制面怎么判 —— R6 的行为本身是对的。
+
+def newest_task(deps: Deps) -> Task | None:
+    """store 里最后建出来的那个任务。
+
+    `FakeSessionStore.tasks` 是插入序的 dict，`create_task` 只 insert、`update_task`
+    只覆盖已有键，所以末位就是最新建的那个。直接读字段、不走 store 的方法 ——
+    别让「等待」这个动作本身给 `Deps.activity()` 添活动，那会把静默判据搅浑。
+    """
+    tasks = list(deps.store.tasks.values())
+    return tasks[-1] if tasks else None
+
+
+def _raise_if_loop_died(plane: Any, loop_task: asyncio.Task | None) -> None:
+    """run_forever 已经带异常收场的话，就地抛出来 —— 免得白等一个永远不会再动的系统。"""
+    if loop_task is None or not loop_task.done() or loop_task.cancelled():
+        return
+    exc = loop_task.exception()
+    if exc is not None:
+        raise PhaseError("drive", f"{plane_id(plane)}.run_forever() 中途异常：{brief(exc)}")
+
+
+async def _wait_idle(
+    plane: Any,
+    deps: Deps,
+    loop_task: asyncio.Task | None,
+    *,
+    label: str,
+    timeout_sec: float,
+) -> None:
+    """等系统静默：在跑的任务都收了、待处理队列空了。
+
+    判据直接复用 `settle()` —— 场景收尾用哪套标准判「系统不干活了」，投事件前就用
+    哪套，免得同一件事在两处有两个说法。
+    """
+    try:
+        settled_by = await settle(plane, deps, loop_task, timeout_sec=timeout_sec)
+    except TimeoutError as exc:                       # drain 那条路超时是抛出来的
+        raise PhaseError(
+            "dispatch",
+            f"投 {label} 前等系统静默（after=idle）：{timeout_sec}s 内 drain 没跑完",
+        ) from exc
+    if settled_by == "timeout":
+        raise PhaseError(
+            "dispatch",
+            f"投 {label} 前等系统静默（after=idle）：{timeout_sec}s 内替身一直在被调用，"
+            "任务没收完或队列没排空",
+        )
+
+
+async def _wait_running(
+    plane: Any,
+    deps: Deps,
+    loop_task: asyncio.Task | None,
+    *,
+    label: str,
+    timeout_sec: float,
+    poll_ms: int = 5,
+) -> None:
+    """等最近建的那个任务真的被 worker 领走、开始跑了。
+
+    判据是「任务离开了 `created`」：§4.5 的状态机里只有 worker 会把任务推出 created
+    （`AgentWorker._loop` 第一步就置 planning）。所以**「store 里有一行 task」不算数**
+    —— 任务建好还躺在队列里时它仍然是 created，07 栽的就是这个区别。
+
+    「最近建的那个」在正常时序下就是上一条事件起的那个；上一条没起任务（比如 `!status`）
+    时它落回更早那个仍在跑的任务，也正是场景想等的那个。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+    while True:
+        _raise_if_loop_died(plane, loop_task)
+        task = newest_task(deps)
+        if task is not None and task.status != TaskStatus.created:
+            return
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(poll_ms / 1000)
+
+    stuck = newest_task(deps)
+    why = (
+        f"任务 {stuck.task_no} 一直停在 created，没被 worker 领走"
+        if stuck is not None
+        else "一个任务都没建起来"
+    )
+    raise PhaseError("dispatch", f"投 {label} 前等任务开跑（after=running）：{timeout_sec}s 内{why}")
+
+
+async def wait_before_dispatch(
+    plane: Any,
+    deps: Deps,
+    loop_task: asyncio.Task | None,
+    *,
+    after: EventAfter,
+    label: str,
+    timeout_sec: float,
+) -> None:
+    """按 C-T5T6-1 的 `after` 等一等，然后才轮到 runner 投这条事件。
+
+    等不到就以 `phase="dispatch"` 失败收场，绝不「等不到就接着投」—— 那样测出来的
+    绿是假的。
+    """
+    if after == "none":
+        return
+    if after == "idle":
+        await _wait_idle(plane, deps, loop_task, label=label, timeout_sec=timeout_sec)
+        return
+    if after == "running":
+        await _wait_running(plane, deps, loop_task, label=label, timeout_sec=timeout_sec)
+        return
+    raise PhaseError(                                 # pydantic 拦得住，这里只是兜底
+        "dispatch", f"{label} 的 after={after!r} 不认识（只认 none / idle / running）"
+    )
 
 
 async def stop_loop(loop_task: asyncio.Task | None) -> None:

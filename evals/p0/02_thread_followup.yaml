@@ -11,10 +11,16 @@ events:
     text: 帮我按月画一张销售趋势
     mentioned: true
   # 同话题里不带 @ 的追问 → R6 命中 find_session_by_thread，续接同一会话、新建 task
+  #
+  # after: idle —— 等 e1 那个任务收了再投（契约 C-T5T6-1）。不等的话 e2 到达时 e1 还在跑，
+  # R6 会看到「本会话有活跃 task」，按规则把这句排成 steer 合进当前任务，第二个 task 就没了。
+  # 那是 R6 的正确行为：任务跑着的时候用户又说一句，是在补充要求。这条场景要验的是
+  # 「上一轮已经答完之后的追问」，人打字的那段间隔得显式等出来。
   - event_id: e2
     text: 再按季度画一张
     mentioned: false
     thread_id: om_e1
+    after: idle
 
 model_script:
   - tool_calls:
