@@ -10,6 +10,10 @@ __pycache__/
 .venv/
 venv/
 
+# 并行开发的 worktree（挂在主仓工作区里，不入库）。
+# 必须 ignore：否则主仓的 `ruff check .` 会连各轨的代码一起扫，A4 直接废。
+/.worktrees/
+
 # 工具缓存
 .pytest_cache/
 .ruff_cache/
