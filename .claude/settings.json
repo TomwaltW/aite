@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(/aite/contracts/**)",
+      "Edit(/.contracts.lock)",
+      "Edit(/docs/dev-spec-2026-09-09.md)",
+      "Edit(/.claude/hooks/guard_bash.py)",
+      "Edit(/.claude/settings.json)",
+      "Edit(/.claude/settings.local.json)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|Glob|Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\""
+          }
+        ]
+      }
+    ]
+  }
+}
