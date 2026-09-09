@@ -1,0 +1,18 @@
+# 沙箱内 matplotlib 的默认值（owner: T3）。
+#
+# 为什么要有这个文件：M3 演示是「把 CSV 画成月度趋势图」，标题和图例都是中文。
+# matplotlib 的出厂默认字体 DejaVu Sans 没有 CJK 字形，中文会画成一排方块 ——
+# 那是演示当场就看得见的失败。这里把默认 sans-serif 指到镜像里装的文泉驿，
+# 沙箱里的代码不用自己写 rcParams 就能出中文。
+font.family:      sans-serif
+font.sans-serif:  WenQuanYi Micro Hei, WenQuanYi Zen Hei, Noto Sans CJK SC, DejaVu Sans, sans-serif
+
+# 用中文字体后负号会变成缺字框，关掉 unicode 负号即可。
+axes.unicode_minus: False
+
+# 无头环境，只出文件不开窗。
+backend: Agg
+
+figure.dpi:  110
+savefig.dpi: 110
+savefig.bbox: tight
