@@ -1,0 +1,64 @@
+{
+  "event_id": "evt_post_with_image_0007",
+  "kind": "message",
+  "platform": "feishu",
+  "tenant_id": "default",
+  "workspace_id": "cli_a1b2c3d4e5f60123",
+  "chat_id": "oc_chat_p0_demo_0001",
+  "chat_type": "group",
+  "sender_id": "ou_zhang_san_00000000000000000001",
+  "sender_kind": "human",
+  "sender_name": null,
+  "text": "本周复盘\n看下这张图，口径见 [指标字典](https://example.feishu.cn/docx/DocTokenAbc123)",
+  "raw_text": "本周复盘\n@Aite 看下这张图，口径见 [指标字典](https://example.feishu.cn/docx/DocTokenAbc123)",
+  "mentioned": true,
+  "anchor": {
+    "platform": "feishu",
+    "chat_id": "oc_chat_p0_demo_0001",
+    "message_id": "om_post_0007",
+    "thread_id": null,
+    "task_no": null
+  },
+  "attachments": [
+    {
+      "kind": "image",
+      "file_key": "img_v3_0a1b_2c3d4e5f-6071-8293-a4b5-c6d7e8f9a0b1g",
+      "message_id": "om_post_0007",
+      "name": null,
+      "size": null,
+      "mime": null
+    }
+  ],
+  "card_action": null,
+  "occurred_at": "2026-09-09T01:08:00Z",
+  "raw": {
+    "schema": "2.0",
+    "header": {
+      "event_id": "evt_post_with_image_0007",
+      "create_time": "1788916080000",
+      "event_type": "im.message.receive_v1",
+      "tenant_key": "tk_p0_demo",
+      "app_id": "cli_a1b2c3d4e5f60123"
+    },
+    "event": {
+      "sender": {
+        "sender_id": {
+          "union_id": "on_zhang_sa",
+          "user_id": "zhang_sa",
+          "open_id": "ou_zhang_san_00000000000000000001"
+        },
+        "sender_type": "user",
+        "tenant_key": "tk_p0_demo"
+      },
+      "message": {
+        "message_id": "om_post_0007",
+        "create_time": "1788916080000",
+        "update_time": "1788916080000",
+        "chat_id": "oc_chat_p0_demo_0001",
+        "chat_type": "group",
+        "message_type": "post",
+        "content": "{\"title\": \"本周复盘\", \"content\": [[{\"tag\": \"at\", \"user_id\": \"ou_aite_bot_0000000000000000000001\", \"user_name\": \"Aite\"}, {\"tag\": \"text\", \"text\": \" 看下这张图，口径见 \"}, {\"tag\": \"a\", \"text\": \"指标字典\", \"href\": \"https://example.feishu.cn/docx/DocTokenAbc123\"}], [{\"tag\": \"img\", \"image_key\": \"img_v3_0a1b_2c3d4e5f-6071-8293-a4b5-c6d7e8f9a0b1g\"}]]}"
+      }
+    }
+  }
+}
