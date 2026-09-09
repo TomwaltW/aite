@@ -1,0 +1,31 @@
+# dev-spec §3.8 / 10_duplicate_event
+# 同一 event_id 投两次 → 只建一个 task（§3.5 R2：seen_event 为 True 就静默丢弃）
+#
+# 重连后平台重推是 P0 必须扛住的（§2.4 M2），这里把它压成最小可测形状：
+# 同一条事件原样投两遍，第二遍必须什么都不发生。
+name: 10_duplicate_event
+title: 重复事件只建一个任务
+verifies: 同一 event_id 投两次 → 只建一个 task
+spec_ref: "§3.8 10_duplicate_event；§3.5 R2；§2.4 M2"
+
+events:
+  - event_id: e1
+    text: 统计一下本月新增客户
+    mentioned: true
+  # 一模一样的一条，平台重推
+  - event_id: e1
+    text: 统计一下本月新增客户
+    mentioned: true
+
+model_script:
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 本月新增客户 14 家。
+
+expect:
+  - {check: store, tasks_equals: 1, sessions_equals: 1}
+  - {check: platform_calls, method: send_text, equals: 1}
+  # 模型只该被调一次：第二次调用会撞上「脚本已用尽」
+  - {check: model_calls, equals: 1}
+  - {check: task, which: last, status: delivered}

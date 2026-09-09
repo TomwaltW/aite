@@ -1,0 +1,40 @@
+# dev-spec §3.8 / 06_read_document
+# read_document → 回复含文档标题
+name: 06_read_document
+title: 读云文档并在回复里带上标题
+verifies: read_document → 回复含文档标题
+spec_ref: "§3.8 06_read_document；§3.1 GATEWAY_TOOLS.read_document"
+
+platform:
+  documents:
+    - key: https://example.feishu.cn/docx/DOC123
+      title: Q3 交付计划
+      url: https://example.feishu.cn/docx/DOC123
+      text: |
+        ## 里程碑
+        - 9/20 P0 演示
+        - 10/15 P1 灰度
+        ## 风险
+        - 沙箱镜像体积偏大
+
+events:
+  - event_id: e1
+    text: 帮我看看 https://example.feishu.cn/docx/DOC123 里定了哪些里程碑
+    mentioned: true
+
+model_script:
+  - tool_calls:
+      - name: read_document
+        arguments: {url_or_token: https://example.feishu.cn/docx/DOC123}
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 《Q3 交付计划》里定了两个里程碑：9/20 P0 演示、10/15 P1 灰度。
+
+expect:
+  - {check: gateway_calls, name: read_document, min: 1}
+  - {check: gateway_result, name: read_document, ok: true, contains: Q3 交付计划}
+  - {check: platform_calls, method: read_document, min: 1}
+  - {check: text, where: last, contains: Q3 交付计划}
+  - {check: platform_calls, method: send_text, equals: 1}
+  - {check: task, which: last, status: delivered}

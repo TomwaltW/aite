@@ -1,0 +1,34 @@
+# dev-spec §3.8 / 08_step_limit
+# 模型只会重复 checklist_note → max_steps 处 failed
+#
+# max_steps 压到 3（契约里 Task/WorkerConfig 的字段），跑 40 步只是浪费时间，
+# 验的是同一件事：到上限就 failed，卡片置 failed，回帖里说明是「上限」（§3.3）。
+name: 08_step_limit
+title: 死循环撞上步数上限
+verifies: 模型只会重复 checklist_note → max_steps 处 failed
+spec_ref: "§3.8 08_step_limit；§3.3 超 max_steps 那一行；§3.6 W6"
+
+config:
+  worker:
+    max_steps: 3
+    card_update_min_interval_ms: 0
+
+events:
+  - event_id: e1
+    text: 帮我把这事想清楚
+    mentioned: true
+
+model_script:
+  # 永远只会写备注，既不调 Gateway 工具也不 final
+  - tool_calls:
+      - name: checklist_note
+        arguments: {text: 再想想}
+    repeat: inf
+
+expect:
+  - {check: model_calls, min: 3}
+  - {check: task, which: last, status: failed}
+  # §3.3：回帖「已达步数/时间上限，请缩小任务或 !new 重开」
+  - {check: text, where: any, contains: 上限}
+  - {check: platform_calls, method: send_card, equals: 1}
+  - {check: cards, distinct_equals: 1, final_status: failed}

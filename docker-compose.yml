@@ -1,2 +1,38 @@
-# 占位：compose 编排归 T4（dev-spec §3.4 归属表）。
-services: {}
+# Aite P0 编排（owner: T4，dev-spec §3.4 归属表）
+#
+# P0 只有一个常驻进程：飞书长连接 + 进程内队列 + SQLite（§1「明确不做」里排除了
+# K8s / NATS / Redis / PostgreSQL）。沙箱不是这里的 service —— 它由 aite/sandbox/
+# 用 Docker SDK 按任务起容器（打标签 aite.task=<task_id>），所以要把宿主机的
+# docker socket 挂进来。镜像 aite-sandbox:p0 由 `docker build docker/sandbox` 单独构建。
+#
+# 只跑一个副本：同一飞书应用的多副本长连接只有一个能收到事件（附录 A 末条）。
+#
+# 密钥一律走环境变量，compose 文件里只出现变量名（§3.1 config.py 的口径）。
+# 本地用法：把取值放进仓库根的 .env（已被 .gitignore 挡在 config/aite.yaml 之外，
+# 自己注意别提交），或直接 export 后再 docker compose up。
+name: aite
+
+services:
+  aite:
+    image: python:3.12-slim
+    working_dir: /app
+    command:
+      - bash
+      - -lc
+      - python -m pip install -e "." && python -m aite.app
+    environment:
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_BOT_OPEN_ID: ${FEISHU_BOT_OPEN_ID:-}
+      AITE_MODEL_API_KEY: ${AITE_MODEL_API_KEY:-}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # 源码与 config/aite.yaml 一起挂进去；data/ 在仓库里，落盘的 SQLite 与
+      # evidence 因此在宿主机上直接看得到（StorageConfig 的默认路径）
+      - ./:/app
+      # 沙箱要用宿主机的 Docker daemon 起兄弟容器
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    stop_grace_period: 20s
+    deploy:
+      replicas: 1

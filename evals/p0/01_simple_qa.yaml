@@ -1,0 +1,29 @@
+# dev-spec §3.8 / 01_simple_qa
+# 第一步就 final → 只有 1 条 send_text，没有卡片（§3.6 W3 的 Answering 路径）
+name: 01_simple_qa
+title: 一问一答不发卡片
+verifies: 第一步就 final → 只有 1 条 send_text，没有卡片
+spec_ref: "§3.8 01_simple_qa；§3.6 W3；§3.5 R7"
+
+events:
+  - event_id: e1
+    text: 今天北京天气怎么样
+    mentioned: true
+
+model_script:
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 北京今天晴，最高 28℃，适合出门。
+
+expect:
+  # R7：新建 task session 时先打个 ack 表情
+  - {check: platform_calls, method: add_reaction, min: 1}
+  # W3：第一步就 final，直接 send_text，一张卡片都不发
+  - {check: platform_calls, method: send_text, equals: 1}
+  - {check: platform_calls, method: send_card, equals: 0}
+  - {check: platform_calls, method: update_card, equals: 0}
+  - {check: cards, distinct_equals: 0}
+  - {check: text, where: last, contains: 北京今天晴}
+  - {check: store, sessions_equals: 1, tasks_equals: 1}
+  - {check: task, which: last, status: delivered}

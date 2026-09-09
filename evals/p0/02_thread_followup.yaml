@@ -1,0 +1,34 @@
+# dev-spec §3.8 / 02_thread_followup
+# 话题内第二条消息（不带 @）→ 同一 session_id，新 task（§3.5 R6：续接不要求 mentioned）
+name: 02_thread_followup
+title: 话题内追问续接同一会话
+verifies: 话题内第二条消息（不带 @）→ 同一 session_id，新 task
+spec_ref: "§3.8 02_thread_followup；§3.5 R6/R7"
+
+events:
+  # 顶层 @ → R7 建会话，anchor.thread_id = 本条消息 id（om_e1）
+  - event_id: e1
+    text: 帮我按月画一张销售趋势
+    mentioned: true
+  # 同话题里不带 @ 的追问 → R6 命中 find_session_by_thread，续接同一会话、新建 task
+  - event_id: e2
+    text: 再按季度画一张
+    mentioned: false
+    thread_id: om_e1
+
+model_script:
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 月度趋势已经算好了。
+  - tool_calls:
+      - name: final
+        arguments:
+          reply: 季度趋势也算好了。
+
+expect:
+  # 两条消息各起一个 task，但落在同一个会话里
+  - {check: store, sessions_equals: 1, tasks_equals: 2, task_sessions_equals: 1}
+  - {check: platform_calls, method: send_text, equals: 2}
+  - {check: text, where: last, contains: 季度}
+  - {check: task, which: all, status: delivered}
