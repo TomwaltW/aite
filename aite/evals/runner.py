@@ -4,10 +4,13 @@
 都收干净，转成 `ScenarioResult.reason` 的一行人话，并标出断在哪个阶段：
 
     wiring    接不上被测系统（别的轨还没合入时就停在这里）
-    dispatch  handle_event 抛了
+    dispatch  handle_event 抛了；或者 EventSpec.after 要等的东西没等到
     drive     run_forever 起不来 / 中途炸了 / 超时
     assert    跑到了，但断言没过
     ok        全过
+
+投递不是零间隔连着投：每条事件按 `EventSpec.after`（契约 C-T5T6-1）先等系统消化上一条，
+判据在 `aite/evals/wiring.py`。默认 `after="none"` 就是原来那样紧接着投。
 
 需要看栈的时候加 `--traceback`，栈只写 stderr，不污染 stdout 的 JSON 摘要。
 """
@@ -24,7 +27,17 @@ from ..contracts import CONTRACT_VERSION
 from ..testing import FakeModel
 from .checks import run_checks
 from .scenario import Scenario
-from .wiring import Deps, PhaseError, brief, build_control_plane, build_deps, settle, start_loop, stop_loop
+from .wiring import (
+    Deps,
+    PhaseError,
+    brief,
+    build_control_plane,
+    build_deps,
+    settle,
+    start_loop,
+    stop_loop,
+    wait_before_dispatch,
+)
 
 #: 测试 / TΩ 可以绕过运行时发现，直接给一个造 ControlPlane 的工厂
 PlaneFactory = Callable[[Deps], Any]
@@ -107,7 +120,17 @@ async def _execute(sc: Scenario, deps: Deps, plane_factory: PlaneFactory | None 
 
     loop_task = await start_loop(plane)
     try:
-        for ev in sc.build_events():
+        for spec, ev in sc.build_dispatch_plan():
+            # after="none"（默认）一步都不多走 —— 投递路径与时序机制引入前完全一致
+            if spec.after != "none":
+                await wait_before_dispatch(
+                    plane,
+                    deps,
+                    loop_task,
+                    after=spec.after,
+                    label=ev.event_id,
+                    timeout_sec=spec.after_timeout_sec,
+                )
             try:
                 await deps.platform.emit(ev)
             except Exception as exc:
