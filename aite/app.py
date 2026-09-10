@@ -3,7 +3,8 @@
 三层，一层比一层多做一点事：
 
 * `build_app` **只组装，不产生副作用**：不连网、不起容器、不发消息。唯一落盘的是按
-  `StorageConfig` 建 SQLite 的父目录与 evidence 目录 —— 那是落盘路径的必要准备。
+  `StorageConfig` 建那几个目录（SQLite 的父目录、evidence、artifacts）—— 那是落盘
+  路径的必要准备。
   `platform` / `model` / `sandbox` 三个口子给了就用给的，不给才按 config 造真的；
   集成测试靠它们把替身塞进来测真实接线。
 * `run_app` 起长连接、把派发循环挂后台、等停机信号，然后按写死的顺序收尾。
@@ -227,10 +228,17 @@ def main() -> None:
 # --------------------------------------------------------------------------
 
 def _prepare_storage(cfg: StorageConfig) -> None:
-    """建落盘目录。C-TΩ-1 硬约束 1 允许的唯一副作用。"""
+    """建落盘目录。C-TΩ-1 硬约束 1 允许的唯一副作用。
+
+    `StorageConfig` 有几个路径就建几个，一个都不能漏 —— `scripts/preflight.py`
+    第 7 项对人承诺的原话是「data 待建，起飞时自动 mkdir」，目录不在它不算 FAIL，
+    正是因为这里会建。少建一个，那句话对那一项就成了空头支票，而真机第一次起飞
+    （仓库里没有 data/）撞上的就是这个状态。
+    """
     if cfg.sqlite_path != ":memory:":
         Path(cfg.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
     Path(cfg.evidence_dir).mkdir(parents=True, exist_ok=True)
+    Path(cfg.artifacts_dir).mkdir(parents=True, exist_ok=True)
 
 
 def _require_system_prompt(config: AiteConfig) -> None:
