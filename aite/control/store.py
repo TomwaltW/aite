@@ -6,6 +6,7 @@
 """
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import aiosqlite
@@ -25,6 +26,9 @@ ACTIVE_TASK_STATUSES: tuple[TaskStatus, ...] = (
     TaskStatus.planning,
     TaskStatus.working,
 )
+
+# 上一条命没跑完的任务被收拾掉时写进 result_summary 的话。
+ORPHAN_RESULT_SUMMARY = "进程重启前该任务仍在执行，已终止。请重新发起。"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -214,6 +218,42 @@ class SqliteSessionStore:
             async with self._conn.execute(sql, params) as cur:
                 rows = await cur.fetchall()
         return [Task.model_validate_json(r[0]) for r in rows]
+
+    async def recover_orphan_tasks(self) -> list[Task]:
+        """把上一条命遗留的活跃任务收干净，返回被收拾的那些。
+
+        `systemctl restart` / `kill -9` 之后，崩溃瞬间处于 created/planning/working 的任务
+        既没有人接着跑，也没有人把它标完 —— 而 `list_active_tasks` 正认这三个状态（§3.2），
+        不收拾就永远挂在 `!status` 上，群里看着像还在干活（§2.4 M6 的重启场景）。
+
+        **故意不在 `init()` 里自动调用**，两个理由：
+        - `init()` 的契约是「建表，幂等」（§3.2），塞状态变更是扩契约；
+        - §3.3 要求失败要「task failed + 回帖 + evidence `failed` 事件」，
+          后两件 store 做不了。自动改状态而没人回帖，等于把任务悄悄埋掉 ——
+          用户以为还在跑，比挂着更糟。所以这里只把状态收干净并**把任务交回给调用方**，
+          由起飞处（`aite/app.py`）拿着返回值去回帖 + 写 evidence。
+        """
+        placeholders = ", ".join("?" for _ in ACTIVE_TASK_STATUSES)
+        sql = (
+            f"SELECT data FROM tasks WHERE status IN ({placeholders}) "
+            "ORDER BY created_at ASC, id ASC"
+        )
+        params = tuple(s.value for s in ACTIVE_TASK_STATUSES)
+        async with self._lock:
+            async with self._conn.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+            orphans = [Task.model_validate_json(r[0]) for r in rows]
+            now = datetime.now(UTC)
+            for t in orphans:
+                t.status = TaskStatus.failed
+                t.result_summary = ORPHAN_RESULT_SUMMARY
+                t.updated_at = now
+                await self._conn.execute(
+                    "UPDATE tasks SET status = ?, data = ? WHERE id = ?",
+                    (t.status.value, t.model_dump_json(), t.id),
+                )
+            await self._conn.commit()
+        return orphans
 
     async def next_task_no(self, tenant_id: str) -> str:
         """租户内原子递增 + encode_task_no。UPSERT ... RETURNING 是单条语句，天然原子。"""
