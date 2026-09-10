@@ -100,6 +100,9 @@ class InProcessControlPlane:
         self._steer: dict[str, list[str]] = defaultdict(list)
         self._cancelled: set[str] = set()
         self._running: set[str] = set()
+        #: 本进程接手过、还没收尾的任务（排在队列里的 + 正在 worker 手上的）。
+        #: R6 只把追问排给这里面的任务 —— 见 `_steer_target`。
+        self._owned: set[str] = set()
         self.counters: dict[str, int] = defaultdict(int)
 
     async def init(self) -> None:
@@ -272,11 +275,18 @@ class InProcessControlPlane:
             for t in await self._store.list_active_tasks(session.chat_id)
             if t.session_id == session.id and t.id not in self._cancelled
         ]
-        if active:
+        target = self._steer_target(active)
+        if target is not None:
             # worker 每步开始前会把这些合并进上下文
-            self._steer[active[-1].id].append(ev.text)
+            self._steer[target.id].append(ev.text)
             self.counters["events.steer"] += 1
             return
+        if active:
+            # 库里还是 active，可本进程既没在跑它也没排过它 —— 上个进程被杀之后留在
+            # working 上的孤儿，没人会来 drain 它的 steer。按 R6 的「否则新建 task
+            # 继续」走：不然用户这句追问排进一个永不消费的队列，看起来就是 Aite
+            # 没反应（§2.4 M6「杀进程重启后在旧线程追问仍能续接」会红）。
+            self.counters["events.orphan_task"] += 1
         await self._start_task(session, ev)
 
     async def _new_session(
@@ -353,6 +363,7 @@ class InProcessControlPlane:
                 "mentioned": ev.mentioned,
             },
         )
+        self._owned.add(task.id)
         self._queue.put_nowait(task.id)
         return task
 
@@ -395,6 +406,18 @@ class InProcessControlPlane:
         await self._queue.join()
 
     async def _run_task(self, task_id: str) -> None:
+        try:
+            await self._dispatch_task(task_id)
+        finally:
+            # 这个任务是跑完了、还是压根没被领走（已取消 / 记录没了 / 没配 worker），
+            # 排在它名下的 steer 都不会再有人来 drain。清理只放在 worker 那圈 finally
+            # 里的话，`_dispatch_task` 上面那几条提前 return 会把队列留在内存里 ——
+            # 一条泄漏，用户那句追问也石沉大海。最容易撞上的是「任务还在队列里排着
+            # 就被 !stop 掉」。
+            self._steer.pop(task_id, None)
+            self._owned.discard(task_id)
+
+    async def _dispatch_task(self, task_id: str) -> None:
         task = await self._store.get_task(task_id)
         if task is None:
             return
@@ -406,6 +429,10 @@ class InProcessControlPlane:
             return
         if task_id in self._cancelled:
             return
+        # 开跑前排进来的 steer 已经在 transcript 里了：`_continue_session` 先
+        # append_turn 再排队，而 worker 的 `_build_messages` 是现在才去 list_turns。
+        # 不清掉的话第一步开头会把同一句话再注入一遍，上下文里出现两条一样的用户发言。
+        self._steer.pop(task_id, None)
         self._running.add(task_id)
         try:
             await self._worker.run(
@@ -417,11 +444,31 @@ class InProcessControlPlane:
             )
         finally:
             self._running.discard(task_id)
-            self._steer.pop(task_id, None)
 
     def pending_steer(self, task_id: str) -> list[str]:
         """排队中的 steer 消息（R6）。worker 每步开始前会把它们合并进上下文。"""
         return list(self._steer.get(task_id, []))
+
+    def _steer_target(self, active: list[Task]) -> Task | None:
+        """这句话该排给哪个任务（R6）。没有能收的就返回 None，调用方按「新建 task」走。
+
+        两条判据：
+
+        1. **只认本进程接手过的**（`_owned`）。`list_active_tasks` 读的是库，杀进程
+           重启后上一批任务还挂在 `working` 上，谁也不会再领它们。
+        2. **优先给正在跑的那个**。它的 messages 在任务开跑那一刻就定型了，不合并
+           进去就看不到这句话；还躺在队列里的任务不需要 steer —— 它开跑时
+           `_build_messages` 会从 transcript 里读到（见 `_dispatch_task`）。
+
+        多个候选时取最后创建的：§3.2 `SessionStore.list_active_tasks` 只承诺
+        `status in (created, planning, working)`，**没承诺返回顺序**，所以按
+        `created_at` 自己排，不吃 SqliteSessionStore 那句 `ORDER BY`。
+        """
+        owned = [t for t in active if t.id in self._owned]
+        if not owned:
+            return None
+        running = [t for t in owned if t.id in self._running]
+        return max(running or owned, key=lambda t: (t.created_at, t.id))
 
     def _drain_steer(self, task_id: str) -> list[str]:
         pending = self._steer.pop(task_id, [])
