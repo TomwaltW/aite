@@ -41,18 +41,28 @@ from .api import FeishuApiClient
 from .cards import build_checklist_card, build_markdown_card, dumps_card
 from .connection import LarkWSConnection, RawEventHandler, WSConnection, backoff_delay
 from .errors import PlatformError
-from .normalize import extract_text, normalize, sender_kind_of
+from .normalize import extract_text, normalize, sender_kind_of, to_datetime
 
 logger = logging.getLogger(__name__)
 
 #: §3.2：`on_event` 必须在 1s 内返回。超了不拦（拦了会丢事件），但要吼一声。
 ON_EVENT_BUDGET_SEC = 1.0
 
-#: `ReactionKind` → 飞书表情 key。
-#: ⚠️ 飞书的 emoji_type 是一份固定清单，M1 要的是「👀 类表情」。这里三个 key
-#: 需要在真实测试群里点一次确认（见回执「与附录 A 不一致」一节）；
-#: 换 key 只改这张表，不牵动任何调用方。
-REACTION_EMOJI: dict[str, str] = {"ack": "EYES", "done": "DONE", "fail": "CRY"}
+#: 「表情文案说明」里确实存在的 emoji_type，只列本模块可能用到的几个。
+#: 测试拿它兜住「别再往 REACTION_EMOJI 里写一个清单外的 key」。
+#: https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+KNOWN_EMOJI_TYPES = frozenset({"OnIt", "DONE", "CRY", "GLANCE", "THUMBSUP", "MUSCLE", "OK"})
+
+#: `ReactionKind` → 飞书表情 key（「添加消息表情回复」的 `reaction_type.emoji_type`）。
+#: 取值必须落在官方那份固定清单里，不在清单里的会被打回 `231001 表情类型不合法`：
+#: https://open.feishu.cn/document/server-docs/im-v1/message-reaction/create
+#:
+#: T16 拿清单逐个核过：`DONE` / `CRY` 在清单里；附录 A 时期写的 `EYES` **不在** ——
+#: 有 `eyes` 的是云文档高亮块那套小写枚举，跟消息表情回复不是一套，照原样发上去
+#: R7 的每一次 ack 都会 400。换成清单里的 `OnIt`，语义正好是「收到，正在处理」。
+#: 想要字面 👀 的话清单里还有 `GLANCE`，但文档只给图不给文案，哪个更像只能在
+#: 真实群里点一次看；换 key 只改这张表，不牵动任何调用方。
+REACTION_EMOJI: dict[str, str] = {"ack": "OnIt", "done": "DONE", "fail": "CRY"}
 
 #: 「上传文件」接口的 file_type 取值，按扩展名挑；认不出就 stream。
 _FILE_TYPE_BY_EXT = {
@@ -497,11 +507,9 @@ def _to_history_message(item: dict[str, Any]) -> HistoryMessage:
 
 
 def _history_created_at(item: dict[str, Any]) -> datetime:
-    value = item.get("create_time")
-    try:
-        return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
-    except (TypeError, ValueError):
-        return datetime.now(tz=UTC)
+    # 「获取会话历史消息」的 create_time 文档写的是毫秒，但 to_datetime 按量级自己判，
+    # 跟事件面共用一套解析，省得哪天两边口径又分叉。
+    return to_datetime(item.get("create_time")) or datetime.now(tz=UTC)
 
 
-__all__ = ["ON_EVENT_BUDGET_SEC", "REACTION_EMOJI", "FeishuPlatform"]
+__all__ = ["ON_EVENT_BUDGET_SEC", "REACTION_EMOJI", "KNOWN_EMOJI_TYPES", "FeishuPlatform"]

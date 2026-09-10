@@ -13,6 +13,7 @@ import pytest
 import respx
 
 from aite.adapters.feishu import FeishuApiClient, FeishuPlatform
+from aite.adapters.feishu.platform import KNOWN_EMOJI_TYPES, REACTION_EMOJI
 from aite.contracts import OutboundFile, OutboundText
 
 DOMAIN = "https://open.feishu.cn"
@@ -251,7 +252,20 @@ async def test_add_reaction_posts_an_emoji(kind: str) -> None:
         request = route.calls.last.request
         assert request.method == "POST"
         assert request.url.path == f"/open-apis/im/v1/messages/{ROOT_MESSAGE_ID}/reactions"
-        assert json.loads(request.content)["reaction_type"]["emoji_type"]
+        emoji = json.loads(request.content)["reaction_type"]["emoji_type"]
+        assert emoji in KNOWN_EMOJI_TYPES
+
+
+def test_every_reaction_emoji_is_on_the_official_list() -> None:
+    """T16：emoji_type 是一份固定清单，清单外的值平台回 `231001 表情类型不合法`。
+
+    附录 A 时期写的 `EYES` 就不在清单上（那是云文档高亮块那套小写枚举）。
+    https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce
+    """
+    assert set(REACTION_EMOJI) == {"ack", "done", "fail"}
+    unknown = sorted(set(REACTION_EMOJI.values()) - KNOWN_EMOJI_TYPES)
+    assert not unknown, f"这些 emoji_type 不在官方清单里：{unknown}"
+    assert "EYES" not in REACTION_EMOJI.values()
 
 
 # ---------------------------------------------------------------------------
