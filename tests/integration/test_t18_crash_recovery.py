@@ -130,7 +130,10 @@ async def test_crash_does_not_block_new_work_in_the_same_thread(config):
 
     app2 = make_app(config, reply="这次答上了。")
     async with running_app(app2):
-        assert [t.id for t in await app2.store.recover_orphan_tasks()] == [old_id]
+        # 起飞时 run_app 已经替你收过一遍了（T22，aite/app.py 的 _recover_orphans），
+        # 所以这里再问就该是干净的 —— 僵尸已经落到 failed 上。
+        assert await app2.store.recover_orphan_tasks() == []
+        assert (await app2.store.get_task(old_id)).status is TaskStatus.failed
 
         await app2.platform.emit(
             make_event(event_id="e9", text="接着上面那个问题", mentioned=False,
@@ -140,7 +143,9 @@ async def test_crash_does_not_block_new_work_in_the_same_thread(config):
         new_task = (await app2.store.list_active_tasks(CHAT))[0]
         assert new_task.task_no == "#A2" != old_no          # 新号，不复用僵尸那个
 
-        await wait_until(lambda: app2.platform.count("send_text") == 1, what="新任务交付")
+        # 认那句新回复，别数 send_text 的条数：T22 之后起飞会先给僵尸回一帖
+        # （「已终止，请重新发起」），计数里早就有它了，数条数会在新任务开跑前就满足。
+        await wait_until(lambda: "这次答上了。" in app2.platform.texts(), what="新任务交付")
 
         old_task = await app2.store.get_task(old_id)
         assert new_task.session_id == old_task.session_id   # 同一个会话，话题锚点没断
