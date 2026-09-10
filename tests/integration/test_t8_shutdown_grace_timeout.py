@@ -8,7 +8,10 @@
 * 沙箱还回去了；
 * `store.close()` 照样走到。
 
-第 3 条在纯 `SandboxPort` 上今天做不到，见本文件末尾那条 xfail 与回执 D-1 / D-2。
+第 3 条曾经在纯 `SandboxPort` 上做不到（回执 D-1 / D-2 记的就是这个缺陷），
+本文件末尾那条用例当时挂着 strict xfail。T7 的组装补上了「宽限期超时先把在飞的任务
+抄进 stranded、再逐个走 `plane.cancel_task`」的兜底，T11 又给 `cancel_task` 补上了
+证据链 finalize —— 三条现在都成立，xfail 已摘。
 """
 import asyncio
 
@@ -119,18 +122,14 @@ async def test_grace_timeout_survives_a_protocol_only_sandbox(config):
     assert model.hold_ticks_yielded == frozen
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "已知缺陷（回执 D-2）：宽限期超时时 run_app 取消 run_forever，但 asyncio 取消"
-        "不会走到 AgentWorker._cancel() —— 那条路只由 is_cancelled() 触发。于是沙箱不还、"
-        "任务状态停在 working（重启后一直挂在 !status 上）、证据链也没 finalize。"
-        "C-TΩ-1 括号里那句「worker 的 cancel 路径会还沙箱、把卡片置 cancelled」不成立："
-        "DockerSandbox 靠协议外的 aclose() 兜住了沙箱，任务状态与证据则谁都没兜。"
-    ),
-)
 async def test_cancelled_task_should_land_on_cancelled_and_return_its_sandbox(config):
-    """这一条钉的是「应该怎样」。今天它是红的 —— 修好之后请把 xfail 摘掉。"""
+    """这一条钉的是「应该怎样」，钉的是被硬取消的任务也得善终。
+
+    曾经是 strict xfail：asyncio 取消不会走到 `AgentWorker._cancel()`（那条路只由
+    `is_cancelled()` 触发），于是沙箱不还、任务状态停在 working、证据链也没 finalize。
+    现在两头都补上了 —— `run_app` 的退出序列把在飞的任务转交 `plane.cancel_task`，
+    `cancel_task` 自己给证据链收口。三条断言一起看，别只修最先炸的那一条。
+    """
     platform = GatedPlatform()
     model = RecordingModel(STUCK_SCRIPT)
     sandbox = FakeSandbox()          # 只有 SandboxPort，没有 aclose 兜底
