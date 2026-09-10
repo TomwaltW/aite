@@ -184,6 +184,70 @@ async def test_dropping_a_line_breaks_verify(config):
     assert FileEvidenceWriter(config.storage.evidence_dir).verify(task_id) is False
 
 
+#: 停在第 1 次 chat 上不出牌：让任务 A 一直占着那个单 worker，
+#: 后面排队的任务 B 就确定性地停在队列里，谁也没在跑它。
+HOLD_FOREVER = [final_step("永远到不了这一句。", hold_ticks=10**9)]
+
+
+async def test_stopped_task_that_never_ran_still_gets_a_manifest(config):
+    """`!stop` 掉一个**还没被 worker 领走**的任务，证据链照样要收口。
+
+    这条路不过 `AgentWorker._finish()` —— 任务不在 worker 手里，收尾全在
+    `InProcessControlPlane.cancel_task()` 的「不在跑」分支。少了 finalize 的话盘上没有
+    manifest.json、库里 `Task.evidence_root_hash` 留空，§2.4 的 `evidence_show.py`
+    和卡片上的证据按钮就都指了个空。
+
+    P0 是单 worker：任务 A 停在模型里不出牌，任务 B 就一直排在队列上。
+    """
+    platform = GatedPlatform()
+    model = RecordingModel(HOLD_FOREVER)
+    app = build_app(config, platform=platform, model=model, sandbox=FakeSandbox())
+    async with running_app(app, shutdown_grace_sec=0.05, exit_timeout=5.0):
+        await platform.emit(make_event(event_id="e1", text="干个收不完的活"))
+        await wait_until(lambda: model.holds >= 1, what="任务 A 被 worker 领走、停在模型里")
+        task_a = (await app.store.list_active_tasks(CHAT))[0]
+
+        # 任务 B：换一条消息 root，于是是新会话新任务，而不是给 A 的 steer
+        await platform.emit(make_event(event_id="e2", text="再干一件", message_id="om_2"))
+        await wait_until(lambda: app.plane.pending == 1, what="任务 B 排进队列")
+        pending = [t for t in await app.store.list_active_tasks(CHAT) if t.id != task_a.id]
+        assert len(pending) == 1, f"应当只有任务 B 在等派发，实际 {len(pending)} 个"
+        task_b = pending[0]
+
+        await platform.emit(
+            make_event(event_id="e3", text=f"!stop {task_b.task_no}", message_id="om_3")
+        )
+        await wait_until(
+            lambda: manifest_path(config, task_b.id).is_file(), what="任务 B 的 manifest 落盘"
+        )
+        stopped = await app.store.get_task(task_b.id)
+
+    assert stopped is not None
+    assert stopped.status is TaskStatus.cancelled
+
+    # 证据链最后一条就是 cancelled，manifest 的 root_hash 与它对得上
+    events = read_events(config, task_b.id)
+    assert events[-1].kind is EvidenceKind.cancelled
+    manifest = read_manifest(config, task_b.id)
+    assert manifest["root_hash"] == events[-1].hash
+    assert manifest["event_count"] == len(events)
+    assert manifest["task_id"] == task_b.id
+    assert manifest["session_id"] == task_b.session_id
+    assert manifest["task_no"] == task_b.task_no
+    assert manifest["created_by"] == "ou_user"
+    assert manifest["contract_version"] == CONTRACT_VERSION
+
+    # root_hash 得真的进库 —— cancel_task 里那次 update_task 在 finalize 之前
+    from_disk = await read_task_from_disk(config, task_b.id)
+    assert from_disk is not None
+    assert from_disk.evidence_root_hash == manifest["root_hash"]
+
+    # manifest 的 model 与库里那份同源（worker 收尾的那条路也是这个口径）
+    assert manifest["model"] == from_disk.model != ""
+
+    assert FileEvidenceWriter(config.storage.evidence_dir).verify(task_b.id) is True
+
+
 async def test_evidence_stays_inside_tmp_path(config):
     """整轨的硬约束：一个字节都不许写进仓库的 data/。"""
     task_id, _ = await _run_one_task(config)

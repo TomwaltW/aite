@@ -77,6 +77,7 @@ class InProcessControlPlane:
         self._platform = platform
         self._evidence = evidence
         self._config = config
+        self._model = model
         self._sandbox = sandbox
         self._gateway = gateway
         self._clock = clock
@@ -481,6 +482,7 @@ class InProcessControlPlane:
                             status="cancelled",
                         ),
                     )
+            await self._finalize_evidence(task, session)
         if notify:
             await self._platform.send_text(
                 OutboundText(
@@ -491,6 +493,34 @@ class InProcessControlPlane:
                 )
             )
         return task
+
+    async def _finalize_evidence(self, task: Task, session: Session | None) -> None:
+        """给证据链收口 —— 与 worker 的 `AgentWorker._finish()` 同一件事，manifest 字段照抄。
+
+        没在跑的任务 worker 不会再收尾，这一步只能在这里做；不做的话没有 manifest.json、
+        `Task.evidence_root_hash` 留空，§2.4 的 `evidence_show.py` 和卡片上的证据按钮
+        都拿不到 root_hash。
+
+        `finalize` 每个任务只该走一次：worker 收过尾的任务 `evidence_root_hash` 已经有值，
+        再 finalize 一遍会把它算进这条 cancelled 之后，manifest 就和 worker 写的那份对不上了。
+        """
+        if task.evidence_root_hash:
+            return
+        # Task.model 建任务时取的是 config.model.model（默认空串），worker 开跑才覆盖成
+        # 真模型名。没被领走就被停的任务遇上空配置就还是空的，退回本进程装着的模型名 ——
+        # 对齐 `_finish()` 里那句 `task.model or self._model.name`。
+        task.evidence_root_hash = await self._evidence.finalize(
+            task.id,
+            {
+                "session_id": session.id if session is not None else task.session_id,
+                "task_no": task.task_no,
+                "created_by": task.created_by,
+                "model": task.model or str(getattr(self._model, "name", "") or ""),
+            },
+        )
+        # 上面那次 update_task 在 finalize 之前，root_hash 得靠这一次才进库。
+        task.updated_at = datetime.now(UTC)
+        await self._store.update_task(task)
 
     async def _release_gateway_sandbox(self, task_id: str) -> None:
         """让 Gateway 释放它给这个 task 建的沙箱并撤掉 token。
