@@ -7,7 +7,7 @@
   "chat_id": "oc_chat_p0_demo_0001",
   "chat_type": "group",
   "sender_id": "ou_other_bot_000000000000000000001",
-  "sender_kind": "app",
+  "sender_kind": "bot",
   "sender_name": null,
   "text": "【日报机器人】昨日 GMV 1234 万",
   "raw_text": "@_user_1 【日报机器人】昨日 GMV 1234 万",
@@ -38,7 +38,7 @@
           "user_id": "",
           "open_id": "ou_other_bot_000000000000000000001"
         },
-        "sender_type": "app",
+        "sender_type": "bot",
         "tenant_key": "tk_p0_demo"
       },
       "message": {

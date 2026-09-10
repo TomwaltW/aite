@@ -14,7 +14,7 @@
         "user_id": "",
         "open_id": "ou_other_bot_000000000000000000001"
       },
-      "sender_type": "app",
+      "sender_type": "bot",
       "tenant_key": "tk_p0_demo"
     },
     "message": {

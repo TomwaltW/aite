@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from aite.adapters.feishu import normalize
+from aite.adapters.feishu.normalize import to_datetime
 from aite.contracts import EventKind, NormalizedEvent, SenderKind
 
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "feishu"
@@ -226,3 +227,86 @@ def test_at_someone_else_only_is_not_mentioned() -> None:
     assert event is not None
     assert event.mentioned is False
     assert event.text == "@李四 你看下"
+
+
+# ---------------------------------------------------------------------------
+# T16：拿官方文档核对出来的三条
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("ticks", "why"),
+    [
+        ("1788916020000", "im.message.receive_v1 的例子给的是 13 位毫秒"),
+        ("1788916020000000", "事件订阅概述与 card.action.trigger 的例子给的是 16 位微秒"),
+        (1788916020000, "整数形式的毫秒"),
+        (1788916020000000, "整数形式的微秒"),
+    ],
+)
+def test_timestamp_unit_is_detected_by_magnitude(ticks: object, why: str) -> None:
+    """毫秒和微秒都要落到同一个时刻 —— 官方文档两种单位都出现过（见 to_datetime）。"""
+    parsed = to_datetime(ticks)
+    assert parsed is not None, why
+    assert parsed.isoformat() == "2026-09-09T01:07:00+00:00", why
+
+
+def test_card_action_survives_a_microsecond_timestamp() -> None:
+    """card.action.trigger 的 header.create_time 是微秒。
+
+    当成毫秒除会得到五万年后的秒数，`fromtimestamp` 当场抛 —— 而 `_dispatch_raw`
+    没有兜底，`!stop` / `证据` 按钮会整条丢掉。这条就是钉住它不许回去。
+    """
+    raw = load("card_action_stop")
+    assert raw["header"]["create_time"] == "1788916020000000", "fixture 该是 16 位微秒"
+
+    event = normalize(raw, bot_open_id=BOT_OPEN_ID)
+    assert event is not None
+    assert event.occurred_at.year == 2026
+    assert event.occurred_at.isoformat() == "2026-09-09T01:07:00+00:00"
+
+
+def test_post_at_segment_carries_a_placeholder_not_an_open_id() -> None:
+    """post 的 at 段里 user_id 是 `@_user_N` 序号，身份要回 mentions 里查。
+
+    https://open.feishu.cn/document/server-docs/im-v1/message-content-description/message_content
+    照 open_id 直接比永远不相等，@ 会被漏判成 False。
+    """
+    raw = load("message_post_with_image")
+    at = json.loads(raw["event"]["message"]["content"])["content"][0][0]
+    assert at["tag"] == "at"
+    assert at["user_id"] == "@_user_1", "fixture 要按文档写成占位序号"
+
+    event = normalize(raw, bot_open_id=BOT_OPEN_ID)
+    assert event is not None
+    assert event.mentioned is True                              # 靠 mentions 认出来的
+    assert "@_user_" not in event.text                          # 占位符不能漏给模型
+    assert "@_user_1" in (event.raw_text or "")                 # raw_text 与 text 类消息同口径
+
+
+def test_post_at_placeholder_without_mentions_cannot_identify_anyone() -> None:
+    """占位序号 + mentions 缺失 = 查无此人。不能炸，也不能把占位符漏给模型。"""
+    raw = load("message_post_with_image")
+    raw["event"]["message"].pop("mentions")
+
+    event = normalize(raw, bot_open_id=BOT_OPEN_ID)
+    assert event is not None
+    assert event.mentioned is False
+    assert "@_user_" not in event.text
+
+
+def test_post_at_with_a_raw_open_id_is_still_recognised() -> None:
+    """兜底分支：某个客户端真在 at 段塞了 open_id（文档说不该有），也得认出来。
+
+    这条走的是 `_post_mentions_bot` —— mentions 里没有机器人时它才有机会开口。
+    """
+    raw = load("message_post_with_image")
+    message = raw["event"]["message"]
+    message.pop("mentions")
+    content = json.loads(message["content"])
+    content["content"][0][0]["user_id"] = BOT_OPEN_ID          # 老形状：直接是 open_id
+    message["content"] = json.dumps(content, ensure_ascii=False)
+
+    event = normalize(raw, bot_open_id=BOT_OPEN_ID)
+    assert event is not None
+    assert event.mentioned is True
+    assert BOT_OPEN_ID not in event.text                        # 别把 open_id 吐给模型
+    assert event.text.startswith("本周复盘")

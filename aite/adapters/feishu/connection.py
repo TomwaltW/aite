@@ -59,7 +59,7 @@ class WSConnection(Protocol):
 class LarkWSConnection:
     """把 `lark_oapi.ws.Client` 包成 `WSConnection`。
 
-    两处不得不碰 SDK 私有面，都写在这里，方便日后 SDK 补了公开 API 就替换掉：
+    三处不得不碰 SDK 私有面，都写在这里，方便日后 SDK 补了公开 API 就替换掉：
 
     * `ws.Client.start()` 是**阻塞**的，而且它 `loop.run_until_complete(...)` 用的是
       模块级全局 loop —— 那个 loop 在 import 时就建好了，跟 `asyncio.run()` 起的
@@ -68,6 +68,7 @@ class LarkWSConnection:
       会挂到一个根本没在跑的 loop 上，连上了也收不到任何事件。
     * 断线没有回调可用（`auto_reconnect=False` 时 `_receive_message_loop` 只是把异常
       吞进 task 里），所以 `wait_closed()` 用轮询 `_conn is None` 来判。
+    * 卡片回传帧要自己接回来，见 `route_card_frames_as_events`。
     """
 
     def __init__(
@@ -147,6 +148,7 @@ class LarkWSConnection:
         self._loop = asyncio.get_running_loop()
         ws_client.loop = self._loop
         self._client = self._build_client()
+        route_card_frames_as_events(self._client)
         await self._client._connect()
         self._ping_task = asyncio.create_task(self._client._ping_loop())
 
@@ -170,6 +172,42 @@ class LarkWSConnection:
             except Exception as exc:  # pragma: no cover - 关连接的失败没什么可做的
                 logger.warning("feishu.disconnect_failed err=%s", exc)
             self._client = None
+
+
+def route_card_frames_as_events(client: Any) -> None:
+    """把长连接上的卡片回传帧接回事件分发 —— 不接的话 SDK 会直接丢掉。
+
+    lark-oapi 1.7.3 的 `ws/client.py::_handle_data_frame` 里，`MessageType.CARD`
+    那一支是一句光秃秃的 `return`：卡片回传帧连分发都进不去，`!stop` / `证据`
+    按钮点下去服务端什么都不会发生。`MessageType.CARD` 在整个 SDK 里**只出现这一处**，
+    没有第二条路能接到它。
+
+    偏偏事件帧那一支认得 `card.action.trigger`：
+    `EventDispatcherHandler._do_without_validation()` 拿 `header.event_type` 拼出
+    `p2.card.action.trigger` 去查 `_processorMap`，而那正是 `_build_client()` 里
+    `register_p2_customized_event(EVENT_CARD_ACTION, ...)` 写进去的 key。
+
+    所以这里只做一件事：把 CARD 帧的 type 头改写成 event，再交回 SDK 原来的处理。
+    只碰 CARD 帧 —— 平台若本来就用 EVENT 帧发卡片回传，或 SDK 哪天自己补上这一支，
+    这段就是一次空过路，不会多出第二种行为。
+
+    值得多一句：官方明说回调是**同步**的、**不提供补推**，超时未响应即算这次失败。
+    也就是说丢掉的卡片回传永远不会重来，不像事件还有重推兜底。
+    https://open.feishu.cn/document/event-subscription-guide/callback-subscription/callback-overview
+    """
+    from lark_oapi.ws.const import HEADER_TYPE
+    from lark_oapi.ws.enum import MessageType
+
+    original = client._handle_data_frame
+
+    async def _handle_data_frame(frame: Any) -> None:
+        for header in frame.headers:
+            if header.key == HEADER_TYPE and header.value == MessageType.CARD.value:
+                header.value = MessageType.EVENT.value
+                break
+        await original(frame)
+
+    client._handle_data_frame = _handle_data_frame
 
 
 def _log_dispatch_failure(future: Any) -> None:
