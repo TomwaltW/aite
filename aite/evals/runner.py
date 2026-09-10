@@ -24,8 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..contracts import CONTRACT_VERSION
-from ..testing import FakeModel
 from .checks import run_checks
+from .protocol_probe import analyze
 from .scenario import Scenario
 from .wiring import (
     Deps,
@@ -54,6 +54,9 @@ class ScenarioResult:
     stats: dict[str, int] = field(default_factory=dict)
     settled_by: str = ""
     traceback: str | None = None
+    #: §14.2 的协议出牌报告。只有开了 --protocol-report 才非空 —— 默认 JSON 摘要
+    #: 一个字段都不多，T4 的 CI 读的还是原来那份。
+    protocol: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         row: dict[str, Any] = {
@@ -70,6 +73,8 @@ class ScenarioResult:
             row["settled_by"] = self.settled_by
         if self.stats:
             row["stats"] = self.stats
+        if self.protocol:
+            row["protocol"] = self.protocol
         return row
 
 
@@ -146,12 +151,23 @@ async def _execute(sc: Scenario, deps: Deps, plane_factory: PlaneFactory | None 
     return settled_by
 
 
+def _protocol(deps: Deps, wanted: bool) -> dict[str, Any]:
+    """协议报告。装置本身出错也只算「报告没出来」，绝不改场景的成败结论。"""
+    if not wanted:
+        return {}
+    try:
+        return analyze(deps)
+    except Exception as exc:
+        return {"analyze_error": brief(exc)}
+
+
 async def run_scenario(
     sc: Scenario,
     *,
-    model: FakeModel | None = None,
+    model: Any = None,
     plane_factory: PlaneFactory | None = None,
     want_traceback: bool = False,
+    collect_protocol: bool = False,
 ) -> ScenarioResult:
     started = time.monotonic()
     deps = build_deps(sc, model=model)
@@ -168,6 +184,7 @@ async def run_scenario(
             duration_ms=int((time.monotonic() - started) * 1000),
             stats=deps.stats(),
             traceback=tb,
+            protocol=_protocol(deps, collect_protocol),
         )
     except Exception as exc:                       # 兜底：绝不让异常栈冒出去
         tb = traceback.format_exc() if want_traceback else None
@@ -179,6 +196,7 @@ async def run_scenario(
             duration_ms=int((time.monotonic() - started) * 1000),
             stats=deps.stats(),
             traceback=tb,
+            protocol=_protocol(deps, collect_protocol),
         )
 
     try:
@@ -195,6 +213,7 @@ async def run_scenario(
         duration_ms=int((time.monotonic() - started) * 1000),
         stats=deps.stats(),
         settled_by=settled_by,
+        protocol=_protocol(deps, collect_protocol),
     )
 
 
@@ -207,13 +226,18 @@ async def run_suite(
     model_factory: Any = None,
     plane_factory: PlaneFactory | None = None,
     want_traceback: bool = False,
+    collect_protocol: bool = False,
 ) -> SuiteResult:
     results = []
     for sc in scenarios:
         model = model_factory() if model_factory is not None else None
         results.append(
             await run_scenario(
-                sc, model=model, plane_factory=plane_factory, want_traceback=want_traceback
+                sc,
+                model=model,
+                plane_factory=plane_factory,
+                want_traceback=want_traceback,
+                collect_protocol=collect_protocol,
             )
         )
     return SuiteResult(suite=suite, platform=platform, model=model_name, results=results)

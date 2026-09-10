@@ -31,6 +31,8 @@ from ..testing import (
     FakeSessionStore,
     FakeToolGateway,
 )
+from ..testing.fake_store import ACTIVE_STATUSES
+from .protocol_probe import ModelProbe
 from .scenario import EventAfter, Scenario
 
 #: 去哪儿找 ControlPlane
@@ -73,7 +75,9 @@ class Deps:
 
     config: AiteConfig
     platform: FakePlatform
-    model: FakeModel
+    #: 永远是探针（见 build_deps）：它记账每一步出牌，也补上了 live 模型客户端没有的
+    #: `calls` / `call_count` —— 下面 activity() / stats() 要这两样
+    model: ModelProbe
     sandbox: FakeSandbox
     gateway: FakeToolGateway
     store: FakeSessionStore
@@ -97,18 +101,31 @@ class Deps:
         }
 
 
-def build_deps(sc: Scenario, *, model: FakeModel | None = None) -> Deps:
-    """按场景里的 fixture 造一套替身。"""
+def build_deps(sc: Scenario, *, model: Any = None) -> Deps:
+    """按场景里的 fixture 造一套替身。
+
+    `model` 不给就按场景的 `model_script` 造 `FakeModel`；`--model live` 会从这里塞进来
+    一个 `OpenAICompatModel`。**两种都统一套一层 `ModelProbe`**：
+
+    * 这是 `--model live` 能跑起来的前提 —— `activity()` 读 `model.calls`、`stats()` 读
+      `model.call_count`，真模型客户端两样都没有（§3.2 `ModelPort` 里也确实没这两条，
+      它们是替身的记账面）。套探针之前，live 连第一次网络调用都到不了就 AttributeError。
+    * 顺带把每一步出牌记下来，`protocol_probe.analyze()` 据此出 §14.2 的实测报告。
+
+    探针是透明的：未知属性透传给被包的模型，`tool_names_emitted()` / `call_count` 按
+    实际观测到的出牌算，scripted 路径的断言一条都不用改。
+    """
     config = AiteConfig.model_validate({"platform": "fake", **sc.config})
     platform = FakePlatform(
         history=sc.build_history(), documents=sc.build_documents(), files=sc.build_files()
     )
     sandbox = FakeSandbox(exec_script=list(sc.sandbox.exec_script))
     gateway = FakeToolGateway(platform=platform, sandbox=sandbox, sandbox_image=config.sandbox.image)
+    inner = model if model is not None else FakeModel(list(sc.model_script))
     return Deps(
         config=config,
         platform=platform,
-        model=model if model is not None else FakeModel(list(sc.model_script)),
+        model=inner if isinstance(inner, ModelProbe) else ModelProbe(inner),
         sandbox=sandbox,
         gateway=gateway,
         store=FakeSessionStore(),
@@ -206,6 +223,32 @@ async def build_control_plane(deps: Deps) -> Any:
 # 驱动到静默
 # --------------------------------------------------------------------------
 
+def model_busy(deps: Deps) -> bool:
+    """模型这条路上还有活没干完？—— `settle()` 的静默判据要减掉这一段。
+
+    `Deps.activity()` 是个「变没变」的探测器，看不见长时间的 await。脚本化替身瞬时
+    返回，这从来没露过馅；**真模型一次 chat 动辄几秒**，期间一个替身都不会被碰 ——
+    照 150ms 的静默判据，系统在第一次回包之前就被判定「不干活了」，任务当场被
+    `stop_loop` 取消。`--model live` 以前就是这么跑不起来的（另一半是 `Deps` 读
+    `model.calls` / `model.call_count`，见 `build_deps`）。
+
+    两种情况算忙：
+
+    1. 有 chat 还没返回（`ModelProbe.in_flight`）；
+    2. 上一发抛了、且还有任务没落终态 —— worker 正睡在 §3.3 的 2s / 5s 退避里等着
+       重试。重试用尽时 worker 把任务判 failed，任务一落终态这里就不再算忙，所以
+       **不用在评测侧写死退避时长**（那个数是 worker 的，抄一份迟早对不上）。
+
+    对 scripted 路径是恒等变换：替身瞬时返回，`in_flight` 只在同一个 tick 内非零。
+    """
+    model = deps.model
+    if getattr(model, "in_flight", 0):
+        return True
+    if not getattr(model, "awaiting_retry", False):
+        return False
+    return any(t.status in ACTIVE_STATUSES for t in deps.store.tasks.values())
+
+
 def plane_id(plane: Any) -> str:
     """报告里用它指认「接到的是谁」，省得只看到一句 NotImplementedError。"""
     cls = type(plane)
@@ -256,7 +299,7 @@ async def settle(
             break
         await asyncio.sleep(poll_ms / 1000)
         now_activity = deps.activity()
-        if now_activity != last:
+        if now_activity != last or model_busy(deps):
             last, quiet_since = now_activity, loop.time()
             continue
         if (loop.time() - quiet_since) * 1000 >= idle_ms:
