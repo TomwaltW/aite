@@ -11,6 +11,7 @@ store 最后关。M6 说的是 `systemctl restart` / 杀进程：没有收尾、
 `run_app` 的退出序列是被跳过的那部分 —— 那正是崩溃时不会发生的事。
 """
 import asyncio
+import json
 import os
 import sqlite3
 import stat
@@ -171,14 +172,14 @@ async def test_verify_rejects_a_torn_last_line(tmp_path):
     assert FileEvidenceWriter(tmp_path / "evidence").verify("t-torn") is False   # 换实例也一样
 
 
-async def test_append_after_a_torn_line_raises_on_a_fresh_writer(tmp_path):
-    """**钉住现状（真 bug）**：崩溃留下残行后，重启的新进程一碰这个任务就炸。
+async def test_append_after_a_torn_line_recovers_on_a_fresh_writer(tmp_path):
+    """崩溃留下残行后，重启的新进程能接着写 —— §3.3 的收尾链不再自锁。
 
-    `verify()` 有 try/except 挡住了坏行，但 `_read_events()` 没有 —— 于是
-    `append()` / `finalize()` 直接抛 pydantic `ValidationError`。
-    按 §3.3 本该「task failed + 回帖 + evidence failed 事件」，可**写那条 failed 事件
-    本身就是炸的那个操作**，收尾链在这里断掉。修法在 `aite/evidence/writer.py`
-    （不在 T18 白名单），见回执。
+    T18 时这里是个真 bug：`verify()` 有 try/except 挡住坏行，`_read_events()` 没有，
+    于是 `append()` / `finalize()` 直接抛 pydantic `ValidationError`。按 §3.3 本该
+    「task failed + 回帖 + evidence failed 事件」，可**写那条 failed 事件本身就是
+    炸的那个操作**，越出事越写不进去。T21 在写入侧加了 `_heal_torn_tail`：
+    `append` / `finalize` 进门先把没写完的末段收拾掉，再接着往下写。
     """
     root = tmp_path / "evidence"
     writer = FileEvidenceWriter(root)
@@ -186,27 +187,37 @@ async def test_append_after_a_torn_line_raises_on_a_fresh_writer(tmp_path):
     tear_last_line(writer, "t-cold")
 
     fresh = FileEvidenceWriter(root)                  # 重启后的新进程：_tip 缓存是空的
-    with pytest.raises(ValueError):                   # pydantic ValidationError 属 ValueError
-        await fresh.append("t-cold", EvidenceKind.failed, {"why": "crash"})
-    with pytest.raises(ValueError):
-        await FileEvidenceWriter(root).finalize("t-cold", {})
+    failed = await fresh.append("t-cold", EvidenceKind.failed, {"why": "crash"})
+    assert failed.seq == 1                            # 残行没写完，不占号
+    assert fresh.counters["evidence.torn_tail_dropped"] == 1   # 收拾这件事留了痕
+    assert fresh.verify("t-cold") is True             # 链是通的，不是「不炸但坏着」
+
+    # finalize 走的是同一条收拾路径（它也可能是崩溃后第一个被调到的）
+    other = FileEvidenceWriter(root)
+    assert await other.finalize("t-cold", {}) == failed.hash
+    manifest = json.loads(other.manifest_path("t-cold").read_text(encoding="utf-8"))
+    assert manifest["event_count"] == 2               # 那半行从来不是一条事件
 
 
-async def test_append_after_a_torn_line_corrupts_the_chain_on_a_hot_writer(tmp_path):
-    """**钉住现状（真 bug）**：`_tip` 还热时，新证据被直接接在残行后面，静默坏链。
+async def test_append_after_a_torn_line_keeps_the_chain_on_a_hot_writer(tmp_path):
+    """`_tip` 还热时也不再坏链 —— 磁盘满那一路：`write` 只落一半，进程还活着。
 
-    这一路不读文件，所以不会报错 —— 两条 JSON 挤在同一行，`verify()` 从此永远 False，
-    而写的人什么都不知道。真实触发点是磁盘满：`write` 只落了一半，进程还活着。
+    T18 时这里是个真 bug：这条路不读文件所以不报错，两条 JSON 挤在同一行，
+    `verify()` 从此永远 False 而写的人什么都不知道。T21 的挡法不依赖 `_tip`
+    是冷是热 —— `append` 每次都真去看文件末尾那一个字节。
     """
     writer = FileEvidenceWriter(tmp_path / "evidence")
     await writer.append("t-hot", EvidenceKind.task_created, {"a": 1})
     tear_last_line(writer, "t-hot")
 
-    await writer.append("t-hot", EvidenceKind.model_call, {"b": 2})   # 不炸，但是坏的
-    assert writer.verify("t-hot") is False
+    second = await writer.append("t-hot", EvidenceKind.model_call, {"b": 2})
+    assert second.seq == 1
+    assert writer.counters["evidence.torn_tail_dropped"] == 1
+    assert writer.verify("t-hot") is True
 
     lines = writer.events_path("t-hot").read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2 and lines[1].count('"task_id"') == 2       # 两条挤在一行
+    assert len(lines) == 2
+    assert all(line.count('"task_id"') == 1 for line in lines)     # 一行一条，不再挤
 
 
 # --------------------------------------------------------------------------
