@@ -6,6 +6,19 @@
 `run` 跑完打印 JSON 摘要，最后一行是 `passed k/10`。退出码：全过 0，否则 1。
 并行期间别的轨还没合进来，k 会是 0 —— 那时每个场景报的是「接不上 ControlPlane：…」
 这类人话原因，不是异常栈（§6 T4）。TΩ 阶段才要求 `passed 10/10` 且退出码 0（B8）。
+
+`--protocol-report` 是 §14.2 模型实测用的眼睛（T12）：
+
+    python -m aite.evals run evals/p0 --model live --protocol-report live-protocol.json
+
+它按 `aite/contracts/protocol.py` 逐步核对模型的出牌 —— 调了什么、参数合不合
+`ToolSpec.parameters`、有没有协议外的名字、几步到 final、§3.3 的兜底触没触发。
+**live 模式下 `expect` 判据必然大面积红，那是预期的**（判据是照 scripted 的台词写的，
+§3.8），要看的是这份报告。摘要写 stderr、完整 JSON 写文件，stdout 那份 JSON 摘要
+默认一个字段都不多 —— 不开这个开关，输出跟以前逐字节一样。
+
+`--timeout-scale` 把场景的两个等待上限一起放大：yaml 里那些秒数是照替身的尺度定的，
+真模型撑不下。`--model live` 默认就按 `LIVE_TIMEOUT_SCALE` 放大，不用每次手写。
 """
 from __future__ import annotations
 
@@ -16,11 +29,20 @@ import sys
 import traceback
 from pathlib import Path
 
+from .protocol_probe import render_digest
 from .runner import run_suite
-from .scenario import ScenarioError, load_suite
+from .scenario import Scenario, ScenarioError, load_suite
 
 PLATFORMS = ("fake",)
 MODELS = ("scripted", "live")
+
+#: `--model live` 时 `--timeout-scale` 的默认值。
+#:
+#: 场景 yaml 里的 `timeout_sec: 10` 和 `after_timeout_sec: 5` 是照替身的尺度定的 ——
+#: 脚本化模型瞬时返回，十秒够跑几十步。真模型一次调用就 2–20s，10s 连一步都不一定
+#: 收得回来，多步场景必然停在「10s 内没有停下来」。这个倍数把两个上限一起放大，
+#: **不改任何一份场景文件**（那些数字是 scripted 路径的验收面）。
+LIVE_TIMEOUT_SCALE = 12.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,7 +57,31 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", dest="json_out", metavar="PATH", help="把 JSON 摘要另存一份到文件")
     run.add_argument("--traceback", action="store_true", help="失败时把异常栈打到 stderr（默认不打）")
     run.add_argument("--config", default="config/aite.yaml", help="--model live 时读哪份配置")
+    run.add_argument(
+        "--protocol-report",
+        dest="protocol_report",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help="出一份协议出牌报告：摘要打 stderr，给了 PATH 就把完整 JSON 另存过去（§14.2）",
+    )
+    run.add_argument(
+        "--timeout-scale",
+        dest="timeout_scale",
+        type=float,
+        default=None,
+        metavar="K",
+        help=f"把场景的 timeout_sec / after_timeout_sec 一起乘 K（scripted 默认 1.0，"
+        f"live 默认 {LIVE_TIMEOUT_SCALE}）",
+    )
     return ap
+
+
+def _scale_timeouts(sc: Scenario, k: float) -> Scenario:
+    """按倍数放大一个场景的两个等待上限。只在内存里改，场景文件一个字都不动。"""
+    events = [e.model_copy(update={"after_timeout_sec": e.after_timeout_sec * k}) for e in sc.events]
+    return sc.model_copy(update={"timeout_sec": sc.timeout_sec * k, "events": events})
 
 
 def _live_model_factory(config_path: str):
@@ -70,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([s.name for s in scenarios], ensure_ascii=False, indent=2))
         return 0
 
+    scale = args.timeout_scale
+    if scale is None:
+        scale = LIVE_TIMEOUT_SCALE if args.model == "live" else 1.0
+    if scale != 1.0:
+        scenarios = [_scale_timeouts(s, scale) for s in scenarios]
+        print(f"场景等待上限 x{scale}（--timeout-scale）", file=sys.stderr)
+
     model_factory = None
     if args.model == "live":
         try:
@@ -78,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--model live 起不来：{type(exc).__name__}: {exc}", file=sys.stderr)
             return 2
 
+    want_protocol = args.protocol_report is not None
     result = asyncio.run(
         run_suite(
             scenarios,
@@ -86,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             model_name=args.model,
             model_factory=model_factory,
             want_traceback=args.traceback,
+            collect_protocol=want_protocol,
         )
     )
 
@@ -95,6 +150,27 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.json_out).write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+    if want_protocol:
+        rows = [(r.name, r.protocol) for r in result.results]
+        # 摘要走 stderr：stdout 得保持「一份 JSON + 最后一行 passed k/n」，
+        # check.sh 的 B8 和 T4 的 CI 都靠这两条读结果
+        print(render_digest(rows), file=sys.stderr)
+        if args.protocol_report:
+            Path(args.protocol_report).write_text(
+                json.dumps(
+                    {
+                        "suite": args.suite,
+                        "platform": args.platform,
+                        "model": args.model,
+                        "contract_version": payload["contract_version"],
+                        "scenarios": [{"name": n, **(p or {})} for n, p in rows],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
     if args.traceback:
         for r in result.results:
             if r.traceback:
