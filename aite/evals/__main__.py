@@ -85,11 +85,22 @@ def _scale_timeouts(sc: Scenario, k: float) -> Scenario:
 
 
 def _live_model_factory(config_path: str):
-    """--model live：拿真模型跑一遍，用于 §14.2 的模型实测。不属于 P0 验收路径。"""
+    """--model live：拿真模型跑一遍，用于 §14.2 的模型实测。不属于 P0 验收路径。
+
+    起飞前先把客户端建出来验一遍配置。`OpenAICompatModel.__init__` 什么都不校验，
+    `base_url` / `model` / 密钥环境变量是懒到第一次 `chat` 才查的 —— 不在这里拦，
+    配置缺一样就会变成：每个场景各自跑到第一次 chat 才抛 `ModelConfigError`，被
+    worker 的 §3.3 当成模型 5xx **白重试 2 次（2s + 5s）**，最后给用户一句
+    「模型服务暂不可用」。10 个场景就是 10 次 7 秒空等，而且真正的原因
+    （yaml 没填 / 环境变量没设）一个字都看不到。T17 实测撞的就是这一下。
+
+    建客户端不发网络请求，所以这里只判配置、不判端点通不通。
+    """
     from ..config import load_config
     from ..models import OpenAICompatModel
 
     cfg = load_config(config_path)
+    OpenAICompatModel(cfg.model)._ensure_client()
     return lambda: OpenAICompatModel(cfg.model)
 
 

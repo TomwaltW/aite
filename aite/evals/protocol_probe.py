@@ -54,6 +54,9 @@ if TYPE_CHECKING:                                     # 避免 wiring <-> protoc
 MAX_ARG_CHARS = 200
 #: 纯文本步骤在摘要里截到多长
 MAX_TEXT_CHARS = 160
+#: 同一张牌连着出几次才算「卡住了」。2 次多半还是正常探测（真模型实测里
+#: 连着两次 `list_files()` 是常态），3 次起才是原地打转。
+MIN_REPEAT_RUN = 3
 
 PROTOCOL_TOOL_NAMES: frozenset[str] = frozenset(t.name for t in ALL_MODEL_TOOLS)
 
@@ -416,11 +419,19 @@ def _retry_bursts(run: _Run) -> list[dict[str, Any]]:
 def _fallback_text_only(run: _Run) -> tuple[list[dict], list[dict]]:
     """区分 §3.3 纯文本兜底的两条分支。
 
-    * `steps==0` 视为 `final(reply=文本)`：这一轮到此为止，后面没有下一步了。
-    * `steps>0` 回 system 提示并计 1 步：下一次调用的 delta 里会多一条 system。
+    * `steps==0` 且文本非空 → 视为 `final(reply=文本)`，这一轮到此为止。
+    * 其余（`steps>0`，或第一步就回了空文本）→ 回 system 提示并计 1 步。
 
-    判据取的是「系统实际怎么反应」而不是「第几步」—— 一轮里可能夹着重试，按下标
-    数会数错；看下一步的 delta 里有没有 system 才是兜底真触发过的证据。
+    判据照抄 `AgentWorker._loop` 的那一行（`step_index == 0 and text`），因为
+    `run.steps` 已经滤掉了抛出去的重试，`enumerate` 的下标就是 worker 眼里的
+    `step_index`。**不能只看「下一步的 delta 里有没有 system」** —— 兜底之后
+    worker 立刻撞上 `max_steps`（或被取消）时压根没有下一次调用，那条 system
+    提示虽然进了 messages 却再也发不出去，光看 delta 会把 nudge 误报成 final。
+    T17 拿真模型跑 08_step_limit（`max_steps: 3`）就撞了这一下：第 3 步纯文本
+    走的是 nudge 分支、任务以「已达步数上限」failed，报告却说它兜成了 final。
+
+    system 提示的原文仍从下一步的 delta 里取，取不到就记 None —— 那正是
+    「提示生成了但没能再投给模型」这一种。
     """
     as_final: list[dict[str, Any]] = []
     nudged: list[dict[str, Any]] = []
@@ -431,11 +442,55 @@ def _fallback_text_only(run: _Run) -> tuple[list[dict], list[dict]]:
         nxt = steps[i + 1] if i + 1 < len(steps) else None
         system_rows = [] if nxt is None else [r for r in nxt.delta if r["role"] == "system"]
         row = {"run": run.run, "step": i, "text": _clip(o.text, MAX_TEXT_CHARS)}
-        if system_rows:
-            nudged.append({**row, "nudge": system_rows[-1]["content"]})
-        else:
+        if i == 0 and o.text.strip():
             as_final.append(row)
+        else:
+            nudged.append({**row, "nudge": system_rows[-1]["content"] if system_rows else None})
     return as_final, nudged
+
+
+def _repeat_loops(run: _Run) -> list[dict[str, Any]]:
+    """同一张牌连着出好几次 —— 真模型卡住时的典型姿态。
+
+    T17 实测 04_csv_to_chart：沙箱对每条不含 `savefig` 的代码都回
+    `exit_code=0` + 空 stdout，模型先合理地诊断了几步，然后对**逐字节相同**的
+    `run_python` 连发 31 次，一路烧到 `max_steps` 才停。
+
+    §3.3 的两条计数兜底都接不住这种：`invalid_args` 要参数不合 schema，
+    `sandbox` 要工具报错，而这里工具**返回的是 `ok=True`**，只是内容为空。
+    唯一接住它的是 `max_steps`，代价是烧满整整 max_steps 次模型调用。所以单独
+    标出来 —— 不然几十行一模一样的 `run_python(code)` 只能靠肉眼数。
+
+    签名把一轮里的 tool_call 按顺序摊平算（一步出多张牌时逐张算），只认**连续**
+    相同：中间插进别的调用说明模型还在换招，不算卡住。
+    """
+    flat: list[tuple[int, ToolCallObservation, str]] = []
+    for i, o in enumerate(run.steps):
+        for tc in o.tool_calls:
+            flat.append((i, tc, f"{tc.name}:{_stringify(dict(sorted(tc.arguments.items())))}"))
+
+    loops: list[dict[str, Any]] = []
+    i = 0
+    while i < len(flat):
+        j = i + 1
+        while j < len(flat) and flat[j][2] == flat[i][2]:
+            j += 1
+        if j - i >= MIN_REPEAT_RUN:
+            step, tc, _ = flat[i]
+            loops.append(
+                {
+                    "run": run.run,
+                    "name": tc.name,
+                    "count": j - i,
+                    "first_step": step,
+                    "last_step": flat[j - 1][0],
+                    "arguments": {
+                        k: _clip(_stringify(v), MAX_ARG_CHARS) for k, v in tc.arguments.items()
+                    },
+                }
+            )
+        i = j
+    return loops
 
 
 def _tool_results(deps: Deps) -> list[dict[str, Any]]:
@@ -510,6 +565,7 @@ def analyze(deps: Deps) -> dict[str, Any]:
     as_final: list[dict[str, Any]] = []
     nudged: list[dict[str, Any]] = []
     retries: list[dict[str, Any]] = []
+    loops: list[dict[str, Any]] = []
     run_rows: list[dict[str, Any]] = []
 
     for run in runs:
@@ -535,6 +591,7 @@ def analyze(deps: Deps) -> dict[str, Any]:
         run_af, run_nudge = _fallback_text_only(run)
         as_final.extend(run_af)
         nudged.extend(run_nudge)
+        loops.extend(_repeat_loops(run))
         for burst in _retry_bursts(run):
             retries.append({"run": run.run, **burst})
         run_rows.append(
@@ -560,6 +617,9 @@ def analyze(deps: Deps) -> dict[str, Any]:
         "tool_names": dict(tool_names),
         "unknown_tools": dict(unknown),
         "schema_violations": violations,
+        # 故意不放进 fallbacks：§3.3 里没有哪一条接得住原地打转，它是「缺兜底」
+        # 的证据，不是「兜底触发了」的记录。
+        "repeat_loops": loops,
         "fallbacks": {
             "text_only_as_final": as_final,
             "text_only_nudge": nudged,
@@ -612,7 +672,14 @@ def render_digest(rows: list[tuple[str, dict[str, Any]]]) -> str:
         for hit in fb["text_only_as_final"]:
             out.append(f"  §3.3 兜底[纯文本→final]：轮{hit['run']} 步{hit['step']} {hit['text']!r}")
         for hit in fb["text_only_nudge"]:
-            out.append(f"  §3.3 兜底[纯文本→system 提示]：轮{hit['run']} 步{hit['step']} {hit['nudge']!r}")
+            tail = "（提示没能再投出去：兜底之后就没有下一步了）" if hit["nudge"] is None else repr(hit["nudge"])
+            out.append(f"  §3.3 兜底[纯文本→system 提示]：轮{hit['run']} 步{hit['step']} {tail}")
+        for loop in report.get("repeat_loops") or []:
+            out.append(
+                f"  ⚠ 原地打转：轮{loop['run']} 步{loop['first_step']}–{loop['last_step']} "
+                f"连着 {loop['count']} 次一模一样的 {loop['name']}({', '.join(loop['arguments'])})"
+                f" —— §3.3 没有哪条兜底接得住，只有 max_steps"
+            )
         ia = fb["invalid_args"]
         if ia["count"]:
             out.append(
@@ -631,7 +698,11 @@ def render_digest(rows: list[tuple[str, dict[str, Any]]]) -> str:
         if fb["sandbox_errors"]:
             out.append(f"  沙箱错误：{fb['sandbox_errors']} 次（连续 2 次 failed）")
         if report["hit_max_steps"]:
-            out.append(f"  撞上 max_steps 的任务：{report['hit_max_steps']}")
+            # 带上终态：`hit_max_steps` 只是「步数用满了」，跟「因为撞上限而失败」不是
+            # 一回事 —— T17 实测 08_step_limit 就出过 steps==max_steps 却正常 delivered
+            # 的一轮（最后一步刚好调了 final），光看任务号会误读成跑飞了。
+            hits = {t["task_no"]: t["status"] for t in report["tasks"] if t["hit_max_steps"]}
+            out.append(f"  步数用满 max_steps 的任务：{hits}")
         out.append(f"  任务终态：{[(t['task_no'], t['status']) for t in report['tasks']] or '(没建任务)'}")
     return "\n".join(out)
 
