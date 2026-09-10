@@ -26,14 +26,17 @@ import signal
 import sys
 import traceback
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 from .contracts import (
     AiteConfig,
+    EvidenceKind,
     EvidenceWriter,
     ModelPort,
+    OutboundText,
     PlatformPort,
     SandboxPort,
     SandboxSpec,
@@ -44,10 +47,11 @@ from .contracts import (
     ToolGateway,
 )
 from .control.plane import InProcessControlPlane
-from .control.store import SqliteSessionStore
+from .control.store import ORPHAN_RESULT_SUMMARY, SqliteSessionStore
 from .evidence.writer import FileEvidenceWriter
 from .gateway.tool_gateway import P0ToolGateway
 from .ingress.handler import Ingress
+from .worker.card import render_card
 from .worker.context import load_system_prompt
 from .worker.loop import AgentWorker
 
@@ -84,8 +88,11 @@ class AppWorker(AgentWorker):
 
     **二、记住在飞的任务。**
     宽限期超时后要给它们收场（写 evidence、把卡片置 cancelled），而 §3.2 的
-    `SessionStore` 没有「列出全部活跃任务」的口子（`list_active_tasks` 要 chat_id），
-    控制面也不对外暴露在跑的任务集合。`run()` 正好两头都看得见，就在这里记一笔。
+    `SessionStore` 里没有一个口子答得上「此刻在飞的是哪几个」：`list_active_tasks`
+    要 chat_id，`recover_orphan_tasks`（T18 加的）虽然不挑 chat_id，却是**按状态**
+    捞全库并就地标 `failed` —— 那是给起飞时收上一条命的残局用的（见 `_recover_orphans`），
+    拿来查本进程在飞的任务会把排队没轮到的一并误杀。控制面也不对外暴露在跑的任务集合。
+    `run()` 正好两头都看得见，就在这里记一笔。
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -195,17 +202,22 @@ async def run_app(
         超时 -> 取消 run_forever 那条 task
         sandbox.aclose()（有沙箱才调）
         store.close()
+
+    `store.init()` 也在 `try` 里面 —— 它一成功就有一条 aiosqlite 连接挂在**非 daemon**
+    线程上，此后任何一处抛异常都必须走到 `finally` 里的 `store.close()`。漏掉的话
+    进程是「想退退不出去」：`threading._shutdown` 去 join 那条线程会永久阻塞，
+    连 Ctrl-C 都救不回来。起飞阶段的收残局正落在这个窗口里，窗口只会更宽。
     """
     stop_event = stop if stop is not None else asyncio.Event()
     loop = asyncio.get_running_loop()
     detach = _install_signal_handlers(loop, stop_event)
 
-    # 建表。事件在 `platform.start` 返回的下一刻就可能到，表得先在（§3.2 init 幂等）。
-    await app.store.init()
-    _log_takeoff(app)
-
     runner: asyncio.Task | None = None
     try:
+        # 建表。事件在 `platform.start` 返回的下一刻就可能到，表得先在（§3.2 init 幂等）。
+        await app.store.init()
+        _log_takeoff(app)
+        await _recover_orphans(app)
         await app.platform.start(app.ingress.on_event)
         runner = asyncio.ensure_future(app.plane.run_forever())
         await _serve(stop_event, runner)
@@ -331,6 +343,127 @@ def _log_takeoff(app: AiteApp) -> None:
         app.config.storage.sqlite_path,
         app.config.storage.evidence_dir,
     )
+
+
+async def _recover_orphans(app: AiteApp) -> None:
+    """把上一条命遗留的活跃任务收干净（§2.4 M6 的重启场景）。
+
+    **为什么在 `platform.start()` 之前。** 回帖走的是 HTTP：`FeishuPlatform` 的出站
+    一路到底都是 `self.api.request(...)`（`adapters/feishu/platform.py:253-314`），
+    而那个 `FeishuApiClient` 是 `__init__` 里就建好的（同文件 111 行），
+    `tenant_access_token` 首次调用时按需去取（`adapters/feishu/api.py:89-111`）——
+    整条出站链跟 `start()` 拉起的那条 WS 长连接没有任何交集，所以现在就能说话。
+    反过来 `start()` 是个跑到 `stop()` 才返回的重连循环（同文件 164-207 行的
+    `while not self._stopping`），真机上排在它后面的代码根本轮不到执行。
+    代价是收干净之前长连接还没建，这段时间的事件平台会重推（§3.3 无限重连），
+    换来的是「群里那张卡不会绿着挂到进程停」。
+
+    §3.3 对失败的要求是三件事：task `failed` + 回帖 + evidence `failed` 事件。
+    第一件 `recover_orphan_tasks()` 已经在库里做完了（它故意只做这一件、把任务
+    交回给调用方，理由见 `control/store.py` 那个方法的 docstring），
+    这里补后两件，外加把停在「进行中」的卡片置成 failed（W4）。
+
+    **一个孤儿收不掉，不许连累别人，更不许让进程起不来** —— 每个孤儿一层
+    try，收拾不动就记一条日志接着收下一个；连查询本身都炸了就整段放弃。
+    崩溃现场留下的 `events.jsonl` 很可能有半行 JSON，`append` 在这种目录上会抛，
+    那是 evidence 面自己的账（T21），起飞不为它停下来。
+    """
+    try:
+        orphans = await app.store.recover_orphan_tasks()
+    except Exception:
+        log.exception("aite.recover_failed 上一条命的残局没查出来，照常起飞")
+        return
+    if not orphans:
+        return
+
+    log.warning("aite.orphans n=%d 上一条命没跑完的任务，逐个收场", len(orphans))
+    for task in orphans:
+        try:
+            await _close_orphan(app, task)
+        except Exception:                          # pragma: no cover - 下面每步各自兜着
+            log.exception("aite.orphan_failed task=%s 收拾不动，跳过", task.id)
+
+
+async def _close_orphan(app: AiteApp, task: Task) -> None:
+    """一个孤儿的收场：evidence -> 卡片 -> 回帖。三步彼此独立，谁炸都不挡后面的。
+
+    回帖和卡片都要 session（chat_id / 话题锚点 / 发起人），而 `recover_orphan_tasks()`
+    只还 `Task`。取不到 session 的任务（库残了、会话行没了）就只写 evidence ——
+    群里那两件事没有收件人，硬发只会发到别处去。
+    """
+    session: Session | None = None
+    try:
+        session = await app.store.get_session(task.session_id)
+    except Exception:
+        log.exception("aite.orphan_session_failed task=%s", task.id)
+    if session is None:
+        log.warning("aite.orphan_no_session task=%s session=%s：只写 evidence，不回帖",
+                    task.id, task.session_id)
+
+    try:
+        await app.evidence.append(
+            task.id,
+            EvidenceKind.failed,
+            {"reason": ORPHAN_RESULT_SUMMARY, "steps": task.steps, "by": "startup_recovery"},
+        )
+        await _finalize_orphan_evidence(app, task, session)
+    except Exception:
+        # 崩溃留下的半行 JSON 会让 append 直接抛。证据链残着是既成事实，
+        # 但下面那两件「人看得见」的事照做 —— 不然用户那头就真的一点交代都没有。
+        log.exception("aite.orphan_evidence_failed task=%s", task.id)
+
+    if session is not None and task.card_id:
+        try:
+            await app.platform.update_card(
+                task.card_id,
+                render_card(
+                    task,
+                    session,
+                    initiator=str(
+                        session.config_snapshot.get("initiator_name") or session.created_by
+                    ),
+                    status="failed",
+                ),
+            )
+        except Exception:
+            log.exception("aite.orphan_card_failed task=%s card=%s", task.id, task.card_id)
+
+    if session is not None:
+        try:
+            await app.platform.send_text(
+                OutboundText(
+                    chat_id=session.chat_id,
+                    # 带任务号：一次崩溃可能留下好几个孤儿，不带号没人知道说的是哪个。
+                    # 正文照抄库里的 `result_summary`，群里那句和 `!status` 是同一口径。
+                    text=f"任务 {task.task_no}：{ORPHAN_RESULT_SUMMARY}",
+                    reply_to=session.anchor.message_id,
+                    in_thread=True,
+                )
+            )
+        except Exception:
+            log.exception("aite.orphan_notice_failed task=%s", task.id)
+
+
+async def _finalize_orphan_evidence(app: AiteApp, task: Task, session: Session | None) -> None:
+    """给孤儿的证据链收口，字段照抄 `plane._finalize_evidence`。
+
+    不 finalize 的话这个任务的证据目录没有 manifest.json，`evidence_show` 的时间线
+    上就是残的 —— 而崩溃留下的目录恰恰是最需要被人翻的那种。
+    `finalize` 一个任务只走一次：已经有 root_hash 的说明崩溃前就收过尾了。
+    """
+    if task.evidence_root_hash:
+        return
+    task.evidence_root_hash = await app.evidence.finalize(
+        task.id,
+        {
+            "session_id": session.id if session is not None else task.session_id,
+            "task_no": task.task_no,
+            "created_by": task.created_by,
+            "model": task.model or str(getattr(app.model, "name", "") or ""),
+        },
+    )
+    task.updated_at = datetime.now(UTC)
+    await app.store.update_task(task)
 
 
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event):

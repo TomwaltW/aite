@@ -135,6 +135,19 @@ class GatedPlatform(FakePlatform):
             return
         await super().emit(ev)
 
+    def adopt_cards(self, other: FakePlatform) -> None:
+        """认领上一条命发出的卡片。
+
+        平台那头的消息不会因为进程没了就消失，新进程拿同一个 `message_id` 去
+        PATCH 照样改得动（§3.2 update_card）—— 而 `FakePlatform.cards` 是进程内的
+        字典，跨「进程」重开必须显式接手，否则 `update_card` 会当成未知 card_id
+        打回来，测出来的就不是真机的样子了。只搬最后一版快照（= 那张卡此刻在
+        平台上的样子），更新历史留在上一条命那边。
+        """
+        for card_id, snapshots in other.cards.items():
+            if card_id not in self.cards and snapshots:
+                self.cards[card_id] = [snapshots[-1].model_copy(deep=True)]
+
 
 class ClosableFakeSandbox(FakeSandbox):
     """带 `aclose()` 的沙箱替身，语义照抄 `DockerSandbox.aclose`。"""
