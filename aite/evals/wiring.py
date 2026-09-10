@@ -33,7 +33,11 @@ from ..testing import (
 )
 from ..testing.fake_store import ACTIVE_STATUSES
 from .protocol_probe import ModelProbe
+from .real_stack import build_docker_stack
 from .scenario import EventAfter, Scenario
+
+#: `--sandbox` 认哪几档。默认 `fake` —— 默认路径逐字节不变是硬约束。
+SANDBOXES = ("fake", "docker")
 
 #: 去哪儿找 ControlPlane
 CANDIDATE_MODULES = ("aite.control", "aite.control.plane")
@@ -78,10 +82,30 @@ class Deps:
     #: 永远是探针（见 build_deps）：它记账每一步出牌，也补上了 live 模型客户端没有的
     #: `calls` / `call_count` —— 下面 activity() / stats() 要这两样
     model: ModelProbe
-    sandbox: FakeSandbox
-    gateway: FakeToolGateway
+    #: `--sandbox fake`（默认）是 `FakeSandbox` / `FakeToolGateway`；`--sandbox docker`
+    #: 是真 `DockerSandbox` / `P0ToolGateway` 各套一层 `real_stack` 的探针。两档下
+    #: 断言读到的记账面（`.calls` / `count()` / `results_of()`）同名同义。
+    sandbox: FakeSandbox | Any
+    gateway: FakeToolGateway | Any
     store: FakeSessionStore
     evidence: FakeEvidenceWriter
+
+    async def aclose(self) -> None:
+        """收摊。真沙箱那一档要靠它把容器和 docker 客户端收干净（`FakeSandbox` 没有
+        `aclose`，默认档在这里什么都不做）。
+
+        任务正常收尾时容器已经由 worker 的 `release_task` 还掉了，这里管的是没走到
+        终态的那些 —— 场景超时、步数上限打断、断言前就炸了。不收的话容器要挂到
+        `reap_idle` 的 `idle_sec`（默认 300s）才被捡走，而 `tests/sandbox` 那几条
+        「`docker ps -a --filter label=aite.task` 为空」的断言是全机器共享的。
+        """
+        fn = getattr(self.sandbox, "aclose", None)
+        if not callable(fn):
+            return
+        try:
+            await fn()
+        except Exception:                             # 收摊失败不该盖掉场景结论
+            pass
 
     def activity(self) -> int:
         """所有替身被调用的总次数 —— 用来判断系统是不是已经不干活了。"""
@@ -101,8 +125,18 @@ class Deps:
         }
 
 
-def build_deps(sc: Scenario, *, model: Any = None) -> Deps:
+def build_deps(sc: Scenario, *, model: Any = None, sandbox_kind: str = "fake") -> Deps:
     """按场景里的 fixture 造一套替身。
+
+    `sandbox_kind` 选沙箱与 Gateway 这一段接谁（`--sandbox`）：
+
+    * `fake`（默认）—— `FakeSandbox` 照场景的 `exec_script` 演，`FakeToolGateway`
+      自己实现工具。**这一档逐字节不变**：`scripts/check.sh` 的 B8、CI、T4 的 200 条
+      都吃这条路。
+    * `docker` —— 真 `DockerSandbox` + 真 `P0ToolGateway`，代码在容器里真跑。
+      接线的两件麻烦事（断言面、`session_token`）写在 `real_stack.py` 的模块 docstring 里。
+      场景的 `exec_script` 在这一档下一律忽略（同上，理由见
+      `real_stack.scenarios_with_exec_script`）。
 
     `model` 不给就按场景的 `model_script` 造 `FakeModel`；`--model live` 会从这里塞进来
     一个 `OpenAICompatModel`。**两种都统一套一层 `ModelProbe`**：
@@ -115,12 +149,22 @@ def build_deps(sc: Scenario, *, model: Any = None) -> Deps:
     探针是透明的：未知属性透传给被包的模型，`tool_names_emitted()` / `call_count` 按
     实际观测到的出牌算，scripted 路径的断言一条都不用改。
     """
+    if sandbox_kind not in SANDBOXES:
+        raise PhaseError("wiring", f"不认识的 --sandbox {sandbox_kind!r}，只认 {list(SANDBOXES)}")
+
     config = AiteConfig.model_validate({"platform": "fake", **sc.config})
     platform = FakePlatform(
         history=sc.build_history(), documents=sc.build_documents(), files=sc.build_files()
     )
-    sandbox = FakeSandbox(exec_script=list(sc.sandbox.exec_script))
-    gateway = FakeToolGateway(platform=platform, sandbox=sandbox, sandbox_image=config.sandbox.image)
+    store = FakeSessionStore()
+    if sandbox_kind == "docker":
+        # token_resolver 要认得这个 store，所以 store 得先建出来（见 real_stack）。
+        sandbox, gateway = build_docker_stack(platform=platform, store=store, config=config)
+    else:
+        sandbox = FakeSandbox(exec_script=list(sc.sandbox.exec_script))
+        gateway = FakeToolGateway(
+            platform=platform, sandbox=sandbox, sandbox_image=config.sandbox.image
+        )
     inner = model if model is not None else FakeModel(list(sc.model_script))
     return Deps(
         config=config,
@@ -128,7 +172,7 @@ def build_deps(sc: Scenario, *, model: Any = None) -> Deps:
         model=inner if isinstance(inner, ModelProbe) else ModelProbe(inner),
         sandbox=sandbox,
         gateway=gateway,
-        store=FakeSessionStore(),
+        store=store,
         evidence=FakeEvidenceWriter(),
     )
 
@@ -249,6 +293,24 @@ def model_busy(deps: Deps) -> bool:
     return any(t.status in ACTIVE_STATUSES for t in deps.store.tasks.values())
 
 
+def sandbox_busy(deps: Deps) -> bool:
+    """沙箱这条路上还有活没干完？—— 与 `model_busy` 同一个理由，换成沙箱那一头。
+
+    `--sandbox docker` 下 `acquire` 要起容器 + 探路，`exec` 要在容器里真跑代码，
+    一次一秒起步；这期间没有任何替身被碰，`Deps.activity()` 一动不动。不减掉这一段的话
+    任务在第一个容器建好之前就被判「不干活了」，`stop_loop` 当场取消 —— 实测 `04` 停在
+    169ms、七条断言全红，容器建好即被收走。
+
+    对默认档是恒等变换：`FakeSandbox` 没有 `in_flight`，`getattr` 取到 0。
+    """
+    return bool(getattr(deps.sandbox, "in_flight", 0))
+
+
+def busy(deps: Deps) -> bool:
+    """系统还在等外部返回吗（模型 / 沙箱）。`settle()` 的静默判据要减掉这一段。"""
+    return model_busy(deps) or sandbox_busy(deps)
+
+
 def plane_id(plane: Any) -> str:
     """报告里用它指认「接到的是谁」，省得只看到一句 NotImplementedError。"""
     cls = type(plane)
@@ -299,7 +361,7 @@ async def settle(
             break
         await asyncio.sleep(poll_ms / 1000)
         now_activity = deps.activity()
-        if now_activity != last or model_busy(deps):
+        if now_activity != last or busy(deps):
             last, quiet_since = now_activity, loop.time()
             continue
         if (loop.time() - quiet_since) * 1000 >= idle_ms:

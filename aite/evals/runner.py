@@ -165,12 +165,37 @@ async def run_scenario(
     sc: Scenario,
     *,
     model: Any = None,
+    sandbox_kind: str = "fake",
     plane_factory: PlaneFactory | None = None,
     want_traceback: bool = False,
     collect_protocol: bool = False,
 ) -> ScenarioResult:
     started = time.monotonic()
-    deps = build_deps(sc, model=model)
+    deps = build_deps(sc, model=model, sandbox_kind=sandbox_kind)
+    try:
+        return await _run_one(
+            sc,
+            deps,
+            started=started,
+            plane_factory=plane_factory,
+            want_traceback=want_traceback,
+            collect_protocol=collect_protocol,
+        )
+    finally:
+        # 场景一收就把沙箱收摊。默认档是空操作（FakeSandbox 没有 aclose），
+        # docker 档靠它别把容器留给下一个场景 —— 理由见 Deps.aclose。
+        await deps.aclose()
+
+
+async def _run_one(
+    sc: Scenario,
+    deps: Deps,
+    *,
+    started: float,
+    plane_factory: PlaneFactory | None,
+    want_traceback: bool,
+    collect_protocol: bool,
+) -> ScenarioResult:
     tb: str | None = None
     try:
         settled_by = await _execute(sc, deps, plane_factory)
@@ -224,6 +249,7 @@ async def run_suite(
     platform: str = "fake",
     model_name: str = "scripted",
     model_factory: Any = None,
+    sandbox_kind: str = "fake",
     plane_factory: PlaneFactory | None = None,
     want_traceback: bool = False,
     collect_protocol: bool = False,
@@ -235,6 +261,7 @@ async def run_suite(
             await run_scenario(
                 sc,
                 model=model,
+                sandbox_kind=sandbox_kind,
                 plane_factory=plane_factory,
                 want_traceback=want_traceback,
                 collect_protocol=collect_protocol,

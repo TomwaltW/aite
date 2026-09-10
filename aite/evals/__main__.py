@@ -19,6 +19,16 @@
 
 `--timeout-scale` 把场景的两个等待上限一起放大：yaml 里那些秒数是照替身的尺度定的，
 真模型撑不下。`--model live` 默认就按 `LIVE_TIMEOUT_SCALE` 放大，不用每次手写。
+
+`--sandbox docker` 把沙箱与 Gateway 这一段换成真的（T23，§2.4 M3）：
+
+    python -m aite.evals run evals/p0 --only 04_csv_to_chart \
+        --platform fake --model live --sandbox docker
+
+代码在 `aite-sandbox:p0` 容器里真跑，PNG 是镜像里的 matplotlib 真画出来的。
+默认仍是 `fake`，**默认路径逐字节不变**（B8 / CI / T4 的 200 条都吃那条路）。
+起飞前先查 daemon 与镜像 —— 缺哪样都是一行人话 + 退出码 2，理由同
+`_live_model_factory`。
 """
 from __future__ import annotations
 
@@ -30,8 +40,10 @@ import traceback
 from pathlib import Path
 
 from .protocol_probe import render_digest
+from .real_stack import docker_preflight, scenarios_with_exec_script
 from .runner import run_suite
 from .scenario import Scenario, ScenarioError, load_suite
+from .wiring import SANDBOXES
 
 PLATFORMS = ("fake",)
 MODELS = ("scripted", "live")
@@ -52,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("suite", help="场景目录，如 evals/p0")
     run.add_argument("--platform", default="fake", choices=PLATFORMS, help="平台替身（默认 fake）")
     run.add_argument("--model", default="scripted", choices=MODELS, help="模型来源（默认 scripted）")
+    run.add_argument(
+        "--sandbox",
+        default="fake",
+        choices=SANDBOXES,
+        help="沙箱与 Gateway 接谁：fake（默认，替身按 exec_script 演）/ docker（真容器真跑）",
+    )
     run.add_argument("--list", action="store_true", help="只列出场景名，不执行")
     run.add_argument("--only", action="append", default=[], metavar="NAME", help="只跑指定场景，可多次给")
     run.add_argument("--json", dest="json_out", metavar="PATH", help="把 JSON 摘要另存一份到文件")
@@ -82,6 +100,28 @@ def _scale_timeouts(sc: Scenario, k: float) -> Scenario:
     """按倍数放大一个场景的两个等待上限。只在内存里改，场景文件一个字都不动。"""
     events = [e.model_copy(update={"after_timeout_sec": e.after_timeout_sec * k}) for e in sc.events]
     return sc.model_copy(update={"timeout_sec": sc.timeout_sec * k, "events": events})
+
+
+def _sandbox_images(scenarios: list[Scenario]) -> list[str]:
+    """这一批场景各自要哪个镜像。`build_deps` 怎么算 config，这里就怎么算。"""
+    from ..contracts import AiteConfig
+
+    images = []
+    for sc in scenarios:
+        cfg = AiteConfig.model_validate({"platform": "fake", **sc.config})
+        images.append(cfg.sandbox.image)
+    return images
+
+
+def _announce_ignored_exec_script(scenarios: list[Scenario]) -> None:
+    """docker 档下 `sandbox.exec_script` 不生效 —— 起飞时点名，别让它静默失效。"""
+    named = scenarios_with_exec_script(scenarios)
+    if named:
+        print(
+            f"--sandbox docker：这些场景的 sandbox.exec_script 不生效"
+            f"（代码交给真容器跑）：{'、'.join(named)}",
+            file=sys.stderr,
+        )
 
 
 def _live_model_factory(config_path: str):
@@ -127,6 +167,15 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps([s.name for s in scenarios], ensure_ascii=False, indent=2))
         return 0
 
+    if args.sandbox == "docker":
+        # 起飞前查一次 daemon 与镜像：不查的话十个场景各自烂在第一个工具调用上，
+        # 真正的原因（Docker Desktop 没开 / 镜像没 build）一个字都看不到。
+        why = docker_preflight(_sandbox_images(scenarios))
+        if why is not None:
+            print(f"--sandbox docker 起不来：{why}", file=sys.stderr)
+            return 2
+        _announce_ignored_exec_script(scenarios)
+
     scale = args.timeout_scale
     if scale is None:
         scale = LIVE_TIMEOUT_SCALE if args.model == "live" else 1.0
@@ -150,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
             platform=args.platform,
             model_name=args.model,
             model_factory=model_factory,
+            sandbox_kind=args.sandbox,
             want_traceback=args.traceback,
             collect_protocol=want_protocol,
         )
@@ -173,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
                         "suite": args.suite,
                         "platform": args.platform,
                         "model": args.model,
+                        # stdout 的 JSON 摘要不加这一格（默认路径逐字节不变），
+                        # 这份报告是 opt-in 的，加了才看得出实测跑的是哪档沙箱。
+                        "sandbox": args.sandbox,
                         "contract_version": payload["contract_version"],
                         "scenarios": [{"name": n, **(p or {})} for n, p in rows],
                     },
