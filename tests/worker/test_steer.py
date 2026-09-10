@@ -256,14 +256,20 @@ async def test_stop_before_the_drain_keeps_the_steer_out_of_the_model(
     assert (await store.get_task(task.id)).status.value == "cancelled"
 
 
-async def test_steer_leaves_no_trace_in_the_evidence_chain(
+async def test_steer_is_recorded_in_the_evidence_chain(
     store, config, clock, sandbox, gateway, evidence
 ):
-    """**钉现状，判断留给总管**：W8 只要求 `model_call / tool_call / tool_result /
-    checklist_op` 写 evidence，steer 不在其中，所以证据链上看不到「任务跑到一半
-    用户改了要求」这件事 —— §2.4 的 evidence_show 时间线上缺这一段。
+    """T24 关掉了 T14 在这里留的口子（本条原名 `..._leaves_no_trace_...`）。
 
-    `model_call` 只记 `messages_hash`，原文不落盘，所以从证据里也反推不出来。
+    T14 钉的现状是「steer 不写 evidence」：W8 只点名 `model_call / tool_call /
+    tool_result / checklist_op` 四类，steer 不在其中，于是 evidence_show 的时间线上
+    缺了「任务跑到一半用户改了要求」这一段 —— 而 `model_call` 只记 `messages_hash`，
+    原文不落盘，从证据里也反推不出来。总管拍板补上。
+
+    补法：`_continue_session` 排 steer 时给目标任务写一条 `event_received`
+    （不新增 `EvidenceKind`，那是冻结契约），payload 带 `route: "steer"` 与截断后的
+    用户原话。两种 `event_received` 靠 `route` 分开：`new_task` 是任务的起点，
+    `steer` 是中途改的要求。
     """
     box: list = []
     model = ScriptedModel(
@@ -287,8 +293,15 @@ async def test_steer_leaves_no_trace_in_the_evidence_chain(
 
     lines = evidence.events_path(task.id).read_text(encoding="utf-8").splitlines()
     assert lines, "任务跑完了却一条证据都没有"
-    assert all(STEER not in line for line in lines), "现状：steer 不写证据"
-    # 模型确实看到了它 —— 也就是说证据链缺的不是「没发生」，是「没记」
+    assert any('"route":"steer"' in line for line in lines), (
+        "追问排进来了，证据链上却找不到 route=steer 那一条"
+    )
+    assert any(STEER in line for line in lines), (
+        "证据里读不到用户把要求改成了什么 —— 那这条时间线还是讲不清最后为什么交了这个"
+    )
+    # 建任务那条也认得出自己是谁，两种语义在 payload 上分得开
+    assert any('"route":"new_task"' in line for line in lines)
+    # 模型确实看到了它 —— 证据记的和模型收到的是同一件事
     assert any(m.content == STEER for m in model.calls[2])
 
 

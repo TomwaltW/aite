@@ -54,6 +54,46 @@ _R4_KINDS = (
     EventKind.member_changed,
 )
 
+#: `event_received` 的 `route`：这条事件是**建了任务**的那一条（R6 新建 / R7）。
+ROUTE_NEW_TASK = "new_task"
+#: `event_received` 的 `route`：这条是**任务跑到一半**排进来的追问（R6 steer）。
+ROUTE_STEER = "steer"
+
+
+def _event_payload(ev: NormalizedEvent, *, route: str, **extra: object) -> dict:
+    """`event_received` 的 payload。
+
+    `EvidenceKind` 是冻结契约（`aite/contracts/evidence.py`），加不了新 kind，所以
+    「建任务的那条事件」和「中途追问的那条」共用 `event_received`。共用就得分得开 ——
+    不然时间线上两条长得一模一样，读的人分不出哪条是任务的起点、哪条是用户改了主意。
+    分辨靠 `route`：两个写入点都带，缺这个字段的是本次改动之前写的老链。
+    """
+    return {
+        "event_id": ev.event_id,
+        "kind": ev.kind.value,
+        "chat_id": ev.chat_id,
+        "sender_id": ev.sender_id,
+        "message_id": ev.anchor.message_id,
+        "mentioned": ev.mentioned,
+        "route": route,
+        **extra,
+    }
+
+
+def _steer_payload(ev: NormalizedEvent) -> dict:
+    """追问那条额外带上用户说的话（截断口径同卡片标题）。
+
+    为什么这一条要带 `text` 而建任务那条不带：建任务那条紧挨着的 `task_created` 已经把
+    用户原话截进 `title` 了，再抄一遍是噪音；追问这条旁边什么都没有，不带的话
+    `model_call` 只留 `messages_hash`（W8：模型消息全文不进证据），
+    从证据里反推不出「用户中途把要求改成了什么」—— 而这恰恰是解释「为什么最后交的是
+    季度图而不是月度图」的关键一环。
+
+    口径不是这里发明的：用户原话以**截断后的形式**进证据，`task_created.title` 一直
+    就是这么做的。W8 禁的是**模型**消息全文，不是用户那句话。
+    """
+    return _event_payload(ev, route=ROUTE_STEER, text=clip(ev.text, MAX_TITLE_CHARS))
+
 
 class InProcessControlPlane:
     """ControlPlane（T2）。进程内队列 + 单 worker，P0 只跑单副本。"""
@@ -103,6 +143,8 @@ class InProcessControlPlane:
         #: 本进程接手过、还没收尾的任务（排在队列里的 + 正在 worker 手上的）。
         #: R6 只把追问排给这里面的任务 —— 见 `_steer_target`。
         self._owned: set[str] = set()
+        #: 分配 turn.seq 的临界区。为什么要有它见 `_append_turn`。
+        self._turn_seq_lock = asyncio.Lock()
         self.counters: dict[str, int] = defaultdict(int)
 
     async def init(self) -> None:
@@ -111,7 +153,27 @@ class InProcessControlPlane:
     # ---- §3.5 路由 -------------------------------------------------------
 
     async def handle_event(self, ev: NormalizedEvent) -> None:
-        """R1–R8 的唯一入口。按编号顺序求值，命中即停。"""
+        """R1–R8 的唯一入口。按编号顺序求值，命中即停。
+
+        路由半路抛出去的异常照旧往上传（`Ingress.on_event` 兜住它、不让长连接的读循环
+        被带走，§3.3 第一行），这里只在路过时记一笔。为什么记在这儿而不是复用
+        `Ingress.counters["ingress.errors"]`：`!status` 是控制面回的，控制面拿不到
+        ingress。两个计数器数的是同一批事件，只是待在不同的层上。
+
+        为什么这一笔非记不可：异常抛在 `seen_event` 那一步时，此刻连 task 都还没建，
+        §3.3 承诺的「task failed + 回帖 + evidence failed」一件都做不到，事件就是
+        静默没了。P0 认这个代价（判断与备选见回执），但不能连**认了多少条**都不知道。
+        """
+        try:
+            await self._route(ev)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 日志由 Ingress 打（那里有完整的 event_id / kind），这里不打第二遍。
+            self.counters["events.dropped"] += 1
+            raise
+
+    async def _route(self, ev: NormalizedEvent) -> None:
         # R1：非真人一律丢弃。机器人/应用/系统消息永远不触发任务（含 Aite 自己发的）
         if ev.sender_kind != SenderKind.human:
             self.counters["events.nonhuman"] += 1
@@ -204,10 +266,10 @@ class InProcessControlPlane:
         if name == "!status":
             tasks = await self._store.list_active_tasks(ev.chat_id)
             if not tasks:
-                await self._reply(ev, NO_ACTIVE_TASK_TEXT)
+                await self._reply(ev, NO_ACTIVE_TASK_TEXT + self._dropped_note())
                 return
             lines = [f"{t.task_no} {t.status.value} {t.title or '(无标题)'}" for t in tasks]
-            await self._reply(ev, "本群活跃任务：\n" + "\n".join(lines))
+            await self._reply(ev, "本群活跃任务：\n" + "\n".join(lines) + self._dropped_note())
             return
 
         if name == "!stop":
@@ -249,6 +311,25 @@ class InProcessControlPlane:
 
         await self._reply(ev, UNKNOWN_COMMAND_TEXT)
 
+    def _dropped_note(self) -> str:
+        """丢过事件才多说这一句，平时一个字都不加。
+
+        这条警告是**进程级**的（不分群）：`events.dropped` 数的是路由抛出去的事件，
+        而抛在 `seen_event` 上时连 `chat_id` 归谁都还没走到，分不了群。措辞上说清楚
+        它是「本进程启动以来」，免得被当成本群的账。
+
+        为什么挂在 `!status` 上：这是人在问「现在到底什么情况」的地方。不挂的话，
+        唯一的痕迹是一行 `ingress.handle_failed` 日志 —— 没有告警的话没人会去翻，
+        而用户能想到的动作恰恰就是 `!status`。
+        """
+        n = self.counters["events.dropped"]
+        if not n:
+            return ""
+        return (
+            f"\n⚠ 本进程启动以来有 {n} 条事件没接住（多半是存储异常），"
+            "可能有消息没被处理。翻日志看 ingress.handle_failed。"
+        )
+
     async def _resolve_stop_target(self, chat_id: str, raw: str) -> Task | None:
         tasks = await self._store.list_active_tasks(chat_id)
         if not raw:
@@ -277,6 +358,9 @@ class InProcessControlPlane:
         ]
         target = self._steer_target(active)
         if target is not None:
+            # 先写证据再排队，和 `_start_task` 一个顺序：证据链宁可少一条也不撒谎，
+            # 不能出现「任务收到了这句追问，但链上查不到它是什么时候来的」。
+            await self._evidence.append(target.id, EvidenceKind.event_received, _steer_payload(ev))
             # worker 每步开始前会把这些合并进上下文
             self._steer[target.id].append(ev.text)
             self.counters["events.steer"] += 1
@@ -352,16 +436,7 @@ class InProcessControlPlane:
             },
         )
         await self._evidence.append(
-            task.id,
-            EvidenceKind.event_received,
-            {
-                "event_id": ev.event_id,
-                "kind": ev.kind.value,
-                "chat_id": ev.chat_id,
-                "sender_id": ev.sender_id,
-                "message_id": ev.anchor.message_id,
-                "mentioned": ev.mentioned,
-            },
+            task.id, EvidenceKind.event_received, _event_payload(ev, route=ROUTE_NEW_TASK)
         )
         self._owned.add(task.id)
         self._queue.put_nowait(task.id)
@@ -602,19 +677,32 @@ class InProcessControlPlane:
     async def _append_turn(self, session: Session, ev: NormalizedEvent, *, role: str, content: str) -> None:
         # seq 由调用方分配（§3.2）。只用协议里有的 list_turns 推下一个 seq，
         # 这样换任何 SessionStore 实现都成立。
-        recent = await self._store.list_turns(session.id, limit=1)
-        seq = recent[-1].seq + 1 if recent else 0
-        await self._store.append_turn(
-            Turn(
-                session_id=session.id,
-                seq=seq,
-                role=role,
-                platform_user_id=ev.sender_id,
-                content=content,
-                attachments=ev.attachments,
-                created_at=ev.occurred_at,
+        #
+        # 读 seq 和写 turn 之间不许有别人插进来。同一个话题里的两条事件**是会同时**进
+        # `handle_event` 的 —— `FeishuWSConnection._handle` 每收一帧就
+        # `run_coroutine_threadsafe` 起一个独立协程，重连那一刻整批一起上来，
+        # 而这中间隔着两次真会挂起的 SQLite 往返。两条都读到「还没有 turn」就都写 seq=0，
+        # 第二条撞上 (session_id, seq) 唯一约束抛 `DuplicateTurnError`；这一抛发生在
+        # `seen_event` **已经落库之后**，于是事件既没变成任务，也永远不会被重推第二次
+        # （R2 认得它了）—— 用户那句话就此消失。M2 后半句在这里破。
+        #
+        # P0 是单进程单副本（见本类 docstring），进程内一把锁就够。
+        # `SqliteSessionStore` 本来就是单连接串行的，这把锁不额外增加争用；
+        # 临界区只有两次 SQLite 往返，`on_event` 的 1s 预算（§3.3）吃得下。
+        async with self._turn_seq_lock:
+            recent = await self._store.list_turns(session.id, limit=1)
+            seq = recent[-1].seq + 1 if recent else 0
+            await self._store.append_turn(
+                Turn(
+                    session_id=session.id,
+                    seq=seq,
+                    role=role,
+                    platform_user_id=ev.sender_id,
+                    content=content,
+                    attachments=ev.attachments,
+                    created_at=ev.occurred_at,
+                )
             )
-        )
 
     async def _reply(self, ev: NormalizedEvent, text: str) -> None:
         await self._platform.send_text(
