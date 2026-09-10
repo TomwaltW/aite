@@ -5,6 +5,7 @@ checklist_* 与 final 由 worker 本地处理，其余交 `ToolGateway.call`（W
 """
 import asyncio
 import hashlib
+import json
 import logging
 import mimetypes
 import time
@@ -46,7 +47,25 @@ MODEL_RETRY_DELAYS: tuple[float, ...] = (2.0, 5.0)
 MAX_CONSECUTIVE_INVALID_ARGS = 3
 MAX_CONSECUTIVE_SANDBOX_ERRORS = 2
 
+# 同一张牌原样连出好几次 —— §3.3 那张失败面表里一条都接不住的那种卡死。
+# T17 实测 04_csv_to_chart：替身沙箱对不含 savefig 的代码一律回 exit_code=0 + 空 stdout，
+# 模型自己诊断了几步之后，对**逐字节相同**的 run_python 连发 33 次，一路烧到 max_steps
+# 才停（evals/live-report-2026-09-10.md §4 缺口 2）。既有两条计数兜底都要求工具**失败**
+# ——invalid_args 要参数不合 schema，sandbox 要工具报错——而这里工具返回的是 ok=True，
+# 只是内容为空。唯一接住它的是 max_steps，代价是烧满整整 40 次模型调用。
+REPEAT_NUDGE_AT = 3
+MAX_CONSECUTIVE_REPEATS = 5
+
 NUDGE_TEXT = "请调用 final 交付结果，或调用一个工具继续。"
+
+#: 命中 REPEAT_NUDGE_AT 时回给模型的话。目标是让它**换招**，所以不说「你重复了」，而是
+#: 给一个结论（这条路走不通）加两个具体的下一步。T17 里模型自己都已经诊断出
+#: 「沙箱每条命令都返回空输出」了 —— 它缺的从来不是「你重复了」这个信息。
+REPEAT_NUDGE_TEXT = (
+    "你已经用完全相同的参数调用了 {count} 次 {name}，每次拿到的结果都一样——这条路走不通。"
+    "不要再原样重试：换个做法（换参数、换工具、或者换个角度拿这个信息）；"
+    "如果确实拿不到，就调用 final，说清你卡在哪一步、手里已经有什么。"
+)
 
 
 def _sha256(text: str) -> str:
@@ -181,6 +200,26 @@ class AgentWorker:
                 continue
 
             for call in calls:
+                # 只认**连续**相同：中间插进别的调用说明模型还在换招，不算卡住。
+                # 一步出多张牌时按 tool_calls 的顺序逐张算 —— 同一步里出两张一样的牌算 2 次，
+                # 那比隔了一步再重复更卡。两条都跟 protocol_probe._repeat_loops() 一个口径。
+                sig = _call_signature(call)
+                ctx.repeats = ctx.repeats + 1 if sig == ctx.last_call_sig else 1
+                ctx.last_call_sig = sig
+                # 本地工具照样进计数（口径要和观测侧对得上），但不由它开火：连发 checklist_*
+                # 是 §3.8 08_step_limit 已经钉住的 max_steps 那条路，抢在前面接会把那条规格
+                # 声明在真实 max_steps=40 下变成假的（tests/worker/test_limits.py 正钉着它）。
+                spinning = call.name not in LOCAL_TOOL_NAMES
+
+                if spinning and ctx.repeats >= MAX_CONSECUTIVE_REPEATS:
+                    # 在执行**之前**就收：前 4 次结果一模一样，第 5 次没有再跑一遍的必要，
+                    # 尤其 run_python 那次还要再起一次沙箱执行。
+                    return await self._fail(
+                        ctx,
+                        f"任务 {task.task_no}：模型连续 {MAX_CONSECUTIVE_REPEATS} 次原样重复调用 "
+                        f"{call.name}，没有进展，已终止，请换个说法或 !new 重开",
+                    )
+
                 if call.name != FINAL_TOOL.name:
                     await self._ensure_card(ctx)
 
@@ -200,6 +239,13 @@ class AgentWorker:
 
                 outcome = await self._run_tool(ctx, call)
                 messages.append(self._tool_message(call, outcome.content))
+                if spinning and ctx.repeats == REPEAT_NUDGE_AT:
+                    messages.append(
+                        Message(
+                            role="system",
+                            content=REPEAT_NUDGE_TEXT.format(count=ctx.repeats, name=call.name),
+                        )
+                    )
 
                 if outcome.error_code == "invalid_args":
                     ctx.invalid_args += 1
@@ -545,7 +591,7 @@ class _RunContext:
     """一次 run() 的可变状态。放一个对象里免得在方法间传七八个参数。"""
 
     __slots__ = ("task", "session", "card", "initiator", "note", "invalid_args", "sandbox_errors",
-                 "attachments_message_id")
+                 "repeats", "last_call_sig", "attachments_message_id")
 
     def __init__(self, *, task: Task, session: Session, card: CardCoalescer, initiator: str) -> None:
         self.task = task
@@ -555,11 +601,29 @@ class _RunContext:
         self.note: str | None = None
         self.invalid_args = 0
         self.sandbox_errors = 0
+        #: 上一张牌的指纹，以及它已经连着出了几次（跨步保留：33 次重复是一步一次出来的）
+        self.repeats = 0
+        self.last_call_sig: str | None = None
         self.attachments_message_id: str | None = None
 
     @property
     def thread_root(self) -> str:
         return self.session.anchor.thread_id or self.session.anchor.message_id
+
+
+def _call_signature(call: ToolCallRequest) -> str:
+    """一次工具调用的指纹：工具名 + 顶层 key 排过序的 JSON。
+
+    刻意和 `aite/evals/protocol_probe.py` 的 `_repeat_loops()` 逐字同构（那边是
+    `f"{name}:{_stringify(dict(sorted(args.items())))}"`）。观测侧说「打转了 33 次」而
+    兜底侧说「没打转」的话，排查时两边会打架，所以「同一张牌」在两处必须指同一件事。
+    """
+    args = dict(sorted((call.arguments or {}).items()))
+    try:
+        body = json.dumps(args, ensure_ascii=False)
+    except (TypeError, ValueError):
+        body = repr(args)
+    return f"{call.name}:{body}"
 
 
 def _parse_final(call: ToolCallRequest) -> tuple[str, list[dict], _ToolOutcome | None]:
