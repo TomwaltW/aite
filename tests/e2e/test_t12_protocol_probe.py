@@ -422,15 +422,24 @@ def test_cli_scripted_run_keeps_stderr_empty(capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_cli_live_defaults_to_a_bigger_timeout_scale(capsys, tmp_path):
-    """真模型一次调用就顶穿 yaml 里的 10s —— live 默认放大，且必须说出来。"""
+def test_cli_live_defaults_to_a_bigger_timeout_scale(capsys, tmp_path, monkeypatch):
+    """真模型一次调用就顶穿 yaml 里的 10s —— live 默认放大，且必须说出来。
+
+    配置得填全：T17 之后 `--model live` 起飞前先验配置（见下面两条 fail-fast），
+    缺一样就退 2 而根本走不到放大这一步。端点填成不存在的域名不要紧 ——
+    建客户端不发网络请求，而 09 全程不调模型。
+    """
+    monkeypatch.setenv("AITE_MODEL_API_KEY", "not-a-real-key")
     cfg = tmp_path / "live.yaml"
-    cfg.write_text("platform: fake\nmodel:\n  base_url: ''\n  model: ''\n", encoding="utf-8")
+    cfg.write_text(
+        "platform: fake\nmodel:\n  base_url: 'https://example.invalid/v1'\n  model: 'x'\n",
+        encoding="utf-8",
+    )
     code = main(["run", "evals/p0", "--only", "09_bot_ignored", "--model", "live",
                  "--config", str(cfg)])
     err = capsys.readouterr().err
     assert f"x{LIVE_TIMEOUT_SCALE}" in err
-    assert code in (0, 1)          # 09 不调模型，配置空不空都跑得完
+    assert code in (0, 1)          # 09 不调模型，端点通不通都跑得完
 
 
 def test_cli_digest_goes_to_stderr_not_stdout(capsys):
@@ -438,3 +447,157 @@ def test_cli_digest_goes_to_stderr_not_stdout(capsys):
     captured = capsys.readouterr()
     assert "协议出牌报告" in captured.err
     assert "协议出牌报告" not in captured.out
+
+
+# --- T17：拿真模型跑 evals/p0 之后补上的观测项 ------------------------------------
+#
+# 下面几条都是 2026-09-10 用 deepseek-chat 真跑 10 个场景时撞出来的，报告见
+# evals/live-report-2026-09-10.md。造出牌仍然用脚本化替身 —— 这里验的是**装置
+# 会不会看错**，不是真模型的行为。
+
+async def test_nudge_is_not_read_as_final_when_max_steps_cuts_the_run_short():
+    """撞上限时最后一步的纯文本是 nudge，不是「兜成 final」。
+
+    实测 08_step_limit（`max_steps: 3`）：第 3 步纯文本走 §3.3 的 nudge 分支，
+    任务以「已达步数上限」failed，旧判据（看下一步 delta 里有没有 system）却因为
+    压根没有下一步而把它记成了 text_only_as_final。
+    """
+    sc = scenario("t17_nudge_at_limit", [
+        {"tool_calls": [{"name": "checklist_note", "arguments": {"text": "想想"}}]},
+        {"text": "我觉得应该没问题"},
+    ], config={"worker": {"max_steps": 2, "card_update_min_interval_ms": 0}})
+    report = await report_of(sc)
+    fb = report["fallbacks"]
+
+    assert fb["text_only_as_final"] == [], "撞上限的那一步没有被兜成 final，报告不能这么说"
+    assert len(fb["text_only_nudge"]) == 1
+    hit = fb["text_only_nudge"][0]
+    assert hit["step"] == 1
+    assert hit["nudge"] is None, "兜底之后没有下一次调用，system 提示没能再投出去"
+    # worker 的真实反应：撞上限 failed，不是 delivered
+    assert report["tasks"][-1]["status"] == "failed"
+    assert report["hit_max_steps"] == [report["tasks"][-1]["task_no"]]
+    assert "上限" in report["outbound_texts"][-1]
+
+
+async def test_text_only_at_step_zero_is_still_read_as_final():
+    """修误判别把真的那条也修没了：steps==0 的纯文本仍然是 final。"""
+    report = await report_of(scenario("t17_still_final", [{"text": "北京今天晴。"}]))
+
+    assert [h["step"] for h in report["fallbacks"]["text_only_as_final"]] == [0]
+    assert report["fallbacks"]["text_only_nudge"] == []
+    assert report["tasks"][-1]["status"] == "delivered"
+
+
+async def test_empty_text_at_step_zero_is_a_nudge_not_a_final():
+    """第一步就回空文本（真模型被 max_tokens 截断时会这样）：worker 走的是 nudge。"""
+    sc = scenario("t17_empty_first", [
+        {"text": ""},
+        final(),
+    ], config={"worker": {"card_update_min_interval_ms": 0}})
+    report = await report_of(sc)
+
+    assert report["fallbacks"]["text_only_as_final"] == []
+    assert [h["step"] for h in report["fallbacks"]["text_only_nudge"]] == [0]
+    assert report["fallbacks"]["text_only_nudge"][0]["nudge"] == NUDGE
+
+
+async def test_repeating_one_call_verbatim_is_flagged_as_a_loop():
+    """原地打转要被标出来 —— §3.3 没有哪条兜底接得住它。
+
+    实测 04_csv_to_chart：沙箱对不含 savefig 的代码一律回 exit_code=0 + 空 stdout，
+    模型对逐字节相同的 run_python 连发 31 次，一路烧到 max_steps。
+    """
+    same = {"tool_calls": [{"name": "checklist_note", "arguments": {"text": "再查一遍"}}]}
+    sc = scenario("t17_loop", [same, same, same, final()],
+                  config={"worker": {"card_update_min_interval_ms": 0}})
+    report = await report_of(sc)
+
+    assert len(report["repeat_loops"]) == 1
+    loop = report["repeat_loops"][0]
+    assert loop["name"] == "checklist_note"
+    assert loop["count"] == 3
+    assert (loop["first_step"], loop["last_step"]) == (0, 2)
+    assert loop["arguments"] == {"text": "再查一遍"}
+    # 工具每次都成功 —— 所以 §3.3 的两条计数兜底都没数到它
+    assert report["fallbacks"]["invalid_args"]["count"] == 0
+    assert report["fallbacks"]["sandbox_errors"] == 0
+    assert "原地打转" in render_digest([("t17_loop", report)])
+
+
+async def test_two_identical_calls_are_not_a_loop():
+    """连着两次一样是正常探测（真模型实测里 list_files() 连发两次是常态），别报警。"""
+    same = {"tool_calls": [{"name": "checklist_note", "arguments": {"text": "再查一遍"}}]}
+    sc = scenario("t17_no_loop", [same, same, final()],
+                  config={"worker": {"card_update_min_interval_ms": 0}})
+    report = await report_of(sc)
+
+    assert report["repeat_loops"] == []
+
+
+async def test_different_arguments_are_not_a_loop():
+    """同一个工具、参数在变 = 模型还在换招，不算卡住。"""
+    sc = scenario("t17_varying", [
+        {"tool_calls": [{"name": "checklist_note", "arguments": {"text": f"第 {i} 次"}}]}
+        for i in range(3)
+    ] + [final()], config={"worker": {"card_update_min_interval_ms": 0}})
+    report = await report_of(sc)
+
+    assert report["repeat_loops"] == []
+
+
+async def test_a_clean_run_has_no_repeat_loops():
+    report = await report_of(scenario("t17_clean", [final()]))
+    assert report["repeat_loops"] == []
+
+
+def test_cli_live_fails_fast_when_base_url_is_missing(capsys, tmp_path, monkeypatch):
+    """配置缺一样就立刻退 2，别让每个场景各自跑到第一次 chat 才炸。
+
+    不拦的话 `ModelConfigError` 会被 worker 的 §3.3 当成模型 5xx 白重试 2 次
+    （2s + 5s），最后给用户一句「模型服务暂不可用」—— 真正的原因（yaml 没填）
+    一个字都看不到，10 个场景就是 10 次 7 秒空等。
+    """
+    monkeypatch.setenv("AITE_MODEL_API_KEY", "not-a-real-key")
+    cfg = tmp_path / "live.yaml"
+    cfg.write_text("platform: fake\nmodel:\n  base_url: ''\n  model: 'x'\n", encoding="utf-8")
+
+    assert main(["run", "evals/p0", "--only", "01_simple_qa", "--model", "live",
+                 "--config", str(cfg)]) == 2
+    captured = capsys.readouterr()
+    assert "起不来" in captured.err and "base_url" in captured.err
+    assert captured.out == "", "起不来时 stdout 不该有半份 JSON 摘要"
+
+
+def test_cli_live_fails_fast_when_the_api_key_env_is_missing(capsys, tmp_path, monkeypatch):
+    """密钥只从环境变量读（§3.1）—— 没设就当场说清楚是哪个变量，别报成模型故障。"""
+    monkeypatch.delenv("AITE_MODEL_API_KEY", raising=False)
+    cfg = tmp_path / "live.yaml"
+    cfg.write_text(
+        "platform: fake\nmodel:\n  base_url: 'https://example.invalid/v1'\n  model: 'x'\n",
+        encoding="utf-8",
+    )
+
+    assert main(["run", "evals/p0", "--only", "01_simple_qa", "--model", "live",
+                 "--config", str(cfg)]) == 2
+    err = capsys.readouterr().err
+    assert "起不来" in err and "AITE_MODEL_API_KEY" in err
+
+
+async def test_steps_used_up_but_delivered_is_not_reported_as_a_crash():
+    """步数刚好用满却正常交付 —— digest 得把终态带上，别读成跑飞了。
+
+    实测 08_step_limit（`max_steps: 3`）第二次跑就是这样：第 3 步调了 final，
+    任务 delivered，但 `steps >= max_steps` 成立。
+    """
+    sc = scenario("t17_full_but_ok", [
+        {"tool_calls": [{"name": "checklist_note", "arguments": {"text": "想想"}}]},
+        {"tool_calls": [{"name": "checklist_note", "arguments": {"text": "再想想"}}]},
+        final(),
+    ], config={"worker": {"max_steps": 3, "card_update_min_interval_ms": 0}})
+    report = await report_of(sc)
+
+    task = report["tasks"][-1]
+    assert task["hit_max_steps"] is True and task["status"] == "delivered"
+    digest = render_digest([("t17_full_but_ok", report)])
+    assert "步数用满" in digest and "delivered" in digest
