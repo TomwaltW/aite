@@ -18,5 +18,8 @@ sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+# test-util 给 tokio::time::pause()：超时测试不靠真实 sleep（纪律 4）
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

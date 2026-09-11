@@ -89,7 +89,9 @@ dependencies = [
  "aite-contracts",
  "aite-proto",
  "async-trait",
+ "chrono",
  "prost",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
@@ -137,6 +139,7 @@ version = "0.0.1"
 dependencies = [
  "aite-contracts",
  "async-trait",
+ "chrono",
  "hex",
  "jsonschema",
  "serde_json",
