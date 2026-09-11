@@ -16,8 +16,10 @@ chrono.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
-clap.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+# test-util 让测试能暂停/推进 tokio 时钟（纪律 4：不靠真实 sleep）
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
