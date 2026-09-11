@@ -23,7 +23,7 @@ R0 落骨架，R1–R7 七轨并行把各面做完，**已经全部合入 main**
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-romega
 分支     : task-romega
-基线     : <合流后 main 的 HEAD 短 sha>   ← 见开场自检
+基线     : c300e37   ← main 的 HEAD（完整 sha c300e37fcbee4b8d340616074182eeb3c2e2af93）
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1、protoc 36.1、Docker 29.6.1
 ```
 
@@ -33,7 +33,7 @@ PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bas
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-romega
-git log --oneline -1                                   # 期望 <基线 sha> ...
+git log --oneline -1                                   # 期望 c300e37 ...
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行 "全部通过"，退出码 0（首次全量编译 5–10 分钟）
 core/target/debug/aite contracts lock --check          # 期望 OK 36 files
@@ -45,7 +45,7 @@ core/target/debug/aite contracts lock --check          # 期望 OK 36 files
 |---|---|
 | A3/C2 契约锁 | `OK 36 files` |
 | C1 契约测试 | `contracts passed=25 failed=0` |
-| B 全量 cargo test | `cargo passed=<开场实测数> failed=0` |
+| B 全量 cargo test | `cargo passed=633 failed=0` |
 | B 全量 go test（-race） | 八个包全 `ok`（`-race` 是硬门禁，别去掉） |
 | B8 评测 | `passed 0/10` —— **这正是你要变成 10/10 的那个数** |
 
@@ -208,7 +208,7 @@ core/target/debug/aite evals run evals/p0 --only 04_csv_to_chart --model live
 ```
 ## RΩ 回执
 
-基线 <sha> → 提交 <短 sha>
+基线 c300e37 → 提交 <短 sha>
 
 ### B8
 $ core/target/debug/aite evals run evals/p0 --platform fake --model scripted
