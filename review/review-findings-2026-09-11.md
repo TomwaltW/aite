@@ -130,4 +130,10 @@
 | 18 | `edge/internal/sandbox/docker.go` | 新增 `dockerErr`，13 处 daemon 调用点在 `IsErrConnectionFailed` 时改判 `Unavailable`（契约冻结：daemon 不可达 → UNAVAILABLE） | — |
 | 19 | `edge/internal/sandbox/workdir.go` | workdir 自身也归一化（尾斜杠不再让所有 Put/GetFile 变 InvalidPath） | 新增「workdir 带尾斜杠仍接受」用例 |
 
+| 20 | `edge/internal/feishu/helpers_test.go` + `scripts/check.sh` | `route` 的读取侧（count/called/last/at）补锁，指回 `f.mu`；`-race` 写进 check.sh 的全量 go test | 合流后在 main 上跑 `-race` 抓到现行（`TestTransportErrorIsRetryable`），修后八个包全 ok |
+
+> 第 20 条是审核**没抓准**的一条：R1 把它列成「建议」并判断「`-race` 实际抓不到」。
+> 实际抓得到 —— 传输错误那条路上连接被掐断，服务端 goroutine 还在跑，断言就先读了。
+> 这也是为什么把 `-race` 放进门禁比靠人记得跑一次可靠。
+
 三处「拆掉修复验证测试会红」的实测（#10 / #13 以及 F2 的对照）是这次唯一能证明「新测试不是摆设」的手段，回执里保留了实际输出。
