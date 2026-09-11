@@ -1,0 +1,69 @@
+{
+  "event_id": "evt_post_with_image_0007",
+  "kind": "EVENT_KIND_MESSAGE",
+  "platform": "feishu",
+  "tenant_id": "default",
+  "workspace_id": "cli_a1b2c3d4e5f60123",
+  "chat_id": "oc_chat_p0_demo_0001",
+  "chat_type": "CHAT_TYPE_GROUP",
+  "sender_id": "ou_zhang_san_00000000000000000001",
+  "sender_kind": "SENDER_KIND_HUMAN",
+  "text": "本周复盘\n看下这张图，口径见 [指标字典](https://example.feishu.cn/docx/DocTokenAbc123)",
+  "raw_text": "本周复盘\n@_user_1 看下这张图，口径见 [指标字典](https://example.feishu.cn/docx/DocTokenAbc123)",
+  "mentioned": true,
+  "anchor": {
+    "platform": "feishu",
+    "chat_id": "oc_chat_p0_demo_0001",
+    "message_id": "om_post_0007"
+  },
+  "attachments": [
+    {
+      "kind": "ATTACHMENT_KIND_IMAGE",
+      "file_key": "img_v3_0a1b_2c3d4e5f-6071-8293-a4b5-c6d7e8f9a0b1g",
+      "message_id": "om_post_0007"
+    }
+  ],
+  "occurred_at": "2026-09-09T01:08:00Z",
+  "raw": {
+    "event": {
+      "message": {
+        "chat_id": "oc_chat_p0_demo_0001",
+        "chat_type": "group",
+        "content": "{\"title\": \"本周复盘\", \"content\": [[{\"tag\": \"at\", \"user_id\": \"@_user_1\", \"user_name\": \"Aite\"}, {\"tag\": \"text\", \"text\": \" 看下这张图，口径见 \"}, {\"tag\": \"a\", \"text\": \"指标字典\", \"href\": \"https://example.feishu.cn/docx/DocTokenAbc123\"}], [{\"tag\": \"img\", \"image_key\": \"img_v3_0a1b_2c3d4e5f-6071-8293-a4b5-c6d7e8f9a0b1g\"}]]}",
+        "create_time": "1788916080000",
+        "mentions": [
+          {
+            "id": {
+              "open_id": "ou_aite_bot_0000000000000000000001",
+              "union_id": "on_aitebot",
+              "user_id": ""
+            },
+            "key": "@_user_1",
+            "name": "Aite",
+            "tenant_key": "tk_p0_demo"
+          }
+        ],
+        "message_id": "om_post_0007",
+        "message_type": "post",
+        "update_time": "1788916080000"
+      },
+      "sender": {
+        "sender_id": {
+          "open_id": "ou_zhang_san_00000000000000000001",
+          "union_id": "on_zhang_sa",
+          "user_id": "zhang_sa"
+        },
+        "sender_type": "user",
+        "tenant_key": "tk_p0_demo"
+      }
+    },
+    "header": {
+      "app_id": "cli_a1b2c3d4e5f60123",
+      "create_time": "1788916080000",
+      "event_id": "evt_post_with_image_0007",
+      "event_type": "im.message.receive_v1",
+      "tenant_key": "tk_p0_demo"
+    },
+    "schema": "2.0"
+  }
+}

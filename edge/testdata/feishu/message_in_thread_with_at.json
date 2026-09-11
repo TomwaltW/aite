@@ -1,0 +1,55 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_in_thread_with_at_0003",
+    "create_time": "1788915840000",
+    "event_type": "im.message.receive_v1",
+    "tenant_key": "tk_p0_demo",
+    "app_id": "cli_a1b2c3d4e5f60123"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_zhang_sa",
+        "user_id": "zhang_sa",
+        "open_id": "ou_zhang_san_00000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "tk_p0_demo"
+    },
+    "message": {
+      "message_id": "om_thread_reply_0003",
+      "root_id": "om_toplevel_0001",
+      "parent_id": "om_thread_reply_0002",
+      "thread_id": "omt_topic_0001",
+      "create_time": "1788915840000",
+      "update_time": "1788915840000",
+      "chat_id": "oc_chat_p0_demo_0001",
+      "chat_type": "group",
+      "message_type": "text",
+      "content": "{\"text\": \"@_user_1 顺便把 @_user_2 上周给的口径也对一下\"}",
+      "mentions": [
+        {
+          "key": "@_user_1",
+          "id": {
+            "union_id": "on_aitebot",
+            "user_id": "",
+            "open_id": "ou_aite_bot_0000000000000000000001"
+          },
+          "name": "Aite",
+          "tenant_key": "tk_p0_demo"
+        },
+        {
+          "key": "@_user_2",
+          "id": {
+            "union_id": "on_lisi",
+            "user_id": "lisi",
+            "open_id": "ou_li_si_000000000000000000000002"
+          },
+          "name": "李四",
+          "tenant_key": "tk_p0_demo"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "event_id": "evt_card_action_stop_0006",
+  "kind": "EVENT_KIND_CARD_ACTION",
+  "platform": "feishu",
+  "tenant_id": "default",
+  "workspace_id": "cli_a1b2c3d4e5f60123",
+  "chat_id": "oc_chat_p0_demo_0001",
+  "chat_type": "CHAT_TYPE_GROUP",
+  "sender_id": "ou_zhang_san_00000000000000000001",
+  "sender_kind": "SENDER_KIND_HUMAN",
+  "mentioned": true,
+  "anchor": {
+    "platform": "feishu",
+    "chat_id": "oc_chat_p0_demo_0001",
+    "message_id": "om_checklist_card_0001"
+  },
+  "card_action": {
+    "card_id": "om_checklist_card_0001",
+    "action": "CARD_ACTION_KIND_STOP",
+    "task_id": "b7c1e6f0-1111-4222-8333-444455556666",
+    "value": {
+      "action": "stop",
+      "task_id": "b7c1e6f0-1111-4222-8333-444455556666"
+    }
+  },
+  "occurred_at": "2026-09-09T01:07:00Z",
+  "raw": {
+    "event": {
+      "action": {
+        "tag": "button",
+        "timezone": "Asia/Shanghai",
+        "value": {
+          "action": "stop",
+          "task_id": "b7c1e6f0-1111-4222-8333-444455556666"
+        }
+      },
+      "context": {
+        "open_chat_id": "oc_chat_p0_demo_0001",
+        "open_message_id": "om_checklist_card_0001",
+        "preview_token": "",
+        "url": "https://applink.feishu.cn/client/message/link/open?token=xxx"
+      },
+      "delivery_type": "open_message",
+      "host": "im_message",
+      "operator": {
+        "open_id": "ou_zhang_san_00000000000000000001",
+        "tenant_key": "tk_p0_demo",
+        "union_id": "on_zhangsan",
+        "user_id": "zhang_san"
+      }
+    },
+    "header": {
+      "app_id": "cli_a1b2c3d4e5f60123",
+      "create_time": "1788916020000000",
+      "event_id": "evt_card_action_stop_0006",
+      "event_type": "card.action.trigger",
+      "tenant_key": "tk_p0_demo"
+    },
+    "schema": "2.0"
+  }
+}
