@@ -1,0 +1,32 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_with_file_0005",
+    "create_time": "1788915960000",
+    "event_type": "im.message.receive_v1",
+    "tenant_key": "tk_p0_demo",
+    "app_id": "cli_a1b2c3d4e5f60123"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "union_id": "on_zhang_sa",
+        "user_id": "zhang_sa",
+        "open_id": "ou_zhang_san_00000000000000000001"
+      },
+      "sender_type": "user",
+      "tenant_key": "tk_p0_demo"
+    },
+    "message": {
+      "message_id": "om_with_file_0005",
+      "root_id": "om_toplevel_0001",
+      "parent_id": "om_toplevel_0001",
+      "create_time": "1788915960000",
+      "update_time": "1788915960000",
+      "chat_id": "oc_chat_p0_demo_0001",
+      "chat_type": "group",
+      "message_type": "file",
+      "content": "{\"file_key\": \"file_v2_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9\", \"file_name\": \"2026Q3-sales.csv\", \"file_size\": \"20480\"}"
+    }
+  }
+}

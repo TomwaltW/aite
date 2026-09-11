@@ -1,0 +1,35 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_card_action_stop_0006",
+    "create_time": "1788916020000000",
+    "event_type": "card.action.trigger",
+    "tenant_key": "tk_p0_demo",
+    "app_id": "cli_a1b2c3d4e5f60123"
+  },
+  "event": {
+    "operator": {
+      "tenant_key": "tk_p0_demo",
+      "user_id": "zhang_san",
+      "open_id": "ou_zhang_san_00000000000000000001",
+      "union_id": "on_zhangsan"
+    },
+    "token": "c-3f0a1b2c3d4e5f60718293a4b5c6d7e8",
+    "action": {
+      "value": {
+        "action": "stop",
+        "task_id": "b7c1e6f0-1111-4222-8333-444455556666"
+      },
+      "tag": "button",
+      "timezone": "Asia/Shanghai"
+    },
+    "host": "im_message",
+    "delivery_type": "open_message",
+    "context": {
+      "url": "https://applink.feishu.cn/client/message/link/open?token=xxx",
+      "preview_token": "",
+      "open_message_id": "om_checklist_card_0001",
+      "open_chat_id": "oc_chat_p0_demo_0001"
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "event_id": "evt_from_bot_0004",
+  "kind": "EVENT_KIND_MESSAGE",
+  "platform": "feishu",
+  "tenant_id": "default",
+  "workspace_id": "cli_a1b2c3d4e5f60123",
+  "chat_id": "oc_chat_p0_demo_0001",
+  "chat_type": "CHAT_TYPE_GROUP",
+  "sender_id": "ou_other_bot_000000000000000000001",
+  "sender_kind": "SENDER_KIND_BOT",
+  "text": "【日报机器人】昨日 GMV 1234 万",
+  "raw_text": "@_user_1 【日报机器人】昨日 GMV 1234 万",
+  "mentioned": true,
+  "anchor": {
+    "platform": "feishu",
+    "chat_id": "oc_chat_p0_demo_0001",
+    "message_id": "om_from_bot_0004",
+    "thread_id": "om_toplevel_0001"
+  },
+  "occurred_at": "2026-09-09T01:05:00Z",
+  "raw": {
+    "event": {
+      "message": {
+        "chat_id": "oc_chat_p0_demo_0001",
+        "chat_type": "group",
+        "content": "{\"text\": \"@_user_1 【日报机器人】昨日 GMV 1234 万\"}",
+        "create_time": "1788915900000",
+        "mentions": [
+          {
+            "id": {
+              "open_id": "ou_aite_bot_0000000000000000000001",
+              "union_id": "on_aitebot",
+              "user_id": ""
+            },
+            "key": "@_user_1",
+            "name": "Aite",
+            "tenant_key": "tk_p0_demo"
+          }
+        ],
+        "message_id": "om_from_bot_0004",
+        "message_type": "text",
+        "root_id": "om_toplevel_0001",
+        "update_time": "1788915900000"
+      },
+      "sender": {
+        "sender_id": {
+          "open_id": "ou_other_bot_000000000000000000001",
+          "union_id": "on_other_bo",
+          "user_id": ""
+        },
+        "sender_type": "bot",
+        "tenant_key": "tk_p0_demo"
+      }
+    },
+    "header": {
+      "app_id": "cli_a1b2c3d4e5f60123",
+      "create_time": "1788915900000",
+      "event_id": "evt_from_bot_0004",
+      "event_type": "im.message.receive_v1",
+      "tenant_key": "tk_p0_demo"
+    },
+    "schema": "2.0"
+  }
+}
