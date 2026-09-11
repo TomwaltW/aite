@@ -32,7 +32,10 @@ run "A4d gofmt"                    bash -c 'cd edge && test -z "$(gofmt -l .)"'
 run "A5 cargo test --no-run（全部测试可编译）" bash -c 'cd core && cargo test --workspace --no-run'
 run "C1 契约测试"                   bash -c 'cd core && cargo test -p aite-contracts 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"contracts passed=\" p \" failed=\" f; exit (f>0)}"'
 run "B 全量 cargo test"             bash -c 'cd core && cargo test --workspace --no-fail-fast 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p \" failed=\" f; exit (f>0)}"'
-run "B 全量 go test"                bash -c 'cd edge && go test ./... -count=1'
+# -race 不是可选项：Go 侧的并发面（长连接重连、令牌桶、容器记账表、gRPC 并发读
+# capabilities）都不是单线程的，而竞态在普通 go test 下完全隐形 —— 合流审核那次
+# 就是靠它抓出 fakeFeishu 的读取侧没持锁（TestTransportErrorIsRetryable 现行）。
+run "B 全量 go test（-race）"       bash -c 'cd edge && go test -race ./... -count=1'
 
 # 评测本身在 RΩ 之前允许 not implemented / passed k/10，不计入 FAILED，只打印出来看。
 echo; echo "=== B8 评测（RΩ 前允许不满分 / not implemented）==="

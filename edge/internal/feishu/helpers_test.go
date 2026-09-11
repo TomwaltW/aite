@@ -156,6 +156,10 @@ func (r recordedRequest) jsonBodyOf(t *testing.T) map[string]any {
 }
 
 type route struct {
+	// mu 是 fakeFeishu 那把锁的指针：写入侧（serve）持它，读取侧（count/called/last/at）
+	// 也必须持。不持的话 -race 会在服务端 goroutine 还没退出时抓现行 ——
+	// TestTransportErrorIsRetryable 就是这种形状：连接被掐断，断言先跑到了。
+	mu        *sync.Mutex
 	responses []func(w http.ResponseWriter)
 	calls     []recordedRequest
 }
@@ -182,7 +186,7 @@ func routeKey(method, path string) string { return method + " " + path }
 func (f *fakeFeishu) on(method, path string, responses ...func(w http.ResponseWriter)) *route {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := &route{responses: responses}
+	r := &route{mu: &f.mu, responses: responses}
 	f.routes[routeKey(method, path)] = r
 	return r
 }
@@ -248,12 +252,18 @@ func (f *fakeFeishu) serve(w http.ResponseWriter, req *http.Request) {
 	respond(w)
 }
 
-func (r *route) count() int { return len(r.calls) }
+func (r *route) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
 
-func (r *route) called() bool { return len(r.calls) > 0 }
+func (r *route) called() bool { return r.count() > 0 }
 
 func (r *route) last(t *testing.T) recordedRequest {
 	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if len(r.calls) == 0 {
 		t.Fatal("这条路由一次都没被调用")
 	}
@@ -262,6 +272,8 @@ func (r *route) last(t *testing.T) recordedRequest {
 
 func (r *route) at(t *testing.T, i int) recordedRequest {
 	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if i >= len(r.calls) {
 		t.Fatalf("这条路由只被调用了 %d 次，取不到第 %d 次", len(r.calls), i)
 	}
