@@ -139,6 +139,30 @@ fn seq_match(pieces: &[Piece], s: &[char], i: usize) -> Option<usize> {
     rep_match(p, rest, s, i, 0)
 }
 
+/// 一条序列在位置 `i` 上**所有**可能的结束位置（顶层只要第一个，组里要全部）。
+fn seq_match_all(pieces: &[Piece], s: &[char], i: usize) -> Vec<usize> {
+    let Some((p, rest)) = pieces.split_first() else {
+        return vec![i];
+    };
+    rep_match_all(p, rest, s, i, 0)
+}
+
+fn rep_match_all(p: &Piece, rest: &[Piece], s: &[char], i: usize, done: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    if p.max.is_none_or(|m| done < m) {
+        for next in atom_match(&p.atom, s, i) {
+            if next == i && done >= p.min {
+                continue;
+            }
+            out.extend(rep_match_all(p, rest, s, next, done + 1));
+        }
+    }
+    if done >= p.min {
+        out.extend(seq_match_all(rest, s, i));
+    }
+    out
+}
+
 fn rep_match(p: &Piece, rest: &[Piece], s: &[char], i: usize, done: usize) -> Option<usize> {
     // 贪婪：先试着再匹配一次
     if p.max.is_none_or(|m| done < m) {
@@ -168,7 +192,8 @@ fn atom_match(atom: &Atom, s: &[char], i: usize) -> Vec<usize> {
             }
         }
         Atom::Any => {
-            if i < s.len() {
+            // Python 的 `.` 默认不匹配换行（没开 re.DOTALL）。
+            if s.get(i).is_some_and(|c| *c != '\n') {
                 vec![i + 1]
             } else {
                 vec![]
@@ -181,7 +206,17 @@ fn atom_match(atom: &Atom, s: &[char], i: usize) -> Vec<usize> {
                 vec![]
             }
         }
-        Atom::Group(alts) => alts.iter().filter_map(|alt| seq_match(alt, s, i)).collect(),
+        Atom::Group(alts) => {
+            // 必须给出**所有**可能的结束位置：只给贪婪那一个的话，
+            // `(a*)ab` 对 "aab" 会失败 —— 组里的 `a*` 吃光了 a 就退不回来。
+            let mut ends: Vec<usize> = alts
+                .iter()
+                .flat_map(|alt| seq_match_all(alt, s, i))
+                .collect();
+            ends.sort_unstable_by(|a, b| b.cmp(a)); // 长的先试，保持贪婪语义
+            ends.dedup();
+            ends
+        }
         Atom::Start => {
             if i == 0 {
                 vec![i]
@@ -190,7 +225,10 @@ fn atom_match(atom: &Atom, s: &[char], i: usize) -> Vec<usize> {
             }
         }
         Atom::End => {
-            if i == s.len() {
+            // Python 的 `$` 除了串尾，也匹配「末尾换行之前」——
+            // YAML 的 `|` 块标量天然带一个尾换行（05 的 reply 就是），
+            // 不认这条的话 `x$` 对 "x\n" 会假红。
+            if i == s.len() || (i + 1 == s.len() && s[i] == '\n') {
                 vec![i]
             } else {
                 vec![]
@@ -248,8 +286,20 @@ impl Parser {
             Some('$') => Ok(Atom::End),
             Some('.') => Ok(Atom::Any),
             Some('(') => {
+                // `(?:` 放行（只分组不捕获，对本引擎无害）；别的 `(?…` 仍然拒。
                 if self.peek() == Some('?') {
-                    return Err(RegexError("不支持 (?…) 这类扩展分组".to_string()));
+                    self.bump();
+                    if self.bump() != Some(':') {
+                        return Err(RegexError("只支持 (?:…) 这一种扩展分组".to_string()));
+                    }
+                } else {
+                    // 裸 `(` 是捕获分组。Python 的 findall 在有分组时返回的是**分组**
+                    // 而不是整段匹配，本引擎没有捕获，静默返回整段就是错判
+                    // （distinct_matches 的计数会偏）。要求显式写成非捕获。
+                    return Err(RegexError(
+                        "不支持捕获分组：findall 在有分组时返回的是分组而不是整段匹配，                         这里做不到。只想分组请写 (?:…)"
+                            .to_string(),
+                    ));
                 }
                 let alts = self.parse_alternation()?;
                 if self.bump() != Some(')') {
@@ -287,6 +337,12 @@ impl Parser {
             't' => Ok(Atom::Char('\t')),
             'r' => Ok(Atom::Char('\r')),
             '1'..='9' => Err(RegexError("不支持反向引用".to_string())),
+            // 字母类转义一律走白名单。原来是 `other => Char(other)` 兜底，于是
+            // `\b`（词边界）被当成字母 b、`\A`/`\Z`（串锚）被当成 A/Z ——
+            // 断言静默匹配错，而模块头承诺的是「不支持的语法在编译期报错」。
+            c if c.is_ascii_alphanumeric() => Err(RegexError(format!(
+                "不支持 \\{c} 这个转义（词边界 \\b、串锚 \\A \\Z 都没实现）"
+            ))),
             other => Ok(Atom::Char(other)),
         }
     }
@@ -399,5 +455,118 @@ impl Parser {
                 Ok((min, Some(max)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn re(p: &str) -> Regex {
+        Regex::new(p).unwrap_or_else(|e| panic!("编译 {p:?} 失败：{e}"))
+    }
+
+    /// 场景里真正在用的那一个（05_history_summary 的 om_h[0-9]+），先保住它。
+    #[test]
+    fn the_pattern_the_suite_actually_uses() {
+        let r = re("om_h[0-9]+");
+        assert_eq!(
+            r.find_all("引用 [om_h1] 与 [om_h3]，还有 [om_h5]"),
+            vec!["om_h1", "om_h3", "om_h5"]
+        );
+        assert!(r.is_match("om_h42"));
+        assert!(!r.is_match("om_hx"));
+    }
+
+    // --- 五类曾经静默错判的 ---------------------------------------------------
+
+    /// `.` 不匹配换行（Python 没开 DOTALL）。曾经 Atom::Any 只判 `i < s.len()`。
+    #[test]
+    fn dot_does_not_cross_a_newline() {
+        assert!(!re("a.b").is_match("a\nb"));
+        assert!(re("a.b").is_match("axb"));
+        assert_eq!(re("a.").find_all("a\nax"), vec!["ax"]);
+    }
+
+    /// `$` 认末尾那个换行。YAML 的 `|` 块标量天然带尾换行，不认这条会假红。
+    #[test]
+    fn dollar_accepts_one_trailing_newline() {
+        assert!(re("x$").is_match("x"));
+        assert!(re("x$").is_match("x\n"), "YAML 块标量的尾换行会让断言假红");
+        assert!(!re("x$").is_match("x\n\n"));
+        assert!(!re("x$").is_match("xy"));
+    }
+
+    /// 组内量词要能回溯。曾经 Group 只取贪婪那一个结束位置。
+    #[test]
+    fn a_group_backtracks_its_quantifier() {
+        assert!(re("(?:a*)ab").is_match("aab"), "组里的 a* 要让得出一个 a");
+        assert!(
+            re("(?:a|ab)c").is_match("abc"),
+            "第一个分支不行要退回去试第二个"
+        );
+        assert!(re("(?:ab?)+c").is_match("aababc"));
+    }
+
+    /// 词边界与串锚没实现 —— 必须编译期报错，不能当成普通字母。
+    #[test]
+    fn unimplemented_letter_escapes_are_rejected_not_silently_matched() {
+        for p in [r"\bword", r"\Bx", r"\Atext", r"text\Z", r"\Gx"] {
+            let err = Regex::new(p).expect_err(&format!("{p} 该被拒"));
+            assert!(err.0.contains("不支持"), "{p}: {}", err.0);
+        }
+        // 曾经的错判形态：\b 被当成字母 b
+        assert!(Regex::new(r"\bword").is_err());
+    }
+
+    /// 捕获分组要拒（Python findall 有分组时返回分组，本引擎给不出），
+    /// 但 (?:…) 放行。
+    #[test]
+    fn capturing_groups_are_rejected_but_non_capturing_work() {
+        let err = Regex::new("(ab)+").expect_err("捕获分组该被拒");
+        assert!(err.0.contains("(?:"), "报错要告诉人怎么改：{}", err.0);
+        assert!(re("(?:ab)+").is_match("abab"));
+        assert!(Regex::new("(?=x)").is_err(), "前瞻仍然要拒");
+        assert!(Regex::new("(?P<n>x)").is_err(), "命名组仍然要拒");
+    }
+
+    // --- 原本就该有的基本盘 ---------------------------------------------------
+
+    #[test]
+    fn anchors_classes_and_quantifiers() {
+        assert!(re("^abc$").is_match("abc"));
+        assert!(!re("^abc$").is_match("xabc"));
+        assert!(re(r"\d{3}").is_match("x123"));
+        assert!(!re(r"\d{3}").is_match("x12"));
+        assert!(re("[^a-z]+").is_match("ABC"));
+        assert!(re(r"a\.b").is_match("a.b"));
+        assert!(!re(r"a\.b").is_match("axb"));
+        // 实测 python3：findall("a{2,3}", "aaaa") == ["aaa"] —— 剩下那个 a 配不够 min=2
+        assert_eq!(re("a{2,3}").find_all("aaaa"), vec!["aaa"]);
+    }
+
+    #[test]
+    fn find_all_is_non_overlapping_and_handles_empty_matches() {
+        assert_eq!(re("aa").find_all("aaaa"), vec!["aa", "aa"]);
+        // 空匹配不能原地打转
+        assert_eq!(re("a*").find_all("b").len(), 2, "每个位置一个空匹配");
+    }
+
+    #[test]
+    fn malformed_patterns_report_instead_of_panicking() {
+        // 注意 "a{2," 不在此列：Python 对没闭合的 { 是当字面量处理的，不报错。
+        for p in ["(?:ab", "[a-", r"\1", "*abc"] {
+            assert!(Regex::new(p).is_err(), "{p} 该报错");
+        }
+    }
+
+    /// 非 ASCII 按 char 走，不能在字节边界上出事。
+    #[test]
+    fn works_on_multibyte_text() {
+        assert!(re("中.$").is_match("中文"));
+        assert_eq!(
+            re("[\u{4e00}-\u{9fff}]+").find_all("ab中文cd汉"),
+            vec!["中文", "汉"]
+        );
     }
 }

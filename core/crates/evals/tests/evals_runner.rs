@@ -603,3 +603,104 @@ async fn stats_shape_is_stable() {
         ]
     );
 }
+
+// --- 给 RΩ 的两个接线闸 ---------------------------------------------------------
+
+/// 回归：docker 体检原来写成「接线了就 return None」—— RΩ 一注入 SandboxFactory，
+/// 体检就整个消失，回到「daemon 没起时十个场景各自烂在第一个工具调用上」。
+/// 现在体检是注入的，且必须与工厂成对给。
+#[test]
+fn a_sandbox_factory_without_a_preflight_is_refused() {
+    let factory: aite_evals::SandboxFactory = Arc::new(|_, _, _, _| Err("不该被调到".to_string()));
+    let wiring = Wiring {
+        sandbox: Some(factory),
+        ..Wiring::default()
+    };
+    let out = cli_with(&["run", SUITE_DIR, "--sandbox", "docker"], &wiring);
+    assert_eq!(out.code, 2, "接线不全该是参数/环境问题那一档");
+    let text = out.stderr_text();
+    assert!(text.contains("preflight"), "{text}");
+    assert!(text.contains("第一个工具调用"), "要说清后果：{text}");
+}
+
+/// 体检说不行的时候，十个场景一个都不该跑起来 —— 一次把话说清，
+/// 而不是让每个场景各自撞上去。
+#[test]
+fn a_failing_preflight_stops_everything_before_the_first_scenario() {
+    let factory: aite_evals::SandboxFactory = Arc::new(|_, _, _, _| Err("不该被调到".to_string()));
+    let probe: aite_evals::DockerProbe = Arc::new(|images: &[String]| {
+        Some(format!("docker daemon 连不上（要用的镜像：{images:?}）"))
+    });
+    let wiring = Wiring {
+        sandbox: Some(factory),
+        preflight: Some(probe),
+        ..Wiring::default()
+    };
+    let out = cli_with(&["run", SUITE_DIR, "--sandbox", "docker"], &wiring);
+    assert_eq!(out.code, 2);
+    assert!(
+        out.stderr_text().contains("连不上"),
+        "{}",
+        out.stderr_text()
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "一个场景都不该跑，更不该有 JSON 摘要"
+    );
+}
+
+/// token_resolver_of 读得到 session_token，且**不往 store 记账**——
+/// 记一笔的话 settle() 的静默判据就永远不静默（每次工具调用都碰它）。
+#[tokio::test]
+async fn the_token_resolver_reads_without_bookkeeping() {
+    let deps =
+        aite_evals::build_deps(&Scenario::named("x"), &DepsOptions::default()).expect("deps");
+    aite_contracts::SessionStore::init(&*deps.store)
+        .await
+        .unwrap();
+    let before = deps.store.calls.len();
+
+    let mut task = sample_task_for_token();
+    task.session_token = "deadbeef".into();
+    aite_contracts::SessionStore::create_task(&*deps.store, &task)
+        .await
+        .unwrap();
+    let after_create = deps.store.calls.len();
+
+    let resolve = aite_evals::token_resolver_of(&deps.store);
+    assert_eq!(resolve("t-token").unwrap().as_deref(), Some("deadbeef"));
+    assert_eq!(resolve("没有这个任务").unwrap(), None);
+    assert_eq!(
+        deps.store.calls.len(),
+        after_create,
+        "解析令牌不许往 store 记账，否则 settle() 永远等不到静默"
+    );
+    assert!(after_create > before);
+}
+
+fn sample_task_for_token() -> aite_contracts::Task {
+    let now = chrono::Utc::now();
+    aite_contracts::Task {
+        id: "t-token".into(),
+        session_id: "s1".into(),
+        task_no: "#A1".into(),
+        status: aite_contracts::TaskStatus::Created,
+        title: String::new(),
+        checklist: Vec::new(),
+        card_id: None,
+        sandbox_id: None,
+        session_token: String::new(),
+        model: String::new(),
+        steps: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost: 0.0,
+        max_steps: 40,
+        max_wall_sec: 1200,
+        result_summary: String::new(),
+        evidence_root_hash: None,
+        created_by: "ou".into(),
+        created_at: now,
+        updated_at: now,
+    }
+}

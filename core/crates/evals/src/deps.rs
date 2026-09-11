@@ -128,12 +128,40 @@ impl Deps {
     }
 }
 
+/// Gateway 的令牌解析器（与 `aite_gateway::TokenResolver` 同形；evals 不依赖那个 crate）。
+pub type TokenResolver = Arc<dyn Fn(&str) -> Result<Option<String>, String> + Send + Sync>;
+
+/// 从替身 store 直接读 `session_token`，给 `P0ToolGateway` 用。
+///
+/// 两件事非这么做不可：
+///
+/// 1. **不走 `store.get_task()`**：那是 async，而 `TokenResolver` 是同步签名；更要命的是
+///    它会往 store 的记账里加一笔，而 `settle()` 的静默判据数的就是这些记账 ——
+///    每次工具调用都碰它，评测就永远等不到静默。所以走不记账的 `tasks_snapshot()`。
+/// 2. **一定要接上**：`P0ToolGateway` 的令牌校验是失败关闭的（契约 ports.rs 写死），
+///    不接就是每个工具调用都 `denied`，而报出来的是「denied」不是「你没接 token_resolver」。
+///    正因为这个失败形态太难查，`SandboxFactory` 把它做成了必传参数。
+pub fn token_resolver_of(store: &Arc<FakeSessionStore>) -> TokenResolver {
+    let store = Arc::clone(store);
+    Arc::new(move |task_id: &str| {
+        Ok(store
+            .tasks_snapshot()
+            .into_iter()
+            .find(|t| t.id == task_id)
+            .map(|t| t.session_token))
+    })
+}
+
 /// 造 sandbox + gateway 那一段的工厂（`--sandbox docker` 的接线点，RΩ 注入真实现）。
+///
+/// 第四个参数是现成的 `TokenResolver`：RΩ 把它塞进 `P0ToolGateway` 即可。
+/// 做成必传是刻意的 —— 忘了接的后果是每个工具调用都 denied，查起来完全不着边际。
 pub type SandboxFactory = Arc<
     dyn Fn(
             &Arc<FakePlatform>,
             &Arc<FakeSessionStore>,
             &AiteConfig,
+            &TokenResolver,
         ) -> Result<(Arc<dyn SandboxFacade>, Arc<dyn GatewayFacade>), String>
         + Send
         + Sync,
@@ -208,7 +236,8 @@ pub fn build_deps(sc: &Scenario, options: &DepsOptions) -> Result<Deps, PhaseErr
                 "--sandbox docker 还没接线（真沙箱与真 Gateway 由 RΩ 通过 SandboxFactory 注入）",
             )
         })?;
-        factory(&platform, &store, &config).map_err(|e| PhaseError::new("wiring", e))?
+        let resolver = token_resolver_of(&store);
+        factory(&platform, &store, &config, &resolver).map_err(|e| PhaseError::new("wiring", e))?
     } else {
         let sandbox = Arc::new(FakeSandbox::new(sc.sandbox.exec_script.clone()));
         let gateway = Arc::new(

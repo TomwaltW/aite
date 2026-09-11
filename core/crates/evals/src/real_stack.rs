@@ -313,13 +313,20 @@ pub fn scenarios_with_exec_script(scenarios: &[Scenario]) -> Vec<String> {
         .collect()
 }
 
+/// 真体检的实现：连 daemon、查镜像。没问题回 `None`，有问题回一行人话。
+/// 由 RΩ 注入 —— core 这侧不认识 Docker，真沙箱在 edge（Go）那边。
+pub type DockerProbe = std::sync::Arc<dyn Fn(&[String]) -> Option<String> + Send + Sync>;
+
 /// 起飞前体检：daemon 连得上吗、镜像在吗。没问题回 `None`，有问题回一行给人看的话。
 ///
-/// 并行期间真沙箱在 Go 那边（R2）、真 Gateway 在 R6，core 这侧还碰不到 Docker，所以现在
-/// 只回一句「还没接线」。RΩ 接上 `SandboxFactory` 之后把体检换成真的。
-pub fn docker_preflight(images: &[String], wired: bool) -> Option<String> {
-    if wired {
-        return None;
+/// `probe` 为 None = 还没接线，回一句「还没接线」。
+///
+/// **不能**写成「接线了就 return None」：那样 RΩ 一注入 SandboxFactory，体检就整个
+/// 消失了 —— 回到「daemon 没起 / 镜像没 build 时十个场景各自烂在第一个工具调用上」，
+/// 而这个函数存在的全部理由，就是在起飞前把这句话一次说清楚。
+pub fn docker_preflight(images: &[String], probe: Option<&DockerProbe>) -> Option<String> {
+    if let Some(probe) = probe {
+        return probe(images);
     }
     let mut names: Vec<&String> = images.iter().collect();
     names.sort();

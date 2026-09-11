@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 use crate::demo_fixture;
 use crate::deps::{DepsOptions, ModelFactory, SANDBOXES, SandboxFactory};
 use crate::protocol_probe::render_digest;
-use crate::real_stack::{docker_preflight, scenarios_with_exec_script};
+use crate::real_stack::{DockerProbe, docker_preflight, scenarios_with_exec_script};
 use crate::runner::{PlaneFactory, RunOptions, SuiteResult, run_suite};
 use crate::scenario::{Scenario, load_suite};
 
@@ -47,6 +47,10 @@ pub struct Wiring {
     pub model: Option<ModelFactory>,
     /// `--sandbox docker` 的真沙箱 + 真 Gateway（R2/R6，RΩ 接）
     pub sandbox: Option<SandboxFactory>,
+    /// `--sandbox docker` 的起飞前体检（连 daemon、查镜像）。
+    /// 与 `sandbox` 成对注入：只给工厂不给体检的话，daemon 没起时十个场景会各自
+    /// 烂在第一个工具调用上，报出来的是十条不着边际的 sandbox 错误。
+    pub preflight: Option<DockerProbe>,
 }
 
 #[derive(Debug, Default)]
@@ -289,7 +293,13 @@ fn run_suite_cmd(argv: &[String], wiring: &Wiring) -> Captured {
                     .unwrap_or_else(|_| "aite-sandbox:p0".to_string())
             })
             .collect();
-        if let Some(why) = docker_preflight(&images, wiring.sandbox.is_some()) {
+        if wiring.sandbox.is_some() && wiring.preflight.is_none() {
+            return fail(
+                "--sandbox docker 接了 SandboxFactory 却没接 preflight：                 daemon 没起或镜像没 build 时，十个场景会各自烂在第一个工具调用上。                 起飞前体检要和工厂成对注入（Wiring::preflight）。"
+                    .to_string(),
+            );
+        }
+        if let Some(why) = docker_preflight(&images, wiring.preflight.as_ref()) {
             return fail(format!("--sandbox docker 起不来：{why}"));
         }
         let named = scenarios_with_exec_script(&scenarios);

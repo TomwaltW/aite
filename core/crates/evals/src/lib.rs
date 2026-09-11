@@ -30,10 +30,10 @@ pub use checks::{CheckError, run_check, run_checks};
 pub use demo_plane::DemoPlane;
 pub use deps::{
     Deps, DepsOptions, GatewayFacade, ModelFactory, PhaseError, SandboxFacade, SandboxFactory,
-    build_deps,
+    TokenResolver, build_deps, token_resolver_of,
 };
 pub use protocol_probe::{ModelProbe, Observation, ToolCallObservation, analyze, render_digest};
-pub use real_stack::{GatewayProbe, SandboxProbe};
+pub use real_stack::{DockerProbe, GatewayProbe, SandboxProbe, docker_preflight};
 pub use runner::{
     PlaneFactory, RunOptions, ScenarioResult, SuiteResult, run_scenario, run_suite, settle,
 };
