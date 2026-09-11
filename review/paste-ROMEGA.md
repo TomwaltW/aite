@@ -23,7 +23,8 @@ R0 落骨架，R1–R7 七轨并行把各面做完，**已经全部合入 main**
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-romega
 分支     : task-romega
-基线     : c300e37   ← main 的 HEAD（完整 sha c300e37fcbee4b8d340616074182eeb3c2e2af93）
+基线     : 建 worktree 时 main 的 HEAD —— 本派单与代码在同一棵树上，
+           所以不钉死 sha：开场自检里 `git status --short` 为空就对了
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1、protoc 36.1、Docker 29.6.1
 ```
 
@@ -33,7 +34,7 @@ PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bas
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-romega
-git log --oneline -1                                   # 期望 c300e37 ...
+git log --oneline -1                                   # 记下这个 sha，回执里用它当基线
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行 "全部通过"，退出码 0（首次全量编译 5–10 分钟）
 core/target/debug/aite contracts lock --check          # 期望 OK 36 files
@@ -208,7 +209,7 @@ core/target/debug/aite evals run evals/p0 --only 04_csv_to_chart --model live
 ```
 ## RΩ 回执
 
-基线 c300e37 → 提交 <短 sha>
+基线 <开场自检记下的 sha> → 提交 <短 sha>
 
 ### B8
 $ core/target/debug/aite evals run evals/p0 --platform fake --model scripted
