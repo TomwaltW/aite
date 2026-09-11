@@ -430,6 +430,49 @@ fn name_is_the_configured_model() {
 }
 
 #[tokio::test]
+async fn upstream_errors_never_leak_the_api_key() {
+    // 非 2xx 这条路此前一条测试都没有（22 条全在 200 上，`start_raw` 写了没人调），
+    // 而它恰恰是最容易漏密钥的地方：国内网关在 4xx 调试信息里回显请求头不是没有过的事。
+    // 这条错误会一路进 worker 的失败日志和群里的「模型服务暂不可用」。
+    let leaky = r#"{"error":{"message":"bad auth","echo":{"Authorization":"Bearer sk-from-env"}}}"#;
+    let server = FakeServer::start_raw(vec![(401, leaky.to_string())]).await;
+    let model =
+        OpenAiCompatModel::from_config(&cfg(), &env_with("AITE_MODEL_API_KEY", "sk-from-env"))
+            .expect("建模型")
+            .with_base_url(&server.base_url);
+
+    let err = model
+        .chat(&[Message::text(Role::User, "嗨")], &[], 100, 0.0)
+        .await
+        .expect_err("401 该是错误");
+    let text = err.to_string();
+    assert!(text.contains("401"), "要说清是哪个状态码：{text}");
+    assert!(
+        !text.contains("sk-from-env"),
+        "密钥泄漏进了错误消息：{text}"
+    );
+}
+
+/// 响应体不是 JSON 时同样不许漏密钥（BadResponse 那条路）。
+#[tokio::test]
+async fn unparseable_responses_never_leak_the_api_key() {
+    let server = FakeServer::start_raw(vec![(200, "sk-from-env 这不是 JSON".to_string())]).await;
+    let model =
+        OpenAiCompatModel::from_config(&cfg(), &env_with("AITE_MODEL_API_KEY", "sk-from-env"))
+            .expect("建模型")
+            .with_base_url(&server.base_url);
+
+    let err = model
+        .chat(&[Message::text(Role::User, "嗨")], &[], 100, 0.0)
+        .await
+        .expect_err("非 JSON 该是错误");
+    assert!(
+        !err.to_string().contains("sk-from-env"),
+        "密钥泄漏进了解析错误：{err}"
+    );
+}
+
+#[tokio::test]
 async fn requests_go_to_the_base_url_with_the_env_key() {
     // 接线是真的：不注入任何 client，请求就该打到 {base_url}/chat/completions 上，
     // 密钥取自环境变量并放在 Authorization header 里

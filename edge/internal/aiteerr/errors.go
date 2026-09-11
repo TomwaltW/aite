@@ -31,8 +31,15 @@ type SandboxErrKind int
 const (
 	SandboxUnavailable SandboxErrKind = iota + 1 // docker daemon 不可达 / 镜像缺失
 	SandboxNotFound                              // sandbox_id 不存在（已 release 或从未 acquire）
-	SandboxInvalidPath                           // 路径不在 /work 下或含 ..
-	SandboxTimeout                               // exec 超时（注意：exec 超时通常表达为 ExecResult.exit_code=124，不走这里）
+	// SandboxFileNotFound：沙箱在、文件不在。必须与 SandboxNotFound 分开：
+	// core 侧靠 status.message 的**开头**区分两者（core/crates/proto/src/status.rs），
+	// 而 Error() 会在 Msg 前面贴一层 token —— 所以「用 SandboxNotFound 配 file_not_found: 前缀」
+	// 这种写法拼出来是 "sandbox_not_found: file_not_found: ..."，core 永远判成「沙箱没了」。
+	// 语义上这条对应 Python 的 SandboxFileNotFound（多继承 FileNotFoundError）：
+	// worker 靠它把「产物少一个」与「沙箱挂了」分开，前者跳过该产物照常交付。
+	SandboxFileNotFound
+	SandboxInvalidPath // 路径不在 /work 下或含 ..
+	SandboxTimeout     // exec 超时（注意：exec 超时通常表达为 ExecResult.exit_code=124，不走这里）
 	SandboxInternal
 )
 
@@ -51,6 +58,8 @@ func (k SandboxErrKind) token() string {
 		return "sandbox_unavailable"
 	case SandboxNotFound:
 		return "sandbox_not_found"
+	case SandboxFileNotFound:
+		return "file_not_found"
 	case SandboxInvalidPath:
 		return "sandbox_invalid_path"
 	case SandboxTimeout:
@@ -108,7 +117,7 @@ func sandboxCode(se *SandboxError) codes.Code {
 	switch se.Kind {
 	case SandboxUnavailable:
 		return codes.Unavailable
-	case SandboxNotFound:
+	case SandboxNotFound, SandboxFileNotFound:
 		return codes.NotFound
 	case SandboxInvalidPath:
 		return codes.InvalidArgument

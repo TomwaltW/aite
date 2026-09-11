@@ -329,11 +329,27 @@ func TestCardActionTriggerIsRegisteredOnTheDispatcher(t *testing.T) {
 		t.Error("header.token 不该进信封")
 	}
 
-	// 反证：只注册自定义事件的 dispatcher 认不出卡片回传。
+	// 原来这里写的是「反证：只注册自定义事件的 dispatcher 认不出卡片回传」，判据是
+	// `if err != nil { t.Fatal }` —— 方向反了，而且永远不会失败：SDK 的 dispatcher.Do
+	// 查不到 callback handler 会继续落到 eventType2EventHandler，而 OnCustomizedEvent
+	// 正是往后者注册的，所以它返回的是 (nil, nil)。那条 if 是个空断言。
+	//
+	// 真正要钉的是**两条路拿到的东西不是一回事**：卡片回传只有走 callback 那条
+	// 才能解析成 CardActionTriggerEvent，OnCustomizedEvent 拿到的是未解析的 EventReq。
+	var bareGot []*larkevent.EventReq
 	bare := dispatcher.NewEventDispatcher("", "")
-	bare.OnCustomizedEvent(eventCardAction, func(context.Context, *larkevent.EventReq) error { return nil })
+	bare.OnCustomizedEvent(eventCardAction, func(_ context.Context, req *larkevent.EventReq) error {
+		bareGot = append(bareGot, req)
+		return nil
+	})
 	if _, err := bare.Do(context.Background(), payload); err != nil {
-		t.Fatalf("OnCustomizedEvent 也能接住卡片回传？那就有第二条路了：%v", err)
+		t.Fatalf("OnCustomizedEvent 这条路本身应该跑得通：%v", err)
+	}
+	if len(bareGot) != 1 {
+		t.Fatalf("OnCustomizedEvent 该收到 1 条原始 EventReq，得到 %d 条", len(bareGot))
+	}
+	if len(got) != 1 {
+		t.Fatalf("callback 那条路仍该只有 1 条，得到 %d 条", len(got))
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,7 +92,9 @@ type Platform struct {
 	opts Options
 	sink EventSink
 
-	api     *apiClient
+	api *apiClient
+	// capsMu 护 caps：gRPC server 并发读、SetPassiveListen 写。
+	capsMu  sync.RWMutex
 	caps    *pb.PlatformCapabilities
 	factory ConnectionFactory
 	sleep   sleeperFunc
@@ -212,11 +215,21 @@ func FeishuP0() *pb.PlatformCapabilities {
 	}
 }
 
-// Capabilities 返回本实例的能力副本。
-func (p *Platform) Capabilities() *pb.PlatformCapabilities { return p.caps }
+// Capabilities 返回本实例能力的**副本**。
+//
+// 必须是副本而不是本体：R2 的 gRPC server 会在别的 goroutine 上读它去 marshal，
+// 而 SetPassiveListen 会写同一个对象（§3.7 权限核实后运行时改）——
+// 返回本体既是 data race，调用方改一下还会改到 Platform 的状态。
+func (p *Platform) Capabilities() *pb.PlatformCapabilities {
+	p.capsMu.RLock()
+	defer p.capsMu.RUnlock()
+	return proto.Clone(p.caps).(*pb.PlatformCapabilities)
+}
 
 // SetPassiveListen 在权限核实后调这个，改的是本实例而不是 FeishuP0() 的返回值。
 func (p *Platform) SetPassiveListen(value bool) {
+	p.capsMu.Lock()
+	defer p.capsMu.Unlock()
 	p.caps.SupportsPassiveListen = value
 }
 
@@ -298,6 +311,11 @@ func (p *Platform) ReconnectCount() int64 { return p.reconnectCount.Load() }
 // 与 Python 版的一处有意差异：Python 把 handler 的异常吞掉（只打日志），
 // Go 版把 error 一路返回给 SDK，让平台重推（spec §2.1「失败 → 向平台返回错误让其重推」）。
 func (p *Platform) dispatchRaw(ctx context.Context, raw map[string]any) error {
+	if p.sink == nil {
+		// New(cfg, opts, nil) 是合法构造（测试就这么用），但真收到事件时不能裸调。
+		p.logger.Warn("feishu.no_sink", "note", "没接 EventSink，事件无处可送")
+		return nil
+	}
 	event := Normalize(raw, p.opts.BotOpenID, p.opts.AppID, p.opts.TenantID)
 	if event == nil {
 		p.logger.Debug("feishu.event_ignored", "type", mapStr(asMap(raw["header"]), "event_type"))
@@ -359,6 +377,11 @@ func (p *Platform) sendMessage(ctx context.Context, chatID string, replyTo *stri
 }
 
 func (p *Platform) SendText(ctx context.Context, msg *pb.OutboundText) (*pb.SendResult, error) {
+	// pb 的 getter 是 nil-safe 的，但 msg.ReplyTo 是裸字段 —— gRPC 请求里没塞 msg
+	// 就会 nil 解引用，把整个 edge 进程带走。
+	if msg == nil {
+		return nil, &aiteerr.PlatformError{Code: "bad_request", Msg: "SendText 收到空消息", Retryable: false}
+	}
 	content := DumpsCard(BuildMarkdownCard(msg.GetText()))
 	messageID, err := p.sendMessage(ctx, msg.GetChatId(), msg.ReplyTo, "interactive", content, msg.GetInThread())
 	if err != nil {
@@ -394,6 +417,9 @@ func (p *Platform) UpdateCard(ctx context.Context, cardID string, card *pb.Check
 
 // SendFile 先上传再发送。图片走 images 接口，其余走 files 接口。上传不过令牌桶。
 func (p *Platform) SendFile(ctx context.Context, msg *pb.OutboundFile) (*pb.SendResult, error) {
+	if msg == nil {
+		return nil, &aiteerr.PlatformError{Code: "bad_request", Msg: "SendFile 收到空消息", Retryable: false}
+	}
 	var (
 		content string
 		msgType string

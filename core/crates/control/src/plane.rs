@@ -781,14 +781,29 @@ impl InProcessControlPlane {
             tracing::warn!(target: "aite.control", task = %task_id, "control.no_worker");
             return Ok(());
         };
-        if lock(&self.shared.cancelled).contains(task_id) {
+        // 「查 cancelled」与「登记 running」必须在同一个临界区。Python 靠单事件循环
+        // 白拿这条：`plane.py:505-511` 从判 `_cancelled` 到 `_running.add` 之间没有 await。
+        // Rust 多线程 runtime 下拆成两次独立取锁就开了窗口 —— cancel_task 正好在中间
+        // 抄到 running 为空，于是走「不在跑」分支写一条 cancelled 证据 + finalize，
+        // 而 worker 下一步见 is_cancelled 为真又按契约自己收一次尾：同一条链两条
+        // cancelled，manifest 也可能 finalize 两遍。
+        // 取锁顺序与 cancel_task 侧一致（cancelled → running），全文件没有反向获取点。
+        let admitted = {
+            let cancelled = lock(&self.shared.cancelled);
+            if cancelled.contains(task_id) {
+                false
+            } else {
+                lock(&self.shared.running).insert(task_id.to_string());
+                true
+            }
+        };
+        if !admitted {
             return Ok(());
         }
         // 开跑前排进来的 steer 已经在 transcript 里了：`continue_session` 先 append_turn
         // 再排队，而 worker 的 `_build_messages` 是现在才去 list_turns。不清掉的话第一步
         // 开头会把同一句话再注入一遍，上下文里出现两条一样的用户发言。
         lock(&self.shared.steer).remove(task_id);
-        lock(&self.shared.running).insert(task_id.to_string());
         let _running = RunningGuard {
             shared: &self.shared,
             task_id,
@@ -1053,14 +1068,29 @@ impl ControlPlane for InProcessControlPlane {
         notify: bool,
     ) -> Task {
         let mut task = task;
-        let running = lock(&self.shared.running).contains(&task.id);
-        lock(&self.shared.cancelled).insert(task.id.clone());
+        // 与 dispatch_task 侧成对：抄 running 和落 cancelled 必须是同一个临界区，
+        // 否则两边会同时认为「对方没接手」，把收尾做两遍。顺序同为 cancelled → running。
+        let running = {
+            let mut cancelled = lock(&self.shared.cancelled);
+            let r = lock(&self.shared.running).contains(&task.id);
+            cancelled.insert(task.id.clone());
+            r
+        };
         task.status = TaskStatus::Cancelled;
         task.updated_at = self.now();
         if let Err(e) = self.store.update_task(&task).await {
             // Python 这里会把异常抛给 handle_event；`ControlPlane::cancel_task` 的签名
-            // 返回 Task（冻结契约，D5），没有错误通道，只能记一笔继续收尾。
+            // 返回 Task（冻结契约，D5），没有错误通道 —— 不能上抛这条不是我们能改的。
+            //
+            // 但**落库都没成功就不该接着往下走**：继续写 cancelled 证据 + finalize，
+            // 而 finalize 的 root_hash 回写同样会失败 → 下次起飞 recover_orphan_tasks
+            // 把它当孤儿再 finalize 一遍（幂等守卫读的正是库里的 evidence_root_hash），
+            // 两份 manifest 对不上；再回一句「已停止」更是直接对用户说假话 ——
+            // 库里任务还是 created，下一条 !status 照样列着它。
+            // 至少要让 `!status` 的那句进程级警告能说出「有事情没办成」。
             tracing::error!(target: "aite.control", task = %task.id, error = %e, "control.cancel_save_failed");
+            self.shared.bump("events.dropped");
+            return task;
         }
         if let (Some(sandbox), Some(sandbox_id)) = (
             self.sandbox.as_ref(),

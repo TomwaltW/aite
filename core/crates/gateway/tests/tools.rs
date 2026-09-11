@@ -577,7 +577,9 @@ async fn release_task_drops_the_sandbox_and_the_token() {
     assert_eq!(error_code(&result), Some(ToolErrorCode::Denied));
 }
 
-#[tokio::test]
+// multi_thread：默认的 current_thread runtime 下 4 个 spawn 是一个跑完再跑下一个，
+// 配上没有挂起点的替身，这条用例曾经是空跑的（删掉双检锁照样绿）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_run_python_shares_one_sandbox() {
     // per-task 锁：并发两个 tool_call 不会各建一个容器（旧实现的双检锁）。
     use std::sync::Arc;

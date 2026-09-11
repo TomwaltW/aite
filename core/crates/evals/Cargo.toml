@@ -18,6 +18,9 @@ tokio.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 hex.workspace = true
+# FutureExt::catch_unwind —— 场景执行中的 panic 收成 phase="error"，
+# 而不是带走整套评测。futures 已在 workspace 依赖表里（R0 钉的），不是新增第三方依赖。
+futures.workspace = true
 
 [dev-dependencies]
 # test-util 让测试能暂停/推进 tokio 时钟（纪律 4：不靠真实 sleep）

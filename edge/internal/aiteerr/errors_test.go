@@ -3,6 +3,7 @@ package aiteerr
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -42,16 +43,41 @@ func TestPlatformErrorMapping(t *testing.T) {
 
 func TestSandboxErrorMapping(t *testing.T) {
 	cases := map[SandboxErrKind]codes.Code{
-		SandboxUnavailable: codes.Unavailable,
-		SandboxNotFound:    codes.NotFound,
-		SandboxInvalidPath: codes.InvalidArgument,
-		SandboxTimeout:     codes.DeadlineExceeded,
-		SandboxInternal:    codes.Internal,
+		SandboxUnavailable:  codes.Unavailable,
+		SandboxNotFound:     codes.NotFound,
+		SandboxFileNotFound: codes.NotFound,
+		SandboxInvalidPath:  codes.InvalidArgument,
+		SandboxTimeout:      codes.DeadlineExceeded,
+		SandboxInternal:     codes.Internal,
 	}
 	for kind, want := range cases {
 		if got := code(t, ToStatus(&SandboxError{Kind: kind, Msg: "x"})); got != want {
 			t.Errorf("%v -> %v, want %v", kind, got, want)
 		}
+	}
+}
+
+// core 侧（core/crates/proto/src/status.rs）靠 status.message 的**开头**区分
+// 「沙箱没了」和「文件没了」：两者都是 NOT_FOUND，只有前缀能分开。
+// Error() 会在 Msg 前面贴 kind token，所以这里钉的是真正上线路的那一整串。
+func TestSandboxNotFoundAndFileNotFoundAreToldApartOnTheWire(t *testing.T) {
+	box := ToStatus(&SandboxError{Kind: SandboxNotFound, Msg: "sb-1"})
+	file := ToStatus(&SandboxError{Kind: SandboxFileNotFound, Msg: "/work/out.png"})
+
+	stBox, _ := status.FromError(box)
+	stFile, _ := status.FromError(file)
+	if stBox.Code() != codes.NotFound || stFile.Code() != codes.NotFound {
+		t.Fatalf("两者都该是 NotFound：%v / %v", stBox.Code(), stFile.Code())
+	}
+	if !strings.HasPrefix(stBox.Message(), "sandbox_not_found:") {
+		t.Errorf("沙箱不存在的 message = %q", stBox.Message())
+	}
+	if !strings.HasPrefix(stFile.Message(), "file_not_found:") {
+		t.Errorf("文件不存在的 message = %q，core 会把它误判成「沙箱没了」", stFile.Message())
+	}
+	// 反过来也钉一下：文件那条绝不能以 sandbox_not_found 开头，否则前缀判定就废了。
+	if strings.HasPrefix(stFile.Message(), "sandbox_not_found") {
+		t.Errorf("file_not_found 被 kind token 顶掉了：%q", stFile.Message())
 	}
 }
 

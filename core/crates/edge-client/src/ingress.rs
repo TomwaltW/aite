@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use aite_contracts::{EventHandler, NormalizedEvent, PlatformError};
+use aite_contracts::{EventHandler, IngressError, NormalizedEvent, PlatformError};
 use aite_proto::pb;
 use aite_proto::pb::ingress_service_server::{IngressService, IngressServiceServer};
 use aite_proto::status::status_from_ingress_error;
@@ -68,8 +68,20 @@ impl IngressServer {
                 )
             })?;
         }
-        // 上一条命留下的 socket 文件会让 bind 直接 EADDRINUSE，先清掉。
+        // 上一条命留下的 socket 文件会让 bind 直接 EADDRINUSE，要清掉；
+        // 但「残留」和「另一个 core 正在监听」长得一模一样，无条件删会把活着的
+        // 实例静默挤下线（core_socket 是固定路径）。先拨一下：连得上就是有人在用。
         if self.socket.exists() {
+            if std::os::unix::net::UnixStream::connect(&self.socket).is_ok() {
+                return Err(PlatformError::new(
+                    "ingress_bind",
+                    format!(
+                        "{} 已经有人在监听 —— 多半是另一个 core 进程还活着。                         确认它退干净了再起，别把它的事件流抢过来。",
+                        self.socket.display()
+                    ),
+                    false,
+                ));
+            }
             let _ = std::fs::remove_file(&self.socket);
         }
 
@@ -129,8 +141,10 @@ impl IngressService for Ingress {
         &self,
         request: Request<pb::NormalizedEvent>,
     ) -> Result<Response<pb::HandleEventResponse>, Status> {
+        // 走 aite-proto::status 的映射函数，不在这里自己拼前缀 —— R0 哪天改了
+        // `invalid_event:` 这个约定，这里要跟着变（派单点名禁止复制一份映射）。
         let event = NormalizedEvent::try_from(request.into_inner())
-            .map_err(|e| Status::invalid_argument(format!("invalid_event: {e}")))?;
+            .map_err(|e| status_from_ingress_error(&IngressError::Invalid(e.to_string())))?;
         let event_id = event.event_id.clone();
         match (self.on_event)(event).await {
             Ok(()) => Ok(Response::new(pb::HandleEventResponse {})),

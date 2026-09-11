@@ -390,6 +390,10 @@ fn require_file_path(path: &str) -> Result<String, SandboxError> {
 #[async_trait]
 impl SandboxPort for FakeGatewaySandbox {
     async fn acquire(&self, task_id: &str, _spec: &SandboxSpec) -> Result<String, SandboxError> {
+        // 让出一次：真 DockerSandbox 的 acquire 要拉镜像、起容器、探路，中间全是挂起点。
+        // 替身如果一路同步跑完，`concurrent_run_python_shares_one_sandbox` 就没有交错窗口，
+        // 把 Inner::acquire_sandbox 的 per-task 双检锁整段删掉那条测试照样绿 —— 它就白写了。
+        tokio::task::yield_now().await;
         let mut state = self.state.lock().unwrap();
         if let Some(error) = &state.acquire_error {
             return Err(error.clone());

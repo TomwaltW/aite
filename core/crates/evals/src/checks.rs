@@ -62,6 +62,17 @@ fn as_i64(spec: &Map<String, Value>, key: &str) -> Option<i64> {
     spec.get(key).and_then(Value::as_i64)
 }
 
+/// 取比较子。给了但不是整数（`equals: "1"` / `equals: 1.0`）必须报错 ——
+/// 静默跳过等于这条断言凭空消失，比断言写错更危险（Python 那边 `actual != "1"`
+/// 恒真，会报失败）。
+fn want_i64(spec: &Map<String, Value>, key: &str) -> Result<Option<i64>, CheckError> {
+    match spec.get(key) {
+        None => Ok(None),
+        Some(Value::Number(n)) if n.is_i64() => Ok(n.as_i64()),
+        Some(other) => Err(CheckError(format!("{key} 要是整数，收到 {other}"))),
+    }
+}
+
 /// 按 equals / min / max 比一个整数。一个都没给就是断言写漏了。
 fn compare(label: &str, actual: i64, spec: &Map<String, Value>) -> Outcome {
     if !has_any(spec, &["equals", "min", "max"]) {
@@ -69,7 +80,7 @@ fn compare(label: &str, actual: i64, spec: &Map<String, Value>) -> Outcome {
             "{label}: 至少要给 equals / min / max 之一"
         )));
     }
-    if let Some(want) = as_i64(spec, "equals")
+    if let Some(want) = want_i64(spec, "equals")?
         && actual != want
     {
         return Ok(Some(format!("{label} 期望 == {want}，实际 {actual}")));
@@ -305,13 +316,19 @@ fn distinct_matches(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
 fn file_check(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
     let files = deps.platform.sent_files();
     let index = as_i64(spec, "index").unwrap_or(0);
-    if index < 0 || files.is_empty() || index as usize >= files.len() {
+    // 负数从尾部数，与同文件的 gateway_result 一致（Python `files[-1]` 也是这个语义）。
+    let pos = if index < 0 {
+        files.len() as i64 + index
+    } else {
+        index
+    };
+    if pos < 0 || files.is_empty() || pos as usize >= files.len() {
         return Ok(Some(format!(
             "期望第 {index} 个 send_file，实际只发了 {} 个文件",
             files.len()
         )));
     }
-    let f = &files[index as usize];
+    let f = &files[pos as usize];
     if let Some(magic) = spec.get("magic") {
         let raw = text_of(magic);
         let want = hex_decode(&raw)
@@ -354,14 +371,13 @@ fn file_check(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
     Ok(None)
 }
 
+/// 手写版按**字节**切片（`&text[i..i + 2]`），`magic` 里出现多字节字符（比如全角
+/// "８９"，6 字节、能过偶数长度那关）就会落在 char 边界中间 panic，而 runner 一路
+/// 没有兜底 —— 整套评测当场 exit 101，JSON 摘要和 `passed k/n` 一个字都出不来。
+/// Python 那边 `bytes.fromhex` 抛 ValueError，被 runner 兜成一行人话。
+/// `hex` 已经在本 crate 的依赖里，直接用它：非法输入返回 Err 而不是 panic。
 fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-        .collect()
+    hex::decode(text).ok()
 }
 
 fn hex_encode(data: &[u8]) -> String {

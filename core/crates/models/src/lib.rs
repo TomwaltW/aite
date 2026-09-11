@@ -427,15 +427,22 @@ impl ModelPort for OpenAiCompatModel {
             .text()
             .await
             .map_err(|e| ModelError::Upstream(redact(&e.to_string(), &self.api_key)))?;
+        // 响应体也要过 redact：国内网关在 4xx 的调试信息里回显请求头不是没有过的事，
+        // 一旦回显 Authorization，这条错误会原样进 worker 的失败日志和群里的回帖路径。
+        // 同函数上面两处已经确立了这个约定，这里不能漏（派单纪律 5：任何输出不得出现取值）。
         if !status.is_success() {
             return Err(ModelError::Upstream(format!(
                 "HTTP {}：{}",
                 status.as_u16(),
-                clip_chars(&text, 500)
+                redact(&clip_chars(&text, 500), &self.api_key)
             )));
         }
-        let payload: Value = serde_json::from_str(&text)
-            .map_err(|e| ModelError::BadResponse(format!("{e}：{}", clip_chars(&text, 200))))?;
+        let payload: Value = serde_json::from_str(&text).map_err(|e| {
+            ModelError::BadResponse(format!(
+                "{e}：{}",
+                redact(&clip_chars(&text, 200), &self.api_key)
+            ))
+        })?;
 
         let mut turn = turn_from_response(&payload)?;
         let cost = cost_of(&turn.usage, &self.cfg);

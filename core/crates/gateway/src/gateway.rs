@@ -30,6 +30,7 @@ use aite_contracts::{
     gateway_tools,
 };
 use async_trait::async_trait;
+use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 
@@ -316,7 +317,30 @@ impl ToolGateway for P0ToolGateway {
 
     async fn call(&self, ctx: &ToolContext, req: &ToolCallRequest) -> ToolResult {
         let started = Instant::now();
-        match self.dispatch(ctx, req).await {
+        // 保护圈要罩住**整个** dispatch，不只是工具那个 future：`check_token`（里面
+        // 调的是调用方给的 token_resolver 闭包）、`validate_arguments`、算预算的
+        // `from_secs_f64` 都在同步段里。RΩ 会把 resolver 接到 SessionStore 上，
+        // 那条闭包一 panic 就打穿契约里写死的「永远不失败」（ports.rs）。
+        // Python 那边是一个宽 except 罩住从 _check_token 起的全部（tool_gateway.py:133）。
+        let outcome = match std::panic::AssertUnwindSafe(self.dispatch(ctx, req))
+            .catch_unwind()
+            .await
+        {
+            Ok(r) => r,
+            Err(p) => {
+                let detail = p
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "（panic 载荷不是字符串）".to_string());
+                tracing::error!(tool = %req.name, detail = %detail, "gateway.dispatch_panicked");
+                Err(ToolFailure::new(
+                    ToolErrorCode::Upstream,
+                    format!("工具网关内部出错：{detail}"),
+                ))
+            }
+        };
+        match outcome {
             Ok(outcome) => Self::ok_result(req, outcome, started),
             Err(failure) => Self::failed_result(req, failure, started),
         }

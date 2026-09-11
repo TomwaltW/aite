@@ -25,6 +25,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::checks::run_checks;
+use futures::FutureExt;
+
 use crate::deps::{Deps, DepsOptions, PhaseError, brief, build_deps, busy};
 use crate::protocol_probe::analyze;
 use crate::scenario::{EventAfter, Scenario};
@@ -350,6 +352,26 @@ fn protocol_of(deps: &Deps, wanted: bool) -> Map<String, Value> {
     analyze(deps)
 }
 
+/// 把 panic 收成 `PhaseError{phase:"error"}`。
+///
+/// 本文件开头那条铁律是「每个场景必须报出失败原因而不是 panic」，但在这之前
+/// `phase="error"` 是个**没有任何路径产出的死分支**（测试白名单里却写着它）：
+/// `execute` 一路到 `cli::run` 都没有 catch，plane 或断言里一个 unwrap 就让
+/// 整套评测 exit 101，JSON 摘要和 `passed k/n` 一个字都出不来。
+/// Python 那边有三层兜底（runner.py:214/229、__main__.py:248）。
+/// 注意 `AssertUnwindSafe`：替身里全是 `Arc<Mutex<..>>`，panic 后状态可能不一致，
+/// 但这一趟场景已经判失败、不会再被读，收下来报人话比整套死掉好。
+fn catch<T>(what: &'static str, f: impl FnOnce() -> T) -> Result<T, PhaseError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
+        let detail = p
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "（panic 载荷不是字符串）".to_string());
+        PhaseError::new("error", format!("{what} 里 panic 了：{detail}"))
+    })
+}
+
 pub async fn run_scenario(sc: &Scenario, options: &RunOptions) -> ScenarioResult {
     let started = Instant::now();
     let deps = match build_deps(sc, &options.deps) {
@@ -366,7 +388,26 @@ pub async fn run_scenario(sc: &Scenario, options: &RunOptions) -> ScenarioResult
         }
     };
 
-    let outcome = execute(sc, &deps, options.plane_factory.as_ref()).await;
+    // `execute` 是 async，catch_unwind 包不住 future 的执行；用 FutureExt::catch_unwind
+    // 的等价写法：把整个 future 塞进 AssertUnwindSafe 再 await。
+    let outcome =
+        match std::panic::AssertUnwindSafe(execute(sc, &deps, options.plane_factory.as_ref()))
+            .catch_unwind()
+            .await
+        {
+            Ok(r) => r,
+            Err(p) => {
+                let detail = p
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| p.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "（panic 载荷不是字符串）".to_string());
+                Err(PhaseError::new(
+                    "error",
+                    format!("场景执行中 panic 了：{detail}"),
+                ))
+            }
+        };
     // 场景一收就把沙箱收摊。默认档是空操作，docker 档靠它别把容器留给下一个场景。
     deps.close().await;
 
@@ -382,7 +423,21 @@ pub async fn run_scenario(sc: &Scenario, options: &RunOptions) -> ScenarioResult
             ..ScenarioResult::default()
         },
         Ok(settled_by) => {
-            let failures = run_checks(&deps, &sc.expect);
+            // 断言 DSL 自己出错（比如 magic 写成全角）不该带走整套评测。
+            let failures = match catch("断言", || run_checks(&deps, &sc.expect)) {
+                Ok(f) => f,
+                Err(e) => {
+                    return ScenarioResult {
+                        name: sc.name.clone(),
+                        passed: false,
+                        phase: e.phase.to_string(),
+                        reason: Some(e.message),
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        stats: deps.stats(),
+                        ..ScenarioResult::default()
+                    };
+                }
+            };
             ScenarioResult {
                 name: sc.name.clone(),
                 passed: failures.is_empty(),

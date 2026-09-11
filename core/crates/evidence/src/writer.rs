@@ -84,6 +84,13 @@ fn now_micros() -> chrono::DateTime<Utc> {
 
 struct Inner {
     root: PathBuf,
+    /// `append` 与 `finalize` 的串行锁。**必须在 spawn_blocking 内部取**：
+    /// tokio 的 Mutex guard 挂在 future 上，future 在 `.await` 被取消时 guard 立刻释放，
+    /// 而 spawn_blocking 起的闭包不可取消、还在跑 —— 下一个 append 就能和它真并发进来，
+    /// 两路读到同一个 tip、写出同一个 seq，文件以换行收尾于是 heal 不会碰，verify 永久 false。
+    /// 取消点在 RΩ 的收尾序列里是现成的（`runner.cancel()`）。同仓库 SqliteSessionStore
+    /// 的 `with_conn` 就是这个形状，照它抄。
+    write_lock: Mutex<()>,
     /// task_id -> (下一个 seq, 上一条 hash)。只是省掉每次 append 重读整个 jsonl
     /// （40 步的任务有一百多条事件，不缓存就是 O(n²) 次解析）。
     /// 首次接触某个任务时仍从文件恢复，所以进程重启、换实例都接得上。
@@ -275,6 +282,7 @@ impl Inner {
         kind: EvidenceKind,
         payload: Map<String, Value>,
     ) -> Result<EvidenceEvent, EvidenceError> {
+        let _serial = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         // 上一条命可能写到一半。这一步必须在算 tip 之前，也必须真去看文件 ——
         // 磁盘满那一路 tip 还是热的、自以为写成功了，只有文件知道真相。
         self.heal_torn_tail(task_id)?;
@@ -325,6 +333,7 @@ impl Inner {
         task_id: &str,
         manifest_extra: Map<String, Value>,
     ) -> Result<String, EvidenceError> {
+        let _serial = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         // finalize 也是写入侧入口，崩溃后最先被调到的往往就是它。收拾之后
         // event_count 少掉的那一条正是没写完的半行 —— 它从来不是一条事件。
         self.heal_torn_tail(task_id)?;
@@ -408,9 +417,9 @@ impl Inner {
 
 /// EvidenceWriter（对应 Python `FileEvidenceWriter`）。
 pub struct FileEvidenceWriter {
+    /// 串行锁在 `Inner` 里、由 `append_sync`/`finalize_sync` 在阻塞段内部取，
+    /// 这样调用方取消 future 也不会把互斥放掉。`verify` 不加锁（只读，同 Python）。
     inner: Arc<Inner>,
-    /// `append` 与 `finalize` 串行：链尾只有一个。`verify` 不加锁（只读）。
-    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for FileEvidenceWriter {
@@ -426,11 +435,11 @@ impl FileEvidenceWriter {
         Self {
             inner: Arc::new(Inner {
                 root: evidence_dir.into(),
+                write_lock: Mutex::new(()),
                 tip: Mutex::new(HashMap::new()),
                 counters: Mutex::new(BTreeMap::new()),
                 whole_file_reads: AtomicU64::new(0),
             }),
-            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -470,10 +479,10 @@ impl EvidenceWriter for FileEvidenceWriter {
         kind: EvidenceKind,
         payload: Map<String, Value>,
     ) -> Result<EvidenceEvent, EvidenceError> {
-        let _guard = self.write_lock.lock().await;
         let inner = Arc::clone(&self.inner);
         let task_id = task_id.to_string();
-        // 文件 IO 是阻塞的，不在 async 上下文里直接做（spec §7.6）
+        // 文件 IO 是阻塞的，不在 async 上下文里直接做（spec §7.6）。
+        // 串行由 Inner::write_lock 在闭包内部保证 —— 取消安全，见那里的注释。
         tokio::task::spawn_blocking(move || inner.append_sync(&task_id, kind, payload))
             .await
             .map_err(|e| {
@@ -486,7 +495,6 @@ impl EvidenceWriter for FileEvidenceWriter {
         task_id: &str,
         manifest_extra: Map<String, Value>,
     ) -> Result<String, EvidenceError> {
-        let _guard = self.write_lock.lock().await;
         let inner = Arc::clone(&self.inner);
         let task_id = task_id.to_string();
         tokio::task::spawn_blocking(move || inner.finalize_sync(&task_id, manifest_extra))

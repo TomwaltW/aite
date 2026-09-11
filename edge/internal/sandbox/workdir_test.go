@@ -72,6 +72,22 @@ func TestPathsOutsideWorkAreRejected(t *testing.T) {
 }
 
 // 对应 test_require_file_path_rejects_the_workdir_itself。
+// 回归：workdir 带尾斜杠时曾把所有路径判成 InvalidPath（还报「必须在 /work/ 下」）。
+func TestWorkdirWithTrailingSlashStillAccepts(t *testing.T) {
+	for _, wd := range []string{"/work", "/work/", "/work//"} {
+		got, err := NormalizeWorkPath("/work/out.png", wd)
+		if err != nil {
+			t.Fatalf("workdir=%q 时被拒了：%v", wd, err)
+		}
+		if got != "/work/out.png" {
+			t.Errorf("workdir=%q → %q", wd, got)
+		}
+		if _, err := RequireFilePath("/work/in/a.csv", wd); err != nil {
+			t.Errorf("workdir=%q 时 RequireFilePath 被拒：%v", wd, err)
+		}
+	}
+}
+
 func TestRequireFilePathRejectsTheWorkdirItself(t *testing.T) {
 	if _, err := RequireFilePath(Workdir, ""); !isInvalidPath(err) {
 		t.Fatalf("RequireFilePath(%q) 应当是 InvalidPath，得到 %v", Workdir, err)

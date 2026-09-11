@@ -77,7 +77,8 @@ impl EdgeClient {
             .status_client()
             .get_status(pb::GetStatusRequest {})
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(reply.into_inner())
     }
 

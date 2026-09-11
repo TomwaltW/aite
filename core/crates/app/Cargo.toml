@@ -32,3 +32,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# cli_smoke 要解析 `aite evals run` 的 JSON 摘要；serde_json 已在 workspace 依赖表里，不是新依赖
+serde_json.workspace = true

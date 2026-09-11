@@ -69,6 +69,15 @@ impl Link {
         self.connected.load(Ordering::SeqCst)
     }
 
+    /// 一次成功的 RPC 就是「现在连得上」的最强证据 —— 比探针新鲜。
+    ///
+    /// 不加这条的话：探针一旦进了退避 sleep（最长 30s），哪怕 edge 已经起来、
+    /// RPC 一路跑通，`connected()` 也要等下一次拨号才翻 true。RΩ 拿它出健康行
+    /// 或做起飞门禁就会误判成「edge 不在」。
+    pub(crate) fn note_ok(&self) {
+        self.connected.store(true, Ordering::SeqCst);
+    }
+
     pub(crate) fn platform_client(&self) -> PlatformServiceClient<Channel> {
         PlatformServiceClient::new(self.channel.clone())
             .max_decoding_message_size(self.max_bytes)

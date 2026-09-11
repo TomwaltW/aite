@@ -377,21 +377,19 @@ func TestGetFileMissingIsFileNotFound(t *testing.T) {
 	id := mustAcquire(t, d, taskID("missing-file"))
 
 	_, err := d.GetFile(context.Background(), id, "/work/never-written.png")
-	requireKind(t, err, aiteerr.SandboxNotFound, "GetFile 缺失")
-	var se *aiteerr.SandboxError
-	if !errors.As(err, &se) || !strings.HasPrefix(se.Msg, "file_not_found:") {
-		t.Fatalf("消息要以 file_not_found: 开头，得到 %v", err)
-	}
+	requireKind(t, err, aiteerr.SandboxFileNotFound, "GetFile 缺失")
 
-	// 过一遍 R0 的映射，把 core 真正看到的那串留在日志里。
-	// 注意：aiteerr 会在前面再贴一层 kind token，core 侧 aite-proto::status 是按
-	// `st.message().starts_with("sandbox_not_found")` 判的 —— 这条留给总管定（见回执）。
+	// 真正要紧的是**上线路的那一串**：core 侧 aite-proto::status 按 message 开头把
+	// 「文件没了」与「沙箱没了」分开，判错的话 worker 会把「少一个产物」当成「沙箱挂了」。
 	st, ok := status.FromError(aiteerr.ToStatus(err))
 	if !ok {
 		t.Fatalf("ToStatus 没给出 gRPC status：%v", err)
 	}
 	if st.Code() != codes.NotFound {
 		t.Fatalf("gRPC code = %v，想要 NotFound", st.Code())
+	}
+	if !strings.HasPrefix(st.Message(), "file_not_found:") {
+		t.Fatalf("core 看到的是 %q —— 前缀不对就判不出 FileNotFound", st.Message())
 	}
 	t.Logf("core 侧看到的 status：code=%v message=%q", st.Code(), st.Message())
 }

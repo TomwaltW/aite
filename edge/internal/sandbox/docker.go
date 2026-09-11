@@ -196,14 +196,14 @@ func (d *Docker) Acquire(ctx context.Context, taskID string, spec *pb.SandboxSpe
 			},
 		}, nil, nil, "")
 	if err != nil {
-		return "", sbErr(aiteerr.SandboxInternal, "创建沙箱容器失败（task=%s）：%v", taskID, err)
+		return "", dockerErr(err, aiteerr.SandboxInternal, "创建沙箱容器失败（task=%s）：%v", taskID, err)
 	}
 
 	sandboxID := created.ID
 	if err := cli.ContainerStart(ctx, sandboxID, container.StartOptions{}); err != nil {
 		// 起不来的容器别留在机器上等 reaper —— 它连 exec 都进不去。
 		_ = d.Release(ctx, sandboxID)
-		return "", sbErr(aiteerr.SandboxInternal, "创建沙箱容器失败（task=%s）：%v", taskID, err)
+		return "", dockerErr(err, aiteerr.SandboxInternal, "创建沙箱容器失败（task=%s）：%v", taskID, err)
 	}
 
 	d.mu.Lock()
@@ -325,9 +325,9 @@ func (d *Docker) GetFile(ctx context.Context, sandboxID, p string) ([]byte, erro
 	if err != nil {
 		if client.IsErrNotFound(err) {
 			// 文件不存在与容器没了在 Docker 那边都是 404；与 Python 版一样并成一种。
-			return nil, sbErr(aiteerr.SandboxNotFound, "file_not_found: %s", target)
+			return nil, sbErr(aiteerr.SandboxFileNotFound, "%s", target)
 		}
-		return nil, sbErr(aiteerr.SandboxInternal, "从沙箱读 %s 失败：%v", target, err)
+		return nil, dockerErr(err, aiteerr.SandboxInternal, "从沙箱读 %s 失败：%v", target, err)
 	}
 	defer func() { _ = rc.Close() }()
 
@@ -338,19 +338,19 @@ func (d *Docker) GetFile(ctx context.Context, sandboxID, p string) ([]byte, erro
 			break
 		}
 		if err != nil {
-			return nil, sbErr(aiteerr.SandboxInternal, "从沙箱读 %s 失败：%v", target, err)
+			return nil, dockerErr(err, aiteerr.SandboxInternal, "从沙箱读 %s 失败：%v", target, err)
 		}
 		if hdr.Typeflag != tar.TypeReg {
 			continue
 		}
 		data, err := io.ReadAll(tr)
 		if err != nil {
-			return nil, sbErr(aiteerr.SandboxInternal, "从沙箱读 %s 失败：%v", target, err)
+			return nil, dockerErr(err, aiteerr.SandboxInternal, "从沙箱读 %s 失败：%v", target, err)
 		}
 		d.touchBox(sandboxID)
 		return data, nil
 	}
-	return nil, sbErr(aiteerr.SandboxNotFound, "file_not_found: %s（不是一个文件）", target)
+	return nil, sbErr(aiteerr.SandboxFileNotFound, "%s（不是一个文件）", target)
 }
 
 func (d *Docker) ListFiles(ctx context.Context, sandboxID string) ([]string, error) {
@@ -393,7 +393,7 @@ func (d *Docker) Release(ctx context.Context, sandboxID string) error {
 		if client.IsErrNotFound(err) {
 			return nil
 		}
-		return sbErr(aiteerr.SandboxInternal, "释放沙箱失败（%s）：%v", short(sandboxID), err)
+		return dockerErr(err, aiteerr.SandboxInternal, "释放沙箱失败（%s）：%v", short(sandboxID), err)
 	}
 	if known {
 		slog.Info("sandbox.released", "sandbox", short(sandboxID))
@@ -576,12 +576,12 @@ func (d *Docker) execRun(ctx context.Context, containerID string, cmd []string, 
 			d.forget(containerID)
 			return -1, "", "", sbErr(aiteerr.SandboxNotFound, "沙箱容器已经不在了：%s", short(containerID))
 		}
-		return -1, "", "", sbErr(aiteerr.SandboxInternal, "在沙箱里执行失败：%v", err)
+		return -1, "", "", dockerErr(err, aiteerr.SandboxInternal, "在沙箱里执行失败：%v", err)
 	}
 
 	att, err := cli.ContainerExecAttach(ctx, ex.ID, container.ExecAttachOptions{})
 	if err != nil {
-		return -1, "", "", sbErr(aiteerr.SandboxInternal, "在沙箱里执行失败：%v", err)
+		return -1, "", "", dockerErr(err, aiteerr.SandboxInternal, "在沙箱里执行失败：%v", err)
 	}
 	defer att.Close()
 
@@ -589,7 +589,7 @@ func (d *Docker) execRun(ctx context.Context, containerID string, cmd []string, 
 	// 容器与 exec 都没有 tty，所以流是多路复用的，StdCopy 能把 stdout/stderr 拆开。
 	if _, err := stdcopy.StdCopy(&outBuf, &errBuf, att.Reader); err != nil && !errors.Is(err, io.EOF) {
 		return -1, outBuf.String(), errBuf.String(),
-			sbErr(aiteerr.SandboxInternal, "读沙箱输出失败：%v", err)
+			dockerErr(err, aiteerr.SandboxInternal, "读沙箱输出失败：%v", err)
 	}
 	return d.execExitCode(ctx, cli, ex.ID), outBuf.String(), errBuf.String(), nil
 }
@@ -665,13 +665,13 @@ func (d *Docker) putBytes(ctx context.Context, containerID, p string, data []byt
 		ModTime: time.Unix(time.Now().Unix(), 0),
 	}
 	if err := tw.WriteHeader(hdr); err != nil {
-		return sbErr(aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
+		return dockerErr(err, aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
 	}
 	if _, err := tw.Write(data); err != nil {
-		return sbErr(aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
+		return dockerErr(err, aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
 	}
 	if err := tw.Close(); err != nil {
-		return sbErr(aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
+		return dockerErr(err, aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
 	}
 
 	cli, err := d.dockerClient()
@@ -684,7 +684,7 @@ func (d *Docker) putBytes(ctx context.Context, containerID, p string, data []byt
 			d.forget(containerID)
 			return sbErr(aiteerr.SandboxNotFound, "沙箱容器已经不在了：%s", short(containerID))
 		}
-		return sbErr(aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
+		return dockerErr(err, aiteerr.SandboxInternal, "写入沙箱 %s 失败：%v", p, err)
 	}
 	return nil
 }
@@ -796,6 +796,19 @@ func clip(text string, limit int) (string, bool) {
 
 func sbErr(kind aiteerr.SandboxErrKind, format string, args ...any) *aiteerr.SandboxError {
 	return &aiteerr.SandboxError{Kind: kind, Msg: fmt.Sprintf(format, args...)}
+}
+
+// dockerErr 和 sbErr 一样，但先认一认「是不是 daemon 没了」。
+//
+// 契约（proto/aite/v1/edge.proto 头注释）把「docker daemon 不可达」冻结成 UNAVAILABLE，
+// 而 core 侧 is_retryable 只认 UNAVAILABLE / DEADLINE_EXCEEDED / ABORTED / RESOURCE_EXHAUSTED。
+// 报成 Internal 的话，daemon 重启这种最典型的可重试抖动会被 core 当成不可重试。
+// daemon 挂掉时走的正是 ContainerCreate / Start / exec / copy 这些路径，不是只有 Ping。
+func dockerErr(err error, kind aiteerr.SandboxErrKind, format string, args ...any) *aiteerr.SandboxError {
+	if client.IsErrConnectionFailed(err) {
+		kind = aiteerr.SandboxUnavailable
+	}
+	return sbErr(kind, format, args...)
 }
 
 func randomHex() string {

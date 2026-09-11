@@ -173,6 +173,70 @@ async fn handle_event_failure_is_reported_as_dispatch() {
     assert!(r.reason.unwrap().contains("我不接这个事件"));
 }
 
+/// plane 里 panic 不能带走整套评测 —— 收成 phase="error" 的一行人话。
+///
+/// 回归：此前 `phase="error"` 是个**没有任何路径产出**的死分支（上面那条用例的
+/// 白名单里却写着它），`execute` 到 `cli::run` 一路没有 catch。R4 的真 plane
+/// 一个 unwrap 就能让 B8 的 10 条一起丢，且 JSON 摘要和 `passed k/n` 都出不来。
+#[tokio::test]
+async fn a_panicking_plane_is_caught_as_an_error_phase() {
+    struct Exploding;
+    #[async_trait::async_trait]
+    impl ControlPlane for Exploding {
+        async fn handle_event(&self, _ev: NormalizedEvent) -> Result<(), IngressError> {
+            panic!("plane 里有个没兜住的 unwrap");
+        }
+        async fn run_forever(&self) {
+            std::future::pending::<()>().await
+        }
+        async fn run_pending(&self) {}
+        fn pending(&self) -> usize {
+            0
+        }
+        async fn join(&self) {}
+        async fn cancel_task(
+            &self,
+            task: Task,
+            _reply_to: Option<String>,
+            _chat_id: Option<String>,
+            _notify: bool,
+        ) -> Task {
+            task
+        }
+        fn counters(&self) -> Map<String, Value> {
+            Map::new()
+        }
+    }
+    let factory: PlaneFactory =
+        Arc::new(|_: &Deps| Ok(Arc::new(Exploding) as Arc<dyn ControlPlane>));
+    let r = run_scenario(&by_name("01_simple_qa"), &options_with(factory)).await;
+    assert_eq!(r.phase, "error", "panic 要收成 error 相，而不是打穿进程");
+    let reason = r.reason.unwrap_or_default();
+    assert!(reason.contains("panic"), "原因要说清是 panic：{reason}");
+    assert!(
+        reason.contains("没兜住的 unwrap"),
+        "panic 的原话不能丢：{reason}"
+    );
+    assert!(!reason.contains('\n'), "原因要是一行：{reason:?}");
+}
+
+/// 断言 DSL 自己出错（magic 写成全角）也不许打穿 —— 此前 hex_decode 按字节切片会 panic。
+#[tokio::test]
+async fn a_malformed_magic_fails_the_check_instead_of_panicking() {
+    let mut sc = by_name("01_simple_qa");
+    let mut spec = Map::new();
+    spec.insert("check".into(), Value::String("file".into()));
+    // 全角数字：6 个字节、长度是偶数，能过「偶数长度」那关，然后在 char 边界上炸。
+    spec.insert("magic".into(), Value::String("８９".into()));
+    sc.expect = vec![Value::Object(spec)];
+    let r = run_scenario(&sc, &options_with(demo_plane::DemoPlane::factory())).await;
+    assert_ne!(
+        r.phase, "error",
+        "不该是 panic 被兜住，而该是断言正常判失败"
+    );
+    assert!(!r.passed);
+}
+
 /// 一直在动的系统要以 drive 超时收场，而不是永远挂着。
 #[tokio::test]
 async fn a_plane_that_never_settles_times_out_with_a_reason() {

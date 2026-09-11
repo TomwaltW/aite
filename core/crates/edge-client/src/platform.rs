@@ -54,7 +54,8 @@ impl EdgePlatform {
             .platform_client()
             .get_capabilities(pb::GetCapabilitiesRequest {})
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         let caps = PlatformCapabilities::from(reply.into_inner());
         *self.capabilities.lock().expect("capabilities 锁") = Some(caps.clone());
         Ok(caps)
@@ -92,7 +93,8 @@ impl PlatformPort for EdgePlatform {
             .platform_client()
             .send_text(pb::OutboundText::from(msg.clone()))
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(SendResult::from(reply.into_inner()))
     }
 
@@ -111,7 +113,8 @@ impl PlatformPort for EdgePlatform {
                 card: Some(pb::ChecklistCard::from(card.clone())),
             })
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(SendResult::from(reply.into_inner()))
     }
 
@@ -123,7 +126,8 @@ impl PlatformPort for EdgePlatform {
                 card: Some(pb::ChecklistCard::from(card.clone())),
             })
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(())
     }
 
@@ -133,7 +137,8 @@ impl PlatformPort for EdgePlatform {
             .platform_client()
             .send_file(pb::OutboundFile::from(msg.clone()))
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(SendResult::from(reply.into_inner()))
     }
 
@@ -149,7 +154,8 @@ impl PlatformPort for EdgePlatform {
                 kind: pb::ReactionKind::from(kind) as i32,
             })
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(())
     }
 
@@ -168,7 +174,8 @@ impl PlatformPort for EdgePlatform {
                 thread_id: thread_id.map(str::to_string),
             })
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         reply
             .into_inner()
             .messages
@@ -185,7 +192,8 @@ impl PlatformPort for EdgePlatform {
                 url_or_token: url_or_token.to_string(),
             })
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(DocumentContent::from(reply.into_inner()))
     }
 
@@ -202,7 +210,8 @@ impl PlatformPort for EdgePlatform {
                 file_key: file_key.to_string(),
             })
             .await
-            .map_err(|st| self.link.platform_error(&st))?;
+            .map_err(|st| self.link.platform_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(reply.into_inner().data)
     }
 }

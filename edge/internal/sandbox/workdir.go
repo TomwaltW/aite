@@ -31,6 +31,15 @@ func NormalizeWorkPath(path, workdir string) (string, error) {
 	if workdir == "" {
 		workdir = Workdir
 	}
+	// workdir 自己也要归一：core 发来 "/work/" 的话，下面 `normalized == workdir` 与
+	// `HasPrefix(normalized, workdir+"/")` 两条都不成立 —— 所有 Put/GetFile 会被判成
+	// InvalidPath，还报一句「路径必须在 /work/ 下」这种自相矛盾的话。
+	// Python 用 PurePosixPath 比较，"/work/" 与 "/work" 天然相等。
+	if trimmed := strings.TrimRight(workdir, "/"); trimmed != "" {
+		workdir = trimmed
+	} else {
+		workdir = "/"
+	}
 	if strings.TrimSpace(path) == "" {
 		return "", pathErr("路径不能为空：%q", path)
 	}

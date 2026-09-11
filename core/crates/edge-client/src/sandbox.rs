@@ -32,7 +32,8 @@ impl SandboxPort for EdgeSandbox {
                 spec: Some(pb::SandboxSpec::from(spec.clone())),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(reply.into_inner().sandbox_id)
     }
 
@@ -45,7 +46,8 @@ impl SandboxPort for EdgeSandbox {
                 req: Some(pb::ExecRequest::from(req.clone())),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(ExecResult::from(reply.into_inner()))
     }
 
@@ -63,7 +65,8 @@ impl SandboxPort for EdgeSandbox {
                 data: data.to_vec(),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(())
     }
 
@@ -76,7 +79,8 @@ impl SandboxPort for EdgeSandbox {
                 path: path.to_string(),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(reply.into_inner().data)
     }
 
@@ -88,7 +92,8 @@ impl SandboxPort for EdgeSandbox {
                 sandbox_id: sandbox_id.to_string(),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(reply.into_inner().paths)
     }
 
@@ -99,7 +104,8 @@ impl SandboxPort for EdgeSandbox {
                 sandbox_id: sandbox_id.to_string(),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(())
     }
 
@@ -110,7 +116,8 @@ impl SandboxPort for EdgeSandbox {
                 sandbox_id: sandbox_id.to_string(),
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(())
     }
 
@@ -122,7 +129,8 @@ impl SandboxPort for EdgeSandbox {
                 idle_sec: idle_sec as i32,
             })
             .await
-            .map_err(|st| self.link.sandbox_error(&st))?;
+            .map_err(|st| self.link.sandbox_error(&st))
+            .inspect(|_| self.link.note_ok())?;
         Ok(reply.into_inner().released)
     }
 

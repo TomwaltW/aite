@@ -201,6 +201,10 @@ func (c *larkConnection) Connect(ctx context.Context) error {
 		if err == nil {
 			err = errConnectClosedBeforeReady
 		}
+		// 建连失败也要摘掉这棵 cancelCtx：它挂在 Start 那个跑一整条命的 ctx 上，
+		// 不摘就是每失败一次多一个永不释放的 child。退避封顶 30s ≈ 每小时 120 次，
+		// 断网一夜数千个。go vet 的 lostcancel 抓不到（cancel 赋给了 c.cancel，算用过）。
+		cancel()
 		return fmt.Errorf("feishu: 建连失败: %w", err)
 	case <-ctx.Done():
 		cancel()

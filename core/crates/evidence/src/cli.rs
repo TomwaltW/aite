@@ -718,7 +718,29 @@ pub fn load_timeline(task_dir: &Path, price_in: f64, price_out: f64) -> Timeline
     };
 
     let mut detailer = Detailer::new(price_in, price_out);
-    let raw = std::fs::read_to_string(&events_path).unwrap_or_default();
+    // 不能用 unwrap_or_default()：events.jsonl 不是合法 UTF-8 时那会把它当成空文件，
+    // 于是「0 条事件 · 链 OK」退出 0 —— 而 FileEvidenceWriter::verify 对同一份文件判 false。
+    // 崩溃现场（写到一半被杀、残行截在多字节字符中间、还没 finalize）正好命中这条路，
+    // 而这个子命令存在的全部理由就是在那时候说真话。
+    let raw = match std::fs::read(&events_path).map(String::from_utf8) {
+        Ok(Ok(text)) => text,
+        Ok(Err(e)) => {
+            tl.issues.push(ChainIssue::new(
+                0,
+                None,
+                format!("events.jsonl 不是合法的 UTF-8（{e}）—— 多半是上一个进程写到一半被杀"),
+            ));
+            String::new()
+        }
+        Err(e) => {
+            tl.issues.push(ChainIssue::new(
+                0,
+                None,
+                format!("读不了 events.jsonl：{e}"),
+            ));
+            String::new()
+        }
+    };
     let mut prev = GENESIS.to_string();
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut first_task_id: Option<String> = None;

@@ -6,6 +6,7 @@ package pin
 import (
 	_ "github.com/docker/docker/api/types/container"
 	_ "github.com/docker/docker/client"
+	_ "github.com/gorilla/websocket" // R1 的卡片帧测试直接 import 它造假 ws 服务端
 	_ "github.com/larksuite/oapi-sdk-go/v3"
 	_ "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	_ "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
