@@ -1,0 +1,23 @@
+[package]
+name = "aite-evals"
+description = "评测 runner / 场景 / checks / protocol probe / demo-fixture（对应旧 aite/evals/** 与 scripts/demo_fixture.py）。owner: R7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aite-contracts.workspace = true
+aite-testing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

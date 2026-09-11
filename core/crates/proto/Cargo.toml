@@ -1,0 +1,20 @@
+[package]
+name = "aite-proto"
+description = "proto/aite/v1 的 tonic/prost 生成代码 + domain(aite-contracts) ↔ pb 互转 + gRPC status ↔ 错误映射。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aite-contracts.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true

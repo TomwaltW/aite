@@ -1,64 +1,55 @@
-# Aite P0 常用命令（owner: T4，dev-spec §3.4 归属表）
+# Aite —— Rust（core/）+ Go（edge/）常用命令。验收编号对应 docs/dev-spec-2026-09-11-rustgo.md §4。
 #
-# 每个 target 对应 §2 验收表里的一条，名字就是那条的编号，红了直接对得上。
-#
-# PYTHON 怎么挑：优先用 worktree 里的 .venv（本机默认 python3 是 3.11，满足不了
-# requires-python>=3.12），其次 PATH 上的 python（CI 里 setup-python 提供的就是它），
-# 最后退回 python3。想指定就 `make test PYTHON=/path/to/python`。
-PYTHON ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
-	elif command -v python >/dev/null 2>&1; then echo python; else echo python3; fi)
-PYTEST := $(PYTHON) -m pytest
+# 需要：rustup（core/rust-toolchain.toml 钉了版本）、go >= 1.27、protoc（只有 proto-gen 用）、docker（沙箱）。
+# brew 装的 rustup 把 cargo 放在 /opt/homebrew/opt/rustup/bin，Go 插件在 ~/go/bin —— 都要在 PATH 上。
+
+CARGO ?= cargo
+GO ?= go
+AITE := core/target/debug/aite
 SUITE ?= evals/p0
 
 .DEFAULT_GOAL := help
-.PHONY: help install a2 a3 a4 a5 c1 c2 check test e2e contracts evals evals-list compose-config docker-image clean
+.PHONY: help build test lint lock c2 evals evals-list proto-gen docker-image compose-config check clean
 
 help:  ## 列出所有 target
-	@echo "Aite P0 —— 验收标准见 docs/dev-spec-2026-09-09.md §2"
-	@echo "当前 PYTHON = $(PYTHON)"
-	@echo
 	@grep -E '^[a-zA-Z0-9_ -]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-install:  ## A1 装成 editable（含 dev 依赖）
-	$(PYTHON) -m pip install -e ".[dev]"
+build:  ## A1/A2 编译 core（Rust）与 edge（Go）
+	cd core && $(CARGO) build --workspace
+	cd edge && $(GO) build ./...
 
-a2:  ## A2 契约版本必须是 p0.1
-	$(PYTHON) -c "import aite.contracts as c; print(c.CONTRACT_VERSION)"
+test:  ## B 全量测试：cargo test + go test（要 Docker 的 Go 测试用 -tags docker 单独跑）
+	cd core && $(CARGO) test --workspace --no-fail-fast
+	cd edge && $(GO) test ./... -count=1
 
-a3 c2:  ## A3/C2 契约锁校验
-	$(PYTHON) -m aite.contracts.lock --check
+lint:  ## A4 静态检查：clippy -D warnings、fmt --check、go vet、gofmt
+	cd core && $(CARGO) clippy --workspace --all-targets -- -D warnings
+	cd core && $(CARGO) fmt --check
+	cd edge && $(GO) vet ./...
+	@cd edge && test -z "$$(gofmt -l .)" || (echo "gofmt 未通过："; gofmt -l .; exit 1)
 
-a4:  ## A4 ruff
-	$(PYTHON) -m ruff check .
+lock c2: build  ## A3/C2 契约锁校验（proto/** + core/crates/contracts/** + aite/contracts/**）
+	$(AITE) contracts lock --check
 
-a5:  ## A5 全仓可收集
-	$(PYTEST) -q --co
+evals: build  ## B8 跑 P0 场景，最后一行 passed k/10
+	$(AITE) evals run $(SUITE) --platform fake --model scripted
 
-c1 contracts:  ## C1 契约测试（通过数不得减少）
-	$(PYTEST) tests/contracts -q
+evals-list: build  ## 列出场景名
+	$(AITE) evals run $(SUITE) --list
 
-test:  ## 全量测试（跳过要 Docker 的）
-	$(PYTEST) -q -m "not docker"
+proto-gen:  ## 重生成 edge/gen/aitepb（只有 R0/RΩ 在 AITE_RELOCK=1 下跑；Rust 侧由 build.rs 自动生成）
+	protoc -I proto --go_out=edge --go_opt=module=aite/edge --go-grpc_out=edge --go-grpc_opt=module=aite/edge proto/aite/v1/*.proto
 
-e2e:  ## T4 的替身与 runner 自测
-	$(PYTEST) tests/e2e -q
-
-evals:  ## B8 跑 10 个 P0 场景，最后一行 passed k/10
-	$(PYTHON) -m aite.evals run $(SUITE) --platform fake --model scripted
-
-evals-list:  ## 列出 §3.8 的 10 个场景名
-	$(PYTHON) -m aite.evals run $(SUITE) --list
+docker-image:  ## 构建沙箱镜像（内容归 R2）
+	docker build -t aite-sandbox:p0 docker/sandbox
 
 compose-config:  ## compose 编排可解析
 	docker compose config
 
-docker-image:  ## 构建沙箱镜像（内容归 T3）
-	docker build -t aite-sandbox:p0 docker/sandbox
+check:  ## 一次跑完 A1–A5 + C1/C2（打印实际输出，回执贴这个）
+	scripts/check.sh
 
-check: a2 a3 a4 a5 c1 e2e evals-list compose-config  ## 一次跑完 A2-A5 + C1 + T4 附加项
-	@echo "全部通过"
-
-clean:  ## 清掉缓存
-	rm -rf .pytest_cache .ruff_cache
-	find . -name __pycache__ -type d -prune -not -path "./.venv/*" -exec rm -rf {} +
+clean:  ## 清掉构建产物
+	cd core && $(CARGO) clean
+	rm -rf edge/bin

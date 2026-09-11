@@ -1,0 +1,20 @@
+// aite/v1/capabilities.proto —— 平台能力描述（对应旧 aite/contracts/capabilities.py）。
+// 冻结契约：改动需总管授权（AITE_RELOCK=1）并刷新 .contracts.lock。
+syntax = "proto3";
+
+package aite.v1;
+
+option go_package = "aite/edge/gen/aitepb;aitepb";
+
+// 一个平台 adapter 能做什么。core 据此决定路由与出站策略，不 hardcode 平台差异。
+message PlatformCapabilities {
+  string platform = 1;                       // "feishu" | "dingtalk" | "wecom" | "fake"
+  bool supports_thread = 2;                  // 有原生线程/话题
+  bool supports_history = 3;                 // 能读群历史
+  bool supports_passive_listen = 4;          // 能收到非 @ 消息（飞书 P0 默认 false，权限核实后 adapter 运行时可改 true）
+  bool supports_card_edit = 5;               // 卡片能原地更新
+  int32 card_edit_window_sec = 6;            // 卡片可更新时长（飞书 14 天 = 1209600）
+  bool inbound_file_in_group = 7;            // 群里能收文件
+  bool proactive_requires_prior_message = 8;
+  int32 outbound_rate_per_min = 9;           // 出站限速（消息数/分钟），adapter 自己令牌桶
+}

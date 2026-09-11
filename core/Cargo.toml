@@ -1,0 +1,54 @@
+# Aite core（Rust）—— 状态与判定面：契约、路由、会话存储、worker、网关、证据、模型客户端、评测。
+# 对外连接（飞书、Docker）在 ../edge（Go），两边靠 ../proto 的 gRPC 契约对话。
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+# 本仓库 crate（各轨只许依赖 contracts / proto / testing；跨轨依赖 → 停下报告）
+aite-contracts = { path = "crates/contracts" }
+aite-proto = { path = "crates/proto" }
+aite-store = { path = "crates/store" }
+aite-evidence = { path = "crates/evidence" }
+aite-gateway = { path = "crates/gateway" }
+aite-worker = { path = "crates/worker" }
+aite-control = { path = "crates/control" }
+aite-models = { path = "crates/models" }
+aite-edge-client = { path = "crates/edge-client" }
+aite-testing = { path = "crates/testing" }
+aite-evals = { path = "crates/evals" }
+
+# 第三方：版本在这里统一钉；各 crate 用 `xxx.workspace = true`。加新依赖 → 停下报告（R0 归属）。
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.10"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4", features = ["derive"] }
+bytes = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+jsonschema = "0.56"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tempfile = "3"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+prost-types = "0.14"

@@ -1,0 +1,23 @@
+[package]
+name = "aite-edge-client"
+description = "PlatformPort / SandboxPort 的 gRPC 实现（tonic client 到 Go edge）+ IngressService server。owner: R6"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aite-contracts.workspace = true
+aite-proto.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

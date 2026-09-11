@@ -1,0 +1,35 @@
+// aite/v1/sandbox.proto —— 沙箱规格与执行结果（对应旧 aite/contracts/sandbox.py）。
+// 冻结契约：改动需总管授权（AITE_RELOCK=1）并刷新 .contracts.lock。
+syntax = "proto3";
+
+package aite.v1;
+
+option go_package = "aite/edge/gen/aitepb;aitepb";
+
+message SandboxSpec {
+  string image = 1;
+  double cpu = 2;                      // 默认 1.0
+  int32 mem_mb = 3;                    // 默认 1024
+  string network = 4;                  // P0 只允许 "none"：凭证/平台调用都不在沙箱里发生
+  string workdir = 5;                  // 默认 "/work"
+}
+
+message ExecRequest {
+  string language = 1;                 // P0 只允许 "python"
+  string code = 2;
+  int32 timeout_sec = 3;               // 默认 120
+}
+
+message FileEntry {
+  string path = 1;
+  int64 size = 2;
+}
+
+message ExecResult {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+  int64 duration_ms = 4;
+  bool truncated = 5;                  // stdout/stderr 超过 MAX_EXEC_OUTPUT_CHARS(20000) 被截断
+  repeated FileEntry files_out = 6;    // /work 下本次新增/修改的文件
+}

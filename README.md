@@ -1,3 +1,9 @@
+> **2026-09-11 起：本仓库正在用 Rust + Go 重写。** 权威文档是 `docs/dev-spec-2026-09-11-rustgo.md`。
+> 新代码在 `core/`（Rust，状态与判定面）、`edge/`（Go，飞书与 Docker 对外连接面）、`proto/`（两者的 gRPC 契约）。
+> `aite/`、`tests/`、`pyproject.toml` 这棵 Python 树是**移植参考，只读**，RΩ 合流后整体删除。
+> 常用命令：`make build` / `make test` / `make lint` / `make lock` / `scripts/check.sh`。
+> 下面是 Python 版（P0）的原 README，移植期间仍可按它跑旧代码。
+
 # Aite
 
 飞书单平台闭环 P0：群里 @Aite → 线程绑定会话 → Checklist 卡片原地更新 → 沙箱执行 →

@@ -1,0 +1,176 @@
+// aite/v1/edge.proto —— core（Rust）与 edge（Go）之间的进程边界。
+//
+// 进程模型：两个常驻进程，各自是 gRPC server 也各自是 client，走 Unix domain socket：
+//   edge 提供 PlatformService / SandboxService / EdgeStatusService（core 调用）
+//   core 提供 IngressService（edge 收到平台事件后调用，1s deadline）
+// 任一方重启，另一方按指数退避重连，不退出。
+//
+// 错误约定（冻结）：
+//   可重试（平台 429/5xx 重试 3 次仍失败、网络断、docker daemon 不可达）→ UNAVAILABLE
+//   超时                                                             → DEADLINE_EXCEEDED
+//   平台 4xx 非 429                                                  → FAILED_PRECONDITION（404→NOT_FOUND，403→PERMISSION_DENIED，400→INVALID_ARGUMENT）
+//   sandbox_id 不存在                                                → NOT_FOUND
+//   路径不在 /work 下 / 含 ..                                        → INVALID_ARGUMENT
+//   其余                                                             → INTERNAL
+//   尚未实现（骨架期）                                               → UNIMPLEMENTED
+//   status.message 形如 "<code>: <detail>"，<code> 是平台错误码或短 token。
+//   core 侧映射：UNAVAILABLE | DEADLINE_EXCEEDED | ABORTED | RESOURCE_EXHAUSTED → retryable=true，其余 false。
+//
+// 冻结契约：改动需总管授权（AITE_RELOCK=1）并刷新 .contracts.lock。
+syntax = "proto3";
+
+package aite.v1;
+
+import "aite/v1/capabilities.proto";
+import "aite/v1/events.proto";
+import "aite/v1/outbound.proto";
+import "aite/v1/sandbox.proto";
+
+option go_package = "aite/edge/gen/aitepb;aitepb";
+
+// ---------------------------------------------------------------- edge 提供
+
+// 对应旧 PlatformPort（start/stop 不在此：长连接的生命周期归 edge 进程自己）。
+service PlatformService {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (PlatformCapabilities);
+  rpc SendText(OutboundText) returns (SendResult);
+  rpc SendCard(SendCardRequest) returns (SendResult);
+  rpc UpdateCard(UpdateCardRequest) returns (UpdateCardResponse);   // 必须原地更新同一条消息，绝不新发
+  rpc SendFile(OutboundFile) returns (SendResult);
+  rpc AddReaction(AddReactionRequest) returns (AddReactionResponse);
+  rpc ReadHistory(ReadHistoryRequest) returns (ReadHistoryResponse); // 按时间正序；不做 sender_kind 过滤
+  rpc ReadDocument(ReadDocumentRequest) returns (DocumentContent);
+  rpc DownloadFile(DownloadFileRequest) returns (DownloadFileResponse);
+}
+
+message GetCapabilitiesRequest {}
+
+message SendCardRequest {
+  string chat_id = 1;
+  optional string reply_to = 2;
+  ChecklistCard card = 3;
+}
+
+message UpdateCardRequest {
+  string card_id = 1;
+  ChecklistCard card = 2;
+}
+message UpdateCardResponse {}
+
+message AddReactionRequest {
+  string message_id = 1;
+  ReactionKind kind = 2;
+}
+message AddReactionResponse {}
+
+message ReadHistoryRequest {
+  string chat_id = 1;
+  int32 limit = 2;                     // 0 视为 50
+  optional string thread_id = 3;
+}
+message ReadHistoryResponse {
+  repeated HistoryMessage messages = 1;
+}
+
+message ReadDocumentRequest {
+  string url_or_token = 1;
+}
+
+message DownloadFileRequest {
+  string message_id = 1;
+  string file_key = 2;
+}
+message DownloadFileResponse {
+  bytes data = 1;
+}
+
+// 对应旧 SandboxPort。容器打标签 aite.task=<task_id>。
+service SandboxService {
+  rpc Acquire(AcquireRequest) returns (AcquireResponse);
+  rpc Exec(ExecCallRequest) returns (ExecResult);
+  rpc PutFile(PutFileRequest) returns (PutFileResponse);           // path 必须在 /work 下
+  rpc GetFile(GetFileRequest) returns (GetFileResponse);
+  rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+  rpc Touch(TouchRequest) returns (TouchResponse);                 // 刷新最近活动时间
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);           // 幂等
+  rpc ReapIdle(ReapIdleRequest) returns (ReapIdleResponse);        // 释放空闲超时的，返回被释放的 id
+}
+
+message AcquireRequest {
+  string task_id = 1;
+  SandboxSpec spec = 2;
+}
+message AcquireResponse {
+  string sandbox_id = 1;
+}
+
+message ExecCallRequest {
+  string sandbox_id = 1;
+  ExecRequest req = 2;
+}
+
+message PutFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+  bytes data = 3;
+}
+message PutFileResponse {}
+
+message GetFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+}
+message GetFileResponse {
+  bytes data = 1;
+}
+
+message ListFilesRequest {
+  string sandbox_id = 1;
+}
+message ListFilesResponse {
+  repeated string paths = 1;
+}
+
+message TouchRequest {
+  string sandbox_id = 1;
+}
+message TouchResponse {}
+
+message ReleaseRequest {
+  string sandbox_id = 1;
+}
+message ReleaseResponse {}
+
+message ReapIdleRequest {
+  int32 idle_sec = 1;
+}
+message ReapIdleResponse {
+  repeated string released = 1;
+}
+
+// edge 自身健康：给 !status / preflight 用。
+service EdgeStatusService {
+  rpc GetStatus(GetStatusRequest) returns (EdgeStatus);
+}
+
+message GetStatusRequest {}
+
+message EdgeStatus {
+  string version = 1;
+  string contract_version = 2;         // 必须等于 core 的 CONTRACT_VERSION，不等 core 拒绝起飞
+  bool platform_connected = 3;         // 飞书长连接当前是否在线
+  int64 reconnect_count = 4;
+  bool sandbox_ok = 5;                 // docker daemon 可达
+  string platform = 6;                 // "feishu" | "fake"
+}
+
+// ---------------------------------------------------------------- core 提供
+
+// 对应旧 PlatformPort.start(on_event) 的回调：edge 每收到一个平台事件调一次。
+// 约束：core 必须在 1s 内返回（只做去重/入库/入队，重活不在这里做）；
+// edge 用 1s deadline 调用，失败则向平台返回错误让其重推，重复由 core 靠 event_id 去重。
+service IngressService {
+  rpc HandleEvent(NormalizedEvent) returns (HandleEventResponse);
+}
+
+message HandleEventResponse {}

@@ -1,0 +1,22 @@
+[package]
+name = "aite-worker"
+description = "Agent loop / 卡片合并 / 上下文构造 / 提示词（对应旧 aite/worker/**）。owner: R5"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aite-contracts.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

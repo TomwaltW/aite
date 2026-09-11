@@ -27,3 +27,9 @@ config/aite.yaml
 
 # 系统
 .DS_Store
+
+# Rust / Go 构建产物（2026-09-11 重写起）
+/core/target/
+/edge/bin/
+# core ↔ edge 的 unix socket
+/data/run/

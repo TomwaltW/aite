@@ -1,4 +1,5 @@
-# Aite P0 配置样例 —— 形状见 aite/contracts/config.py（AiteConfig）。
+# Aite 配置样例 —— 形状见 core/crates/contracts/src/config.rs（AiteConfig，冻结契约）。
+# core（Rust）读全部；edge（Go）只读 tenant_id / platform / feishu / sandbox / edge 这几段。
 # 这里的每个值都是契约里的默认值。密钥只写环境变量名，绝不写取值。
 # 用法：cp config/aite.example.yaml config/aite.yaml 后按需改；aite.yaml 不入库。
 
@@ -14,7 +15,7 @@ feishu:
 
 model:
   provider: openai_compat  # openai_compat | scripted
-  base_url: ""             # 指向百炼 / 智谱的 OpenAI 兼容端点
+  base_url: ""             # 指向百炼 / 智谱 / DeepSeek 的 OpenAI 兼容端点
   api_key_env: AITE_MODEL_API_KEY
   model: ""
   max_tokens: 4096
@@ -33,9 +34,16 @@ worker:
   max_steps: 40
   max_wall_sec: 1200
   card_update_min_interval_ms: 500
-  system_prompt_path: aite/worker/prompts/platform.md
+  system_prompt_path: core/crates/worker/prompts/platform.md
 
 storage:
   sqlite_path: data/aite.db
   evidence_dir: data/evidence
   artifacts_dir: data/artifacts
+
+# core ↔ edge 的进程边界（proto/aite/v1/edge.proto）。两个 socket 都相对仓库根。
+edge:
+  edge_socket: data/run/aite-edge.sock     # edge 监听：PlatformService / SandboxService / EdgeStatusService
+  core_socket: data/run/aite-core.sock     # core 监听：IngressService
+  handle_event_deadline_ms: 1000           # edge 调 HandleEvent 的 deadline（§3.3 "on_event 1s 内返回"）
+  max_message_mb: 64                       # 两边 gRPC 的最大消息体（文件走 bytes）

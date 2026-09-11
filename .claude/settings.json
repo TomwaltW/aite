@@ -4,6 +4,12 @@
       "Edit(/aite/contracts/**)",
       "Edit(/.contracts.lock)",
       "Edit(/docs/dev-spec-2026-09-09.md)",
+      "Edit(/docs/dev-spec-2026-09-11-rustgo.md)",
+      "Edit(/proto/**)",
+      "Edit(/core/crates/contracts/**)",
+      "Edit(/core/Cargo.toml)",
+      "Edit(/edge/go.mod)",
+      "Edit(/edge/go.sum)",
       "Edit(/.claude/hooks/guard_bash.py)",
       "Edit(/.claude/settings.json)",
       "Edit(/.claude/settings.local.json)"

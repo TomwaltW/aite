@@ -1,0 +1,4 @@
+# 钉住工具链：各轨 worktree 与 CI 用同一个 rustc，避免「我这边能编」。
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

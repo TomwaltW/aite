@@ -1,0 +1,34 @@
+[package]
+name = "aite"
+description = "aite 二进制：run（组装起飞，owner RΩ）/ contracts lock（R0）/ evals（R7）/ evidence（R3）/ preflight（RΩ）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aite"
+path = "src/main.rs"
+
+[dependencies]
+aite-contracts.workspace = true
+aite-proto.workspace = true
+aite-store.workspace = true
+aite-evidence.workspace = true
+aite-gateway.workspace = true
+aite-worker.workspace = true
+aite-control.workspace = true
+aite-models.workspace = true
+aite-edge-client.workspace = true
+aite-testing.workspace = true
+aite-evals.workspace = true
+clap.workspace = true
+sha2.workspace = true
+hex.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

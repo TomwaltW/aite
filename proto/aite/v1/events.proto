@@ -1,0 +1,93 @@
+// aite/v1/events.proto —— 入站事件归一化形状（对应旧 aite/contracts/events.py）。
+// 由 edge（Go）从平台原始事件归一化后，经 IngressService.HandleEvent 送给 core（Rust）。
+// 冻结契约：改动需总管授权（AITE_RELOCK=1）并刷新 .contracts.lock。
+syntax = "proto3";
+
+package aite.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aite/edge/gen/aitepb;aitepb";
+
+enum SenderKind {
+  SENDER_KIND_UNSPECIFIED = 0;
+  SENDER_KIND_HUMAN = 1;
+  SENDER_KIND_BOT = 2;      // 其他机器人
+  SENDER_KIND_APP = 3;      // 应用/集成（含 Aite 自己）
+  SENDER_KIND_SYSTEM = 4;   // 平台系统消息
+}
+
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_MESSAGE = 1;
+  EVENT_KIND_MESSAGE_EDITED = 2;
+  EVENT_KIND_MESSAGE_DELETED = 3;
+  EVENT_KIND_CARD_ACTION = 4;
+  EVENT_KIND_BOT_ADDED = 5;
+  EVENT_KIND_MEMBER_CHANGED = 6;
+}
+
+enum ChatType {
+  CHAT_TYPE_UNSPECIFIED = 0;
+  CHAT_TYPE_GROUP = 1;
+  CHAT_TYPE_P2P = 2;
+}
+
+enum AttachmentKind {
+  ATTACHMENT_KIND_UNSPECIFIED = 0;
+  ATTACHMENT_KIND_IMAGE = 1;
+  ATTACHMENT_KIND_FILE = 2;
+}
+
+// 卡片按钮 / 卡片回传动作。events 与 outbound 共用这一个枚举。
+enum CardActionKind {
+  CARD_ACTION_KIND_UNSPECIFIED = 0;
+  CARD_ACTION_KIND_STOP = 1;
+  CARD_ACTION_KIND_EVIDENCE = 2;
+}
+
+message Anchor {
+  string platform = 1;
+  string chat_id = 2;
+  string message_id = 3;               // 触发消息 id
+  optional string thread_id = 4;       // 飞书：话题 root 消息 id；顶层消息则不填
+  optional string task_no = 5;         // "#A17"，P0 只展示不路由
+}
+
+message Attachment {
+  AttachmentKind kind = 1;
+  string file_key = 2;                 // 平台文件 key，配合 message_id 下载
+  string message_id = 3;
+  optional string name = 4;
+  optional int64 size = 5;
+  optional string mime = 6;
+}
+
+message CardAction {
+  string card_id = 1;                  // = 卡片所在消息的 message_id
+  CardActionKind action = 2;
+  optional string task_id = 3;
+  google.protobuf.Struct value = 4;    // 按钮 value 原样
+}
+
+message NormalizedEvent {
+  string event_id = 1;                 // 平台 message_id 或 event_id，去重键
+  EventKind kind = 2;
+  string platform = 3;
+  string tenant_id = 4;                // 默认 "default"，edge 必须显式填
+  string workspace_id = 5;             // 飞书 app_id
+  string chat_id = 6;
+  ChatType chat_type = 7;
+  string sender_id = 8;                // 飞书 open_id
+  SenderKind sender_kind = 9;
+  optional string sender_name = 10;
+  string text = 11;                    // 去掉 @Aite 后、strip 过的纯文本；非文本消息为 ""
+  optional string raw_text = 12;
+  bool mentioned = 13;                 // 是否 @ 了 Aite
+  Anchor anchor = 14;                  // 必填；缺失视为非法事件（core 拒收，INVALID_ARGUMENT）
+  repeated Attachment attachments = 15;
+  optional CardAction card_action = 16;
+  google.protobuf.Timestamp occurred_at = 17;
+  google.protobuf.Struct raw = 18;     // 原始事件，仅供审计；任何逻辑不得依赖 raw
+}

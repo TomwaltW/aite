@@ -1,0 +1,89 @@
+// aite/v1/outbound.proto —— 出站形状与平台读接口的返回形状
+// （对应旧 aite/contracts/outbound.py + ports.py 里的 HistoryMessage / DocumentContent）。
+// 冻结契约：改动需总管授权（AITE_RELOCK=1）并刷新 .contracts.lock。
+syntax = "proto3";
+
+package aite.v1;
+
+import "aite/v1/events.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "aite/edge/gen/aitepb;aitepb";
+
+message OutboundText {
+  string chat_id = 1;
+  string text = 2;                     // markdown（飞书 post/markdown 由 adapter 转）
+  optional string reply_to = 3;        // 回复哪条消息
+  bool in_thread = 4;                  // reply_to 存在时是否进话题。core 总是显式写（domain 默认 true）
+}
+
+enum ChecklistState {
+  CHECKLIST_STATE_UNSPECIFIED = 0;
+  CHECKLIST_STATE_TODO = 1;
+  CHECKLIST_STATE_DOING = 2;
+  CHECKLIST_STATE_DONE = 3;
+  CHECKLIST_STATE_FAILED = 4;
+}
+
+message ChecklistItemView {
+  string id = 1;
+  string text = 2;
+  ChecklistState state = 3;
+  optional string note = 4;
+}
+
+enum CardStatus {
+  CARD_STATUS_UNSPECIFIED = 0;
+  CARD_STATUS_WORKING = 1;
+  CARD_STATUS_DELIVERED = 2;
+  CARD_STATUS_FAILED = 3;
+  CARD_STATUS_CANCELLED = 4;
+}
+
+message ChecklistCard {
+  string task_id = 1;
+  string task_no = 2;                  // "#A17"
+  string title = 3;                    // 任务一句话（≤40 字，worker 截断）
+  string initiator = 4;                // 发起人显示名
+  string started_at = 5;               // "9:02"
+  CardStatus status = 6;
+  repeated ChecklistItemView items = 7;
+  string footer = 8;                   // "预计 2 分钟 · 已用 ¥0.12"
+  repeated CardActionKind actions = 9; // domain 默认 [stop]；core 总是显式写
+}
+
+message OutboundFile {
+  string chat_id = 1;
+  optional string reply_to = 2;
+  string name = 3;
+  string mime = 4;
+  bytes data = 5;
+}
+
+message SendResult {
+  string message_id = 1;
+  optional string card_id = 2;         // 卡片消息的 id，后续 update_card 用
+}
+
+enum ReactionKind {
+  REACTION_KIND_UNSPECIFIED = 0;
+  REACTION_KIND_ACK = 1;
+  REACTION_KIND_DONE = 2;
+  REACTION_KIND_FAIL = 3;
+}
+
+message HistoryMessage {
+  string message_id = 1;
+  string sender_id = 2;
+  string sender_kind = 3;              // "human" | "bot" | "app" | "system"（沿用旧契约的字符串形态）
+  optional string sender_name = 4;
+  string text = 5;
+  optional string thread_id = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+
+message DocumentContent {
+  string title = 1;
+  string text = 2;                     // markdown
+  string url = 3;
+}
