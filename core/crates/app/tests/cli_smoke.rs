@@ -183,6 +183,268 @@ fn evidence_show_reports_missing_task_in_plain_words() {
     assert!(!text.contains("not implemented"), "{text}");
 }
 
+// --- V6 ①：`--model live` / `--sandbox docker` 的校验不许跑在参数解析前面 ------------
+//
+// **为什么这几条必须钉在这个文件里**：`core/crates/evals/tests/cli_help.rs` 走的是
+// `cli::run_capture(args, &Wiring::default())` —— 直调库函数，`main.rs` 那一层
+// （以及 `wiring::evals_wiring`）根本不在调用链上。病就长在那一层：`main.rs` 先无条件
+// 调一次 `evals_wiring`，后者一见 argv 里有 `--model live` 就 `load_config` + 试造，
+// 失败即退出 2。于是 `-h` 打不出用法、`--list` 列不出场景、`--platform` 拼错了都被模型
+// 抢了先，而那边三条用例全绿。这里起的是真进程，才看得见。
+//
+// **一律显式给 `--config no/such/aite.yaml`**：`repo_root()` 在主仓根下**有**
+// `config/aite.yaml`（它不入库，各 worktree 里没有），靠「默认配置不存在」当前提的话，
+// 同一条用例在 worktree 里绿、在主仓里验的是另一回事 —— 又一条环境相关的假绿。
+
+/// 一台没配好模型的机器上，`--list` 仍然列得出场景名。
+#[test]
+fn evals_list_is_not_blocked_by_an_unusable_live_model() {
+    let out = aite()
+        .args([
+            "evals",
+            "run",
+            "evals/p0",
+            "--list",
+            "--model",
+            "live",
+            "--config",
+            "no/such/aite.yaml",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let names: Vec<String> = serde_json::from_slice(&out.stdout).expect("--list 必须是 JSON 数组");
+    assert_eq!(names.len(), 10, "{names:?}");
+}
+
+/// `--sandbox docker` 同理：`--list` 用不着 edge，就不该被「连不上 edge」挡住。
+#[test]
+fn evals_list_is_not_blocked_by_an_unusable_docker_sandbox() {
+    let out = aite()
+        .args([
+            "evals",
+            "run",
+            "evals/p0",
+            "--list",
+            "--sandbox",
+            "docker",
+            "--config",
+            "no/such/aite.yaml",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let names: Vec<String> = serde_json::from_slice(&out.stdout).expect("--list 必须是 JSON 数组");
+    assert_eq!(names.len(), 10, "{names:?}");
+}
+
+/// `-h` 要用法进 stdout、stderr 一个字节都没有、退出码 0 —— 命令行上多一个
+/// `--model live` 也一样。RΩ 刚修好的这条，就是被 `main.rs` 那一层打回原形的。
+#[test]
+fn evals_help_stays_on_stdout_even_with_live_model_on_the_command_line() {
+    let out = aite()
+        .args([
+            "evals",
+            "run",
+            "-h",
+            "--model",
+            "live",
+            "--config",
+            "no/such/aite.yaml",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "`-h` 不许往 stderr 写一个字节，实际：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("用法："),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// 纯参数错误要报**那个参数**，不许被模型的「起不来」抢先。
+#[test]
+fn evals_bad_platform_is_reported_before_the_live_model() {
+    let out = aite()
+        .args([
+            "evals",
+            "run",
+            "evals/p0",
+            "--platform",
+            "feishu",
+            "--model",
+            "live",
+            "--config",
+            "no/such/aite.yaml",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("--platform"), "{text}");
+    assert!(
+        !text.contains("--model live 起不来"),
+        "模型抢在参数校验前面报了：{text}"
+    );
+}
+
+/// **反向的那条：「起飞前试造一次」不许丢。**
+///
+/// 没有它，把 live 校验整个删掉也能让上面几条一起变绿 —— 而代价是配置缺一样时，
+/// 十个场景各自跑到第一次 chat 才抛，被 worker 当模型 5xx 白重试 2 次（2s + 5s），
+/// 十次 7 秒空等，真正的原因一个字都看不到。
+#[test]
+fn evals_live_model_is_still_built_once_before_takeoff() {
+    let out = aite()
+        .args([
+            "evals",
+            "run",
+            "evals/p0",
+            "--only",
+            "01_simple_qa",
+            "--model",
+            "live",
+            "--config",
+            "no/such/aite.yaml",
+        ])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("--model live 起不来"), "{text}");
+    assert!(text.contains("no/such/aite.yaml"), "{text}");
+    assert!(!text.contains("passed"), "根本不该跑到场景里去：{text}");
+}
+
+// --- V6 ④：几条低危但会在录演示 / 排障时正面撞上的命令行毛病 ----------------------
+
+/// ④a：`--grace` 传超大有限数不许一路穿到收尾那一刻才 panic。
+///
+/// 引爆点在 `run.rs` 的 `Duration::from_secs_f64(grace.max(0.0))`：`max(0.0)` 挡住了负数，
+/// 挡不住上溢，而 panic 会把它后面的 `sandbox.close_all()` / `store.close()` 整段跳过。
+/// **这条只钉住「挡在门口」** —— `ServeOptions::shutdown_grace_sec` 仍然是个裸 `f64`，
+/// 拆弹归 `run.rs`（V5）。
+#[test]
+fn run_rejects_a_grace_that_would_overflow_duration() {
+    for raw in ["1e300", "-1", "nan", "inf"] {
+        let out = aite()
+            .args(["run", "--grace", raw, "--config", "no/such/aite.yaml"])
+            .current_dir(repo_root())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "--grace {raw} 没被挡下");
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.contains("--grace"), "--grace {raw}：{text}");
+        assert!(
+            !text.contains("aite 起不来"),
+            "--grace {raw} 被当成合法值收下了，走到读配置那一步了：{text}"
+        );
+    }
+    // 边界内的值要照常放行（走到读配置那一步才失败），别把门关死了。
+    for raw in ["0", "20", "86400"] {
+        let out = aite()
+            .args(["run", "--grace", raw, "--config", "no/such/aite.yaml"])
+            .current_dir(repo_root())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.contains("aite 起不来"), "--grace {raw} 被误拦：{text}");
+    }
+}
+
+/// ④b(i)：`aite run -- -h` 要用法进 stdout + 退出码 0，不是 stderr + 2。
+///
+/// **`aite run --help` 仍然被 clap 截胡**（打的是 clap 那份不含任何真实选项的帮助）——
+/// 根治要在 `main.rs` 的 `Run` variant 上加 `#[command(disable_help_flag = true)]`，
+/// 而 `main.rs` 归 R0。所以这里钉的是够得着的那条。
+#[test]
+fn run_help_after_double_dash_goes_to_stdout_with_exit_zero() {
+    let out = aite()
+        .args(["run", "--", "-h"])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "用法不许走 stderr：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("aite run"), "{stdout}");
+    assert!(stdout.contains("--grace"), "{stdout}");
+}
+
+/// ④d：`aite evals demo-fixture --help` / `-h` 两个写法都要 stdout + 退出码 0。
+///
+/// 原来两个都掉进 `demo_fixture::run` 的「不认识的子命令」→ stderr + 2
+/// （RΩ 那次只修了 `evals run` 一半）。
+#[test]
+fn evals_demo_fixture_help_goes_to_stdout_with_exit_zero() {
+    for flag in ["--help", "-h"] {
+        let out = aite()
+            .args(["evals", "demo-fixture", flag])
+            .current_dir(repo_root())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "demo-fixture {flag}");
+        assert!(
+            out.stderr.is_empty(),
+            "demo-fixture {flag} 往 stderr 写了：{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("demo-fixture"), "{stdout}");
+        assert!(
+            !stdout.contains("不认识的子命令"),
+            "求助被当成了参数错误：{stdout}"
+        );
+    }
+}
+
+/// ④d 的邻居：子命令位置上的 `--help` 也要 stdout + 退出码 0。
+///
+/// 够得着的写法是 `aite evals -- --help`（原来是「不认识的子命令」→ stderr + 2）。
+/// **`aite evals --help`（不加 `--`）仍然被 clap 截胡**，跟 `aite run --help` 同病 ——
+/// 打的是 clap 那份不含任何真实选项的帮助，根治要动 `main.rs`（归 R0）。
+#[test]
+fn evals_help_in_the_subcommand_slot_goes_to_stdout_with_exit_zero() {
+    let out = aite()
+        .args(["evals", "--", "--help"])
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        out.stderr.is_empty(),
+        "求助不许走 stderr：{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("用法："), "{stdout}");
+    assert!(!stdout.contains("不认识的子命令"), "{stdout}");
+}
+
 #[test]
 fn contracts_lock_check_is_ok_on_a_clean_tree() {
     let out = aite()
