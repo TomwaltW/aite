@@ -420,13 +420,18 @@ impl ModelPort for OpenAiCompatModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ModelError::Upstream(redact(&e.to_string(), &self.api_key)))?;
+            // 拼 source() 链：`reqwest::Error` 的 Display 只写 kind + url，真正的原因
+            // （连接被拒 / DNS 解析不了 / TLS 被中间设备换掉 / 代理不通）全在链上。
+            // 不拼的话这三种病在 `aite preflight` 第 5 组里打出来一模一样，排障没有线索。
+            // 仍然过 redact —— 链上的文本同样是上游给的，兜底闸不许绕。
+            .map_err(|e| ModelError::Upstream(redact(&error_chain(&e), &self.api_key)))?;
 
         let status = response.status();
         let text = response
             .text()
             .await
-            .map_err(|e| ModelError::Upstream(redact(&e.to_string(), &self.api_key)))?;
+            // 同上：读响应体炸掉时，根因（连接被对端切断 / 解压失败）也只在链上。
+            .map_err(|e| ModelError::Upstream(redact(&error_chain(&e), &self.api_key)))?;
         // 响应体也要过 redact：国内网关在 4xx 的调试信息里回显请求头不是没有过的事，
         // 一旦回显 Authorization，这条错误会原样进 worker 的失败日志和群里的回帖路径。
         // 同函数上面两处已经确立了这个约定，这里不能漏（派单纪律 5：任何输出不得出现取值）。
@@ -477,10 +482,149 @@ fn clip_chars(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
+/// 把 `source()` 链一路拼进消息。
+///
+/// `reqwest::Error` 的 `Display` 只写 kind + url；根因在链上。`ModelError` 的三个变体
+/// 都是纯 `String`（contracts 冻结，加不了 `#[source]`），所以链只能在这里**拼进字符串**，
+/// 拼完照旧过 [`redact`]。`core/crates/app/src/preflight.rs` 里有一份同样的实现 ——
+/// 那边给飞书那三发请求用；两边各自 10 行，谁也不必为这个去扩对方的公开 API 面。
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let msg = s.to_string();
+        // 上游常把下一层的 Display 原样嵌进自己的消息里，拼两遍只会更难读。
+        if !msg.is_empty() && !out.contains(&msg) {
+            out.push_str(" ← ");
+            out.push_str(&msg);
+        }
+        cur = s.source();
+    }
+    out
+}
+
 /// reqwest 的错误里可能带上完整 URL；密钥虽然在 header 里，仍然兜一层。
 fn redact(text: &str, key: &str) -> String {
     if key.len() < 4 {
         return text.to_string();
     }
     text.replace(key, "***")
+}
+
+// --------------------------------------------------------------------------
+// 单元测试
+// --------------------------------------------------------------------------
+//
+// 这个 crate 的测试主体在 `tests/test_openai_compat.rs`（那边有一台 HTTP 假服务）。
+// 这里只钉两件**那边钉不住**的事：
+//
+// 1. [`error_chain`] 是私有纯函数，集成测试够不着；
+// 2. 「拼完链**仍然**过 [`redact`]」要的现场是一个**连不上**的端点 —— 起假服务
+//    反而碍事，因为假服务会老老实实应答。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 假取值。真密钥一个字都不会出现在这个文件里。
+    const FAKE_KEY: &str = "sk-models-unit-fake-key-0123456789";
+
+    /// 一条能自己嵌套的假错误，用来造 `source()` 链。
+    #[derive(Debug)]
+    struct Layer(String, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|inner| inner as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    fn layer(msg: &str, inner: Option<Layer>) -> Layer {
+        Layer(msg.to_string(), inner.map(Box::new))
+    }
+
+    /// 链一路走到底 —— 根因在最后一层，而 `Display` 只给得出第一层。
+    #[test]
+    fn error_chain_walks_all_the_way_down() {
+        let e = layer(
+            "error sending request",
+            Some(layer(
+                "client error (Connect)",
+                Some(layer(
+                    "tcp connect error: Connection refused (os error 61)",
+                    None,
+                )),
+            )),
+        );
+
+        let out = error_chain(&e);
+
+        assert!(out.starts_with("error sending request"), "{out}");
+        assert!(out.contains("client error (Connect)"), "{out}");
+        assert!(
+            out.contains("Connection refused (os error 61)"),
+            "根因没拼上，这条链等于白走：{out}"
+        );
+    }
+
+    /// 上游常把下一层的 `Display` 原样嵌进自己的消息里，拼两遍只会更难读。
+    #[test]
+    fn error_chain_skips_a_layer_the_parent_already_quoted() {
+        let e = layer(
+            "dns error: failed to lookup address information",
+            Some(layer("failed to lookup address information", None)),
+        );
+
+        let out = error_chain(&e);
+
+        assert_eq!(
+            out.matches("failed to lookup address information").count(),
+            1,
+            "{out}"
+        );
+        assert!(!out.contains(" ← "), "重复的一层不该拼进来：{out}");
+    }
+
+    /// 拼完链**仍然**过 [`redact`]：把那句 `redact(...)` 换回 `e.to_string()` 这条就红。
+    ///
+    /// 现场是真的 —— 有些网关把 key 放在 URL 里（Gemini 的 `?key=` 就是这样），
+    /// 于是 reqwest 的传输错误 `Display` 自带完整 URL、自带 key。端点指到一个刚被
+    /// 放掉的本机端口，`send()` 必然失败（127.0.0.1 在 NO_PROXY 里，不经代理）。
+    #[tokio::test]
+    async fn a_key_echoed_in_the_url_is_still_redacted() {
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let p = l.local_addr().expect("addr").port();
+            drop(l);
+            p
+        };
+        let cfg = ModelConfig {
+            base_url: format!("http://127.0.0.1:{port}/v1/{FAKE_KEY}"),
+            api_key_env: "AITE_MODELS_UNIT_FAKE_KEY_ENV".into(),
+            model: "fake-model".into(),
+            ..Default::default()
+        };
+        let env = HashMap::from([(cfg.api_key_env.clone(), FAKE_KEY.to_string())]);
+        let model = OpenAiCompatModel::from_config(&cfg, &env).expect("from_config");
+
+        let err = ModelPort::chat(&model, &[Message::text(Role::User, "ping")], &[], 16, 0.0)
+            .await
+            .expect_err("端口已经放掉了，这一发必须失败");
+
+        let msg = err.to_string();
+        assert!(!msg.contains(FAKE_KEY), "密钥漏进错误消息了：{msg}");
+        assert!(
+            msg.contains("***"),
+            "确实是被抹掉的，而不是这段文本压根没走到错误消息里：{msg}"
+        );
+    }
 }
