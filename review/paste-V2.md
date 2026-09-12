@@ -48,24 +48,27 @@ M1–M6 的**第一步**是 `aite preflight`。`docs/acceptance-M.md` §0.1 就�
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v2      （已建好）
 分支     : task-v2
-基线     : 0bc8d55（main 的 HEAD，RΩ 组装起飞刚合入）
+基线     : 8d6ffd3（main 的 HEAD，RΩ 组装起飞刚合入）
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1、protoc 36.1、Docker 29.6.1
 ```
 
 PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bash_profile`）。
 
 
-> **基线说明**：`0bc8d55` = RΩ 合入 main 那次（`11322b3`）**再往前一格**。
+> **基线说明**：`8d6ffd3` = RΩ 合入 main 那次（`11322b3`）**再往前两格**。
 > 那一格只改了两个文件：`scripts/check.sh`（B 全量 cargo test 那步改成「失败测试名在前、计数在后」）
 > 与 `review/review-findings-2026-09-12-romega.md`（收窄 Answering 那条 + 补记一次未复现的 717/1）。
-> `git diff --stat 11322b3..0bc8d55` → `2 files changed, 11 insertions(+), 2 deletions(-)`。
+> 两格分别是：`0bc8d55`（`scripts/check.sh` 的 B 段改成「失败测试名在前、计数在后」+ 台账收窄）
+> 和 `8d6ffd3`（`.gitignore` 补回 `__pycache__/` —— 守卫 hook 是 python3 脚本，跑一次就生成它，
+> 不 ignore 的话你的 `git status --short` 开场自检当场对不上）。
+> **代码面与 `11322b3` 逐字相同**：`git diff --stat 11322b3..8d6ffd3 -- core edge scripts proto evals docker Makefile config .github` 为空。
 > 本派单正文里凡是写「在 `11322b3` 上核过 / 实测」的，指的是核对当时那一格，**代码面与你的基线逐字相同**。
 
 ## 第 1 步：开场自检（先跑这个，任何一条对不上就停下报告）
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v2
-git log --oneline -1                                   # 期望 0bc8d55（记下它，回执里当基线）
+git log --oneline -1                                   # 期望 8d6ffd3（记下它，回执里当基线）
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
@@ -93,7 +96,7 @@ docker ps -a --filter label=aite.task -q | wc -l                  # 期望 0
 > **另一条未复现的现象**（台账第五节末尾）：合并后在 main 上复验时，第一次全量
 > `cargo test` 出过一次 `717 passed / 1 failed`，紧接着连跑六遍都是 `718 / 0`，当时机器上
 > 正有六个 agent 在抢 CPU，**失败的测试名没留下** —— 因为当时的 `check.sh` 把 cargo 输出
-> grep 成只剩计数行。基线 `0bc8d55` 已经修掉这条（失败名现在会打在计数行前面）。
+> grep 成只剩计数行。基线 `8d6ffd3` 已经修掉这条（失败名现在会打在计数行前面）。
 > **万一你撞上 `failed=1`：先别当回归，把 `error: test failed, to rerun pass ...` 那行原样贴进回执**
 > （能不能复现都要贴，这个现场丢过一次了）。
 
@@ -522,7 +525,7 @@ core/target/debug/aite preflight --chat-id <测试群 chat_id>   # 期望 §3.7(
 ```
 ## V2 回执
 
-基线 0bc8d55 → 提交 <短 sha>
+基线 8d6ffd3 → 提交 <短 sha>
 
 ### 6.1 接管 Python 25 条
 取原版用的命令跑通了没：<>

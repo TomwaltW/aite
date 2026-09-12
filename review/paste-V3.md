@@ -53,13 +53,13 @@
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v3
 分支     : task-v3
-基线     : 0bc8d55（main 的 HEAD，RΩ 组装起飞刚合入）
+基线     : 8d6ffd3（main 的 HEAD，RΩ 组装起飞刚合入）
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1、protoc 36.1、Docker 29.6.1
 ```
 
 PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bash_profile`）。
 
-**worktree 里没有 `config/aite.yaml`**（`.gitignore:10` 不入库，它只在主仓里）。
+**worktree 里没有 `config/aite.yaml`**（`.gitignore:14` 不入库，它只在主仓里）。
 你要跑 `aite preflight` / `aite evidence show` 就先：
 
 ```bash
@@ -71,17 +71,20 @@ cp config/aite.example.yaml config/aite.yaml     # 例子里全是契约默认�
 ---
 
 
-> **基线说明**：`0bc8d55` = RΩ 合入 main 那次（`11322b3`）**再往前一格**。
+> **基线说明**：`8d6ffd3` = RΩ 合入 main 那次（`11322b3`）**再往前两格**。
 > 那一格只改了两个文件：`scripts/check.sh`（B 全量 cargo test 那步改成「失败测试名在前、计数在后」）
 > 与 `review/review-findings-2026-09-12-romega.md`（收窄 Answering 那条 + 补记一次未复现的 717/1）。
-> `git diff --stat 11322b3..0bc8d55` → `2 files changed, 11 insertions(+), 2 deletions(-)`。
+> 两格分别是：`0bc8d55`（`scripts/check.sh` 的 B 段改成「失败测试名在前、计数在后」+ 台账收窄）
+> 和 `8d6ffd3`（`.gitignore` 补回 `__pycache__/` —— 守卫 hook 是 python3 脚本，跑一次就生成它，
+> 不 ignore 的话你的 `git status --short` 开场自检当场对不上）。
+> **代码面与 `11322b3` 逐字相同**：`git diff --stat 11322b3..8d6ffd3 -- core edge scripts proto evals docker Makefile config .github` 为空。
 > 本派单正文里凡是写「在 `11322b3` 上核过 / 实测」的，指的是核对当时那一格，**代码面与你的基线逐字相同**。
 
 ## 第 1 步：开场自检（先跑这个，任何一条对不上就停下报告）
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v3
-git log --oneline -1                                   # 期望 0bc8d55（记下它，回执里当基线）
+git log --oneline -1                                   # 期望 8d6ffd3（记下它，回执里当基线）
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
@@ -124,8 +127,8 @@ docker ps -a --filter label=aite.task -q | wc -l                  # 期望 0
 | `docs/acceptance-M.md` | ✅ **自由写**（本轨主战场之一） |
 | `docs/demo-3min.md` | ✅ **自由写**（本轨主战场之二） |
 | `README.md` | ✅ **归你收口**。V1 会在回执里提「README 的 CI 那一节与 `ci.yml` 口径对不上」，V6 可能提守卫相关的说明 —— **三轨的改动都由你落**，别让三份各写各的 |
-| `config/aite.yaml` | ✅ 可建可改，但 `.gitignore:10` 不入库，**不许写任何取值** |
-| `data/**` | ✅ 你自己跑命令产生的落盘（`.gitignore:7` 已忽略） |
+| `config/aite.yaml` | ✅ 可建可改，但 `.gitignore:14` 不入库，**不许写任何取值** |
+| `data/**` | ✅ 你自己跑命令产生的落盘（`.gitignore:11` 已忽略） |
 | `docs/dev-spec-2026-09-09.md`、`docs/dev-spec-2026-09-11-rustgo.md` | ❌ **冻结，一个字不动**。§3.7 的结论写进你那两份文档，**不要回写 spec**（守卫也拦着，见纪律 7） |
 | `proto/**`、`core/crates/contracts/**`、`.contracts.lock` | ❌ 契约冻结，全程 `OK 25 files`。碰到了说明你走错地方了 → 停下报告 |
 | `evals/p0/*.yaml` | ❌ 十个场景是验收面，一个字不动 |
@@ -202,7 +205,7 @@ compose 里正确的写法在 `docker-compose.yml:59` —— `go build -o /usr/l
 
 1. **两个进程都在仓库根跑**，把「为什么」用一句话写进去（不写理由，下一个人还会 `cd edge`）；
 2. 给出 edge 二进制的**真实**编法：`cd edge && go build -o bin/aite-edge ./cmd/aite-edge`
-   （`edge/bin/` 在 `.gitignore:17`，不入库），然后回到仓库根跑 `edge/bin/aite-edge --config config/aite.yaml`；
+   （`edge/bin/` 在 `.gitignore:21`，不入库），然后回到仓库根跑 `edge/bin/aite-edge --config config/aite.yaml`；
 3. `go run` 那条路要留就留，但必须写成在仓库根跑的形式；
 4. `acceptance-M.md` 的「起飞」段（§0.2）与 `demo-3min.md` §0.1 **逐字对齐**
    —— 现在这两处已经不一致（demo 那份没提 `edge/bin`），别再留两套说法。
@@ -527,7 +530,7 @@ grep -rn 'cd edge && go run' docs/ README.md                       # 期望 0 �
 grep -rn 'go build -o bin/aite-edge' docs/ README.md               # 期望 ≥ 1 行
 
 # 5. 冻结面一个字没动
-git diff --stat 0bc8d55 -- docs/dev-spec-2026-09-09.md docs/dev-spec-2026-09-11-rustgo.md \
+git diff --stat 8d6ffd3 -- docs/dev-spec-2026-09-09.md docs/dev-spec-2026-09-11-rustgo.md \
     proto core/crates/contracts .contracts.lock evals/p0            # 期望 空
 git status --short                                                  # 期望只有 docs/acceptance-M.md、docs/demo-3min.md、README.md（config/aite.yaml 与 data/ 被 .gitignore 挡着）
 
@@ -549,7 +552,7 @@ core/target/debug/aite preflight --chat-id <测试群 chat_id>        # §3.7(b)
 ```
 ## V3 回执
 
-基线 0bc8d55 → 提交 <短 sha>
+基线 8d6ffd3 → 提交 <短 sha>
 
 ### 开场自检
 $ scripts/check.sh
@@ -598,7 +601,7 @@ $ grep -rn 'edge\.reconnected' docs/ README.md           → <>
 $ grep -rn 'demo_fixture\.py' docs/ README.md            → <>
 $ grep -rn 'cd edge && go run' docs/ README.md           → <>
 $ git status --short                                     → <>
-$ git diff --stat 0bc8d55 -- <冻结面>                    → <期望空>
+$ git diff --stat 8d6ffd3 -- <冻结面>                    → <期望空>
 
 ### 要总管决定的
 <没有就写"没有">

@@ -48,24 +48,27 @@ P0 的权威文档 `dev-spec-2026-09-09.md` 里还没兑现的只剩两件：§2
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v5
 分支     : task-v5
-基线     : 0bc8d55（建 worktree 时钉的 main HEAD 具体 sha，不是分支名）
+基线     : 8d6ffd3（建 worktree 时钉的 main HEAD 具体 sha，不是分支名）
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1、protoc 36.1、Docker 29.6.1
 ```
 
 PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bash_profile`）。
 
 
-> **基线说明**：`0bc8d55` = RΩ 合入 main 那次（`11322b3`）**再往前一格**。
+> **基线说明**：`8d6ffd3` = RΩ 合入 main 那次（`11322b3`）**再往前两格**。
 > 那一格只改了两个文件：`scripts/check.sh`（B 全量 cargo test 那步改成「失败测试名在前、计数在后」）
 > 与 `review/review-findings-2026-09-12-romega.md`（收窄 Answering 那条 + 补记一次未复现的 717/1）。
-> `git diff --stat 11322b3..0bc8d55` → `2 files changed, 11 insertions(+), 2 deletions(-)`。
+> 两格分别是：`0bc8d55`（`scripts/check.sh` 的 B 段改成「失败测试名在前、计数在后」+ 台账收窄）
+> 和 `8d6ffd3`（`.gitignore` 补回 `__pycache__/` —— 守卫 hook 是 python3 脚本，跑一次就生成它，
+> 不 ignore 的话你的 `git status --short` 开场自检当场对不上）。
+> **代码面与 `11322b3` 逐字相同**：`git diff --stat 11322b3..8d6ffd3 -- core edge scripts proto evals docker Makefile config .github` 为空。
 > 本派单正文里凡是写「在 `11322b3` 上核过 / 实测」的，指的是核对当时那一格，**代码面与你的基线逐字相同**。
 
 ## 第 1 步：开场自检（先跑这个，任何一条对不上就停下报告）
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v5
-git log --oneline -1                                   # 期望 0bc8d55（记下它，回执里当基线）
+git log --oneline -1                                   # 期望 8d6ffd3（记下它，回执里当基线）
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
@@ -526,7 +529,7 @@ core/target/debug/aite run --config config/aite.yaml
 ```
 ## V5 回执
 
-基线 0bc8d55 → 提交 <短 sha>（分支 task-v5）
+基线 8d6ffd3 → 提交 <短 sha>（分支 task-v5）
 
 ### 开场自检
 $ scripts/check.sh

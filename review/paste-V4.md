@@ -69,7 +69,7 @@ Aite 从 2026-09-11 起用 **Rust(core) + Go(edge)** 重写：R0 骨架 → R1�
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v4
 分支     : task-v4
-基线     : 0bc8d55（main 的 HEAD，worktree 已按这个 sha 建好）
+基线     : 8d6ffd3（main 的 HEAD，worktree 已按这个 sha 建好）
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1、protoc 36.1、Docker 29.6.1
 ```
 
@@ -85,17 +85,20 @@ edge socket 路径（`data/run/aite-edge.sock`）**都相对进程 cwd**，
 ---
 
 
-> **基线说明**：`0bc8d55` = RΩ 合入 main 那次（`11322b3`）**再往前一格**。
+> **基线说明**：`8d6ffd3` = RΩ 合入 main 那次（`11322b3`）**再往前两格**。
 > 那一格只改了两个文件：`scripts/check.sh`（B 全量 cargo test 那步改成「失败测试名在前、计数在后」）
 > 与 `review/review-findings-2026-09-12-romega.md`（收窄 Answering 那条 + 补记一次未复现的 717/1）。
-> `git diff --stat 11322b3..0bc8d55` → `2 files changed, 11 insertions(+), 2 deletions(-)`。
+> 两格分别是：`0bc8d55`（`scripts/check.sh` 的 B 段改成「失败测试名在前、计数在后」+ 台账收窄）
+> 和 `8d6ffd3`（`.gitignore` 补回 `__pycache__/` —— 守卫 hook 是 python3 脚本，跑一次就生成它，
+> 不 ignore 的话你的 `git status --short` 开场自检当场对不上）。
+> **代码面与 `11322b3` 逐字相同**：`git diff --stat 11322b3..8d6ffd3 -- core edge scripts proto evals docker Makefile config .github` 为空。
 > 本派单正文里凡是写「在 `11322b3` 上核过 / 实测」的，指的是核对当时那一格，**代码面与你的基线逐字相同**。
 
 ## 第 1 步：开场自检（先跑这个，任何一条对不上就停下报告）
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v4
-git log --oneline -1                                   # 期望 0bc8d55（记下它，回执里当基线）
+git log --oneline -1                                   # 期望 8d6ffd3（记下它，回执里当基线）
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
@@ -157,8 +160,8 @@ wc -c core/crates/worker/prompts/platform.md                                    
 | 面 | 权限 |
 |---|---|
 | `evals/live-report-2026-09-<日期>-v4.md`（新建） | ✅ 这一轨唯一的交付物，也是唯一该进提交的文件 |
-| `config/aite.yaml` | ✅ 但它 `.gitignore:10` 不入库，改它不进提交，也不许把密钥取值写进去 |
-| `data/**` | ✅ 跑出来的 JSON / 日志 / edge 日志放这儿（`.gitignore:7` 已忽略，`git status --short` 才保持干净） |
+| `config/aite.yaml` | ✅ 但它 `.gitignore:14` 不入库，改它不进提交，也不许把密钥取值写进去 |
+| `data/**` | ✅ 跑出来的 JSON / 日志 / edge 日志放这儿（`.gitignore:11` 已忽略，`git status --short` 才保持干净） |
 | worktree 外的临时目录（⑧ 那条对照套件） | ✅ 放 `/private/tmp/...` 或 `data/` 下都行，**不要放进 `evals/`** |
 | `evals/p0/**` | ❌ **一个字不动。** 十个场景是 §3.8 的验收面 |
 | `proto/**`、`core/crates/contracts/**`、`.contracts.lock` | ❌ 契约冻结，全程 `OK 25 files`。要动 → 停下报告 |
@@ -219,7 +222,7 @@ docker ps -a --filter label=aite.task --format '{{.ID}} {{.Label "aite.task"}} {
 
 ### ① 先把「跑得起来」这件事解决（worktree 里没有 `config/aite.yaml`）
 
-**病在哪**：`config/aite.yaml` 是 `.gitignore:10` 忽略的本地实配。实测
+**病在哪**：`config/aite.yaml` 是 `.gitignore:14` 忽略的本地实配。实测
 `ls .worktrees/task-v4/config/` **只有 `aite.example.yaml` 一个文件**。
 而 `aite evals` 的默认配置路径写死在 `core/crates/app/src/app.rs:30`
 （`DEFAULT_CONFIG_PATH = "config/aite.yaml"`），`aite-edge` 的默认也是它
@@ -271,7 +274,7 @@ docker ps -a --filter label=aite.task --format '{{.ID}} {{.Label "aite.task"}} {
 `worker.system_prompt_path`（第 37 行）样例里已经是对的，核一眼就好。
 `model.price_in_per_mtok` / `price_out_per_mtok`（第 23-24 行）填不填见 ②。
 
-**起 edge**（`edge/bin/` 在 `.gitignore:17`，二进制要自己编）：
+**起 edge**（`edge/bin/` 在 `.gitignore:21`，二进制要自己编）：
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v4
@@ -658,7 +661,7 @@ docker ps -a --filter label=aite.task -q | wc -l        # 期望回到你开跑�
 ```
 ## V4 回执
 
-基线 0bc8d55 → 提交 <短 sha>
+基线 8d6ffd3 → 提交 <短 sha>
 
 ### 开场自检
 $ scripts/check.sh

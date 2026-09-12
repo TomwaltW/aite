@@ -60,7 +60,7 @@ RΩ 组装起飞（`aite run` / `aite preflight` / 评测接线 / compose 双服
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v6
 分支     : task-v6
-基线     : 0bc8d55（worktree 已经建好并钉在这个 sha 上）
+基线     : 8d6ffd3（worktree 已经建好并钉在这个 sha 上）
 工具链   : cargo 1.98.1（/opt/homebrew/opt/rustup/bin）、go 1.27.1（/opt/homebrew/bin/go）、
            protoc 36.1、Docker 29.6.1
            python3 3.11.7（/Library/Frameworks/Python.framework）—— 本机**没有** `python` 命令
@@ -68,14 +68,18 @@ worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v6
 
 PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bash_profile`）。
 
-> **基线说明，先看这条。** RΩ 合入 main 是 `11322b3`。写这批派单的当口 main 又前进了一格到
-> **`0bc8d55`**（`fix(rustgo): check.sh 的 B 段先打失败测试名再计数，并收窄台账里 Answering 那条`），
-> 六个 worktree 全都钉在 `0bc8d55`。这一格只动了两个文件（`scripts/check.sh` 的 B 行、
-> 台账 md），`git diff --stat 11322b3..0bc8d55` = `2 files changed, 11 insertions(+), 2 deletions(-)`，
-> **不碰你这一轨的任何代码面**，下面所有期望值在 `0bc8d55` 上原样成立。
+> **基线说明，先看这条。** RΩ 合入 main 是 `11322b3`。之后 main 又前进了两格，
+> 六个 worktree 全都钉在第二格 **`8d6ffd3`**：
+> `0bc8d55` = `scripts/check.sh` 的 B 段改成「失败测试名在前、计数在后」+ 台账收窄 Answering；
+> `8d6ffd3` = `.gitignore` 补回 `__pycache__/`（守卫 hook 是 python3 脚本，跑一次就生成它，
+> 不 ignore 的话你的「`git status --short` 期望空」当场对不上 —— **这一条与你这一轨直接相关**）。
+> **代码面与 `11322b3` 逐字相同**：
+> `git diff --stat 11322b3..8d6ffd3 -- core edge scripts proto evals docker Makefile config .github` 为空，
+> 所以下面所有期望值原样成立。
+> 本派单正文里凡是写「在 `0bc8d55` 上核过 / 实测」的，指的是核对当时那一格，代码面与你的基线相同。
 > 台账正文里凡是写「11322b3」的地方，指的是 RΩ 那次合入，**不是你的基线**。
 
-`config/aite.yaml` 不入库（`.gitignore:10`），**你这个 worktree 里没有它**
+`config/aite.yaml` 不入库（`.gitignore:14`），**你这个 worktree 里没有它**
 （`config/` 下只有 `aite.example.yaml`）。这正好是 ① 的天然复现环境，**别去补一份** ——
 补了 ① 的所有实测就都复现不出来了。（顺带：主仓根**有**一份 `config/aite.yaml`，
 所以同样的命令在主仓跑出来的结果跟 worktree 不一样，别拿主仓的输出当对照。）
@@ -86,7 +90,7 @@ PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bas
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v6
-git log --oneline -1                                   # 期望 0bc8d55（记下它，回执里当基线）
+git log --oneline -1                                   # 期望 8d6ffd3（记下它，回执里当基线）
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
@@ -422,7 +426,7 @@ docker ps -a --filter label=aite.task -q | wc -l     # 病着时 > 0
 **判断是不用给 gofmt 补 `REWRITERS` 条目**；你不同意就在回执里说理由。
 
 **台账 §4.4 里 `.gitignore:14` 和 `.gitignore:1` 那两条已经不成立**：`.gitignore` 在 RΩ 的
-§2.5 里清干净了（现行 19 行，一条 Python 条目都没有，我逐行核过）。`.gitignore:14` 那条的
+§2.5 里清干净了；随后 `8d6ffd3` 又把 `__pycache__/` 补了回去（守卫 hook 是 python3 脚本）。现行 23 行，除 `__pycache__/` 外没有 Python 条目 —— 那一条是**给守卫留的**，别当残留清掉。`.gitignore:14` 那条的
 **描述**「守卫的保护面/探针还指着已删的 aite/contracts」是真的，但**位置写错了** ——
 它的真身就是上面这张表。**回执里把这两条标成「已在 RΩ 完成 / 台账位置写错，真身在 (3a) 表里」。**
 
@@ -768,7 +772,7 @@ cd edge && go test -tags docker ./internal/sandbox/... -count=1
 ```
 ## V6 回执
 
-基线 0bc8d55 → 提交 <短 sha>
+基线 8d6ffd3 → 提交 <短 sha>
 
 ### ① 评测 CLI 的顺序
 选了哪条路（a 惰性 / b validate 钩子 / c 提前解析）：<>  理由：<一两句>

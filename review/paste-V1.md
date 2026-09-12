@@ -53,7 +53,7 @@ socket 落到 `/app/edge/data/run/` 而共享卷挂的是 `/app/data/run`）。�
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v1
 分支     : task-v1
-基线     : 0bc8d55（已建好，git worktree add 时钉的就是这个 sha）
+基线     : 8d6ffd3（已建好，git worktree add 时钉的就是这个 sha）
 工具链   : cargo 1.98.1、go 1.27.1、libprotoc 36.1、Docker 29.6.1、Docker Compose v5.3.0
 宿主机   : darwin/arm64 —— 你 build 出来的是 linux/arm64；CI runner 是 linux/amd64。**两边都要能编。**
 ```
@@ -61,17 +61,20 @@ worktree : /Users/shensikai/Documents/Aite/.worktrees/task-v1
 PATH 必须含 `/opt/homebrew/opt/rustup/bin` 与 `~/go/bin`（已写进 `~/.bash_profile`）。
 
 
-> **基线说明**：`0bc8d55` = RΩ 合入 main 那次（`11322b3`）**再往前一格**。
+> **基线说明**：`8d6ffd3` = RΩ 合入 main 那次（`11322b3`）**再往前两格**。
 > 那一格只改了两个文件：`scripts/check.sh`（B 全量 cargo test 那步改成「失败测试名在前、计数在后」）
 > 与 `review/review-findings-2026-09-12-romega.md`（收窄 Answering 那条 + 补记一次未复现的 717/1）。
-> `git diff --stat 11322b3..0bc8d55` → `2 files changed, 11 insertions(+), 2 deletions(-)`。
+> 两格分别是：`0bc8d55`（`scripts/check.sh` 的 B 段改成「失败测试名在前、计数在后」+ 台账收窄）
+> 和 `8d6ffd3`（`.gitignore` 补回 `__pycache__/` —— 守卫 hook 是 python3 脚本，跑一次就生成它，
+> 不 ignore 的话你的 `git status --short` 开场自检当场对不上）。
+> **代码面与 `11322b3` 逐字相同**：`git diff --stat 11322b3..8d6ffd3 -- core edge scripts proto evals docker Makefile config .github` 为空。
 > 本派单正文里凡是写「在 `11322b3` 上核过 / 实测」的，指的是核对当时那一格，**代码面与你的基线逐字相同**。
 
 ## 第 1 步：开场自检（先跑这个，任何一条对不上就停下报告）
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-v1
-git log --oneline -1                                   # 期望 0bc8d55（记下它，回执里当基线）
+git log --oneline -1                                   # 期望 8d6ffd3（记下它，回执里当基线）
 git status --short                                     # 期望空
 scripts/check.sh                                       # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
@@ -152,7 +155,7 @@ compose 两个 service 从 `image:` 改成 `build: {context: ., dockerfile: dock
 - **`worker.system_prompt_path` 默认是 `core/crates/worker/prompts/platform.md`**（见
   `config/aite.example.yaml`），相对仓库根。不再整仓挂载之后，这个文件要么烤进镜像的同一个相对路径
   （`/app/core/crates/worker/prompts/platform.md`），要么在挂进去的配置里改路径。**选哪条你定，回执说明。**
-- `config/aite.yaml` **不入库**（`.gitignore:10`），只能 bind mount（建议 `:ro`）；`data/` 也要 bind
+- `config/aite.yaml` **不入库**（`.gitignore:14`），只能 bind mount（建议 `:ro`）；`data/` 也要 bind
   mount —— 否则 sqlite 和证据链落在容器里，总管在宿主机上看不到，`docs/acceptance-M.md` §0.3 的
   第二个观察窗直接废掉。
 - **tag 钉到 patch 位**：现在是 `rust:1.98`（line 82）/ `golang:1.27`（line 51），而
@@ -250,7 +253,7 @@ Makefile 的 up target 先建镜像。**选哪条你定**，但 `docker/sandbox/
 
 | 事实 | 出处 |
 |---|---|
-| `config/aite.yaml` 不入库，CI checkout 里根本没有；而两条 command 都写死 `--config config/aite.yaml` | `.gitignore:10`；compose line 61 / 100 |
+| `config/aite.yaml` 不入库，CI checkout 里根本没有；而两条 command 都写死 `--config config/aite.yaml` | `.gitignore:14`；compose line 61 / 100 |
 | `platform: fake` 时 core **拒绝起飞**（fake 是「必须由调用方注入」的标记，不是内建替身） | `core/crates/app/src/app.rs:143-146` |
 | `platform: feishu` + 假凭证时 edge 的 `platform.Start` 返回 err → `edge.component_failed` → **进程退出**，配 `restart: unless-stopped` 就是崩溃循环 | `edge/cmd/aite-edge/main.go:128-141, 151-157` |
 | `model.base_url` / `model.model` 为空 → core `StartupError` 退 2；而 example 配置里这两项就是空的 | `core/crates/models/src/lib.rs:318-327`；`config/aite.example.yaml` |
@@ -290,7 +293,8 @@ Makefile 的 up target 先建镜像。**选哪条你定**，但 `docker/sandbox/
   「第 90 行现在成立 / 仍不成立」、CI 章节那三行该改成什么，交出去，**自己别动 README**。
 - **这两条台账 low 已经在 RΩ 合并时修掉了，别再报**（我核过）：`Makefile:24`（`make test` 的 go 侧
   已有 `-race`，第 24 行就是 `cd edge && $(GO) test -race ./... -count=1`）、`.gitignore:1`
-  （Python 条目已清空，现在整个文件 19 行里一条都没有）。
+  （Python 条目已清空；随后 `8d6ffd3` 又把 `__pycache__/` 补了回去 —— 守卫 hook 是 python3 脚本，
+  跑一次就生成它。现行 23 行，那一条是**给守卫留的**，别当残留清掉）。
 
 ## 纪律
 
@@ -355,7 +359,7 @@ docker compose down    && time docker compose up -d              # 热（第二�
 ```
 ## V1 回执
 
-基线 0bc8d55 → 提交 <短 sha>
+基线 8d6ffd3 → 提交 <短 sha>
 
 ### ① 真镜像
 形态：<多阶段的分层怎么切；运行基底选了什么、为什么>
