@@ -38,6 +38,11 @@ pub struct EdgeState {
     /// ReadHistory 要回的消息；默认一条真人消息
     pub history: Option<Vec<pb::HistoryMessage>>,
     pub download_bytes: usize,
+    /// `GetStatus` 要回的 contract_version；None = 跟 core 同版本（默认对得上）。
+    ///
+    /// 「两个进程各拿一半契约」这件事只能从这里造出来：真机上它来自 edge 二进制
+    /// 编进去的那个常量，core 侧改不动。
+    pub contract_version: Option<String>,
 }
 
 impl EdgeState {
@@ -123,6 +128,21 @@ impl FakeEdge {
         self.state()
             .failures
             .insert(method.to_string(), (code, message.to_string()));
+    }
+
+    /// 让这个假 edge 从此报一个**别的** contract_version（模拟「只重启了 edge」）。
+    pub fn set_contract_version(&self, version: &str) {
+        self.state().contract_version = Some(version.to_string());
+    }
+
+    /// 换回跟 core 同一个版本（模拟「人把 edge 重新 build 对了」）。
+    pub fn restore_contract_version(&self) {
+        self.state().contract_version = None;
+    }
+
+    /// 让某个方法下次起不再失败。
+    pub fn recover(&self, method: &str) {
+        self.state().failures.remove(method);
     }
 
     pub async fn stop(&mut self) {
@@ -421,10 +441,15 @@ impl EdgeStatusService for EdgeStatusSvc {
         &self,
         _request: Request<pb::GetStatusRequest>,
     ) -> Result<Response<pb::EdgeStatus>, Status> {
-        self.state.lock().unwrap().enter("GetStatus")?;
+        let mut state = self.state.lock().unwrap();
+        state.enter("GetStatus")?;
+        let contract_version = state
+            .contract_version
+            .clone()
+            .unwrap_or_else(|| CONTRACT_VERSION.to_string());
         Ok(Response::new(pb::EdgeStatus {
             version: "fake-edge".into(),
-            contract_version: CONTRACT_VERSION.to_string(),
+            contract_version,
             platform_connected: true,
             reconnect_count: 0,
             sandbox_ok: true,

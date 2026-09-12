@@ -12,11 +12,19 @@
 //!    `EXEC_TIMEOUT_EXIT_CODE`(124)；这里见到 124 就翻成 timeout。Gateway 外层的
 //!    `tokio::time::timeout` 是同一件事的兜底（Docker daemon 卡住时用），两条路都走到
 //!    `code=timeout`，调用方看到的结果一致。
+//! 3. **容器可能在两次工具调用之间被 reaper 收走。** `touch` 只发生在沙箱 RPC 上，
+//!    模型思考那几分钟一次都不刷；`sandbox.idle_sec` 默认 300s，W7 的 reaper 每 60s
+//!    扫一次。收走之后 Gateway 的记账还留着那个死 id（edge 把它交回控制面了，但
+//!    控制面只拿来计数）。所以这里见到 `NotFound` 就摘记账、重建、**重试一次** ——
+//!    并且把「新容器的 /work 是空的」这件事写进给模型看的正文第一行。
 use aite_contracts::sandbox::EXEC_TIMEOUT_EXIT_CODE;
-use aite_contracts::{ArtifactRef, ExecRequest, ExecResult, ToolContext};
+use aite_contracts::{ArtifactRef, ExecRequest, ExecResult, SandboxErrorKind, ToolContext};
 use serde_json::{Map, Value, json};
 
-use super::{ToolEnv, ToolFailure, ToolOutcome, WORKDIR, as_map, str_arg, u32_arg};
+use super::{
+    SANDBOX_REBUILT_NOTE, ToolEnv, ToolFailure, ToolOutcome, WORKDIR, as_map, rebuild_sandbox,
+    str_arg, u32_arg,
+};
 
 /// 与 §3.1 `gateway_tools()` 里 run_python 的 schema default 一致。
 const DEFAULT_TIMEOUT_SEC: u32 = 120;
@@ -29,16 +37,33 @@ pub async fn run_python(
     let sandbox = env.sandbox()?;
     let code = str_arg(&args, "code").to_string();
     let timeout_sec = u32_arg(&args, "timeout_sec", DEFAULT_TIMEOUT_SEC);
+    let req = ExecRequest::python(code, timeout_sec);
 
     let sandbox_id = env
         .acquire_sandbox()
         .await
         .map_err(|e| ToolFailure::sandbox(format!("沙箱起不来：{e}")))?;
 
-    let result = sandbox
-        .exec(&sandbox_id, &ExecRequest::python(code, timeout_sec))
-        .await
-        .map_err(|e| ToolFailure::sandbox(format!("沙箱执行失败：{e}")))?;
+    let (result, sandbox_id, rebuilt) = match sandbox.exec(&sandbox_id, &req).await {
+        Ok(result) => (result, sandbox_id, false),
+        // 容器没了（头注释第 3 条）。记账里那条死 id 不摘掉的话，下一次 acquire 会把它
+        // 原样复用出来 —— 连撞两次就是 §3.3 的「连续 2 次沙箱失败 → task failed」。
+        // **只重试这一次**：重建之后再撞 NotFound 就照常往下落成 code=sandbox。
+        Err(e) if e.kind == SandboxErrorKind::NotFound => {
+            tracing::warn!(
+                sandbox_id = %sandbox_id,
+                error = %e,
+                "gateway.sandbox_gone 容器已不在，重建后重试一次"
+            );
+            let fresh = rebuild_sandbox(&env).await?;
+            let result = sandbox
+                .exec(&fresh, &req)
+                .await
+                .map_err(|e| ToolFailure::sandbox(format!("沙箱执行失败：{e}")))?;
+            (result, fresh, true)
+        }
+        Err(e) => return Err(ToolFailure::sandbox(format!("沙箱执行失败：{e}"))),
+    };
 
     // 刷新空闲计时，别让 reaper 在任务中途收走；刷不动也不影响这次执行。
     if let Err(e) = sandbox.touch(&sandbox_id).await {
@@ -66,7 +91,14 @@ pub async fn run_python(
         })
         .collect();
 
-    Ok(ToolOutcome::new(render(&result))
+    // 重建过就把那句话排在最前面 —— 模型得先知道 /work 空了，再看这次的输出。
+    let content = if rebuilt {
+        format!("{SANDBOX_REBUILT_NOTE}\n\n{}", render(&result))
+    } else {
+        render(&result)
+    };
+
+    Ok(ToolOutcome::new(content)
         .with_data(as_map(json!({
             "exit_code": result.exit_code,
             "stdout": result.stdout,
@@ -74,6 +106,7 @@ pub async fn run_python(
             "truncated": result.truncated,
             "duration_ms": result.duration_ms,
             "files_out": files_out,
+            "sandbox_rebuilt": rebuilt,
         })))
         .with_artifacts(artifacts))
 }

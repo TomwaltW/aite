@@ -27,6 +27,57 @@ async fn answering_path_sends_text_only() {
     assert_eq!(run.model.call_count(), 1);
 }
 
+/// Answering 那一格在状态机上**真的被走过**。
+///
+/// 这条是 RΩ 审核之后补的钉子。在它之前全仓没有任何一条断言管着
+/// `deliver()` 里那句 `status = if answering { Answering } else { Working }`：
+/// `grep TaskStatus::Answering` 只命中实现本身、contracts 里那条「Answering 不活跃」的
+/// 断言，和两处拿它当普通枚举值用的存储用例。谁把它改成 Working，整套测试一条都不会红。
+///
+/// 而它必须被钉住，是因为控制面 `!status` 那条「把 running 并进来」的补丁正是**因为**
+/// 这一格不在 `ACTIVE_TASK_STATUSES` 里才需要存在。这一格没了，那条补丁就成了无因之果。
+#[tokio::test]
+async fn answering_path_passes_through_the_answering_status() {
+    let run = run_script(vec![final_turn("北京今天 26 度。")], 0.0).await;
+
+    let writes = run.h.store.status_writes(&run.task.id);
+    assert!(
+        writes.contains(&TaskStatus::Answering),
+        "没发过卡片那一路必须先落 answering，实际落过：{writes:?}"
+    );
+    assert_eq!(
+        writes.last(),
+        Some(&TaskStatus::Delivered),
+        "最后一笔还是 delivered：{writes:?}"
+    );
+    assert!(
+        !TaskStatus::Answering.is_active(),
+        "前提：answering 不在 ACTIVE_TASK_STATUSES 里（contracts 的 roundtrip.rs 钉着）"
+    );
+}
+
+/// 对照组：发过卡片那一路落的是 `Working`，不是 `Answering`。
+///
+/// 判据是「卡片一次都没发过」（`answering = !ctx.card.sent()`），不是「没跑过工具」。
+#[tokio::test]
+async fn a_task_that_already_sent_a_card_delivers_from_working() {
+    let mut h = Harness::new();
+    h.seed("帮我算个数", Vec::new()).await;
+    let model = std::sync::Arc::new(ScriptedModel::new(vec![
+        tool_turn(&[("checklist_add", json!({"items": ["算一算"]}))]),
+        final_turn("算完了：42。"),
+    ]));
+    let task = h.run(model).await;
+
+    let writes = h.store.status_writes(&task.id);
+    assert!(
+        !writes.contains(&TaskStatus::Answering),
+        "发过卡片就不该走 answering 那一格：{writes:?}"
+    );
+    assert!(writes.contains(&TaskStatus::Working));
+    assert_eq!(writes.last(), Some(&TaskStatus::Delivered));
+}
+
 #[tokio::test]
 async fn plain_text_on_first_step_is_treated_as_final() {
     // §3.3 对国内模型的兜底：第一步没调工具、只回文本 → 当作 final

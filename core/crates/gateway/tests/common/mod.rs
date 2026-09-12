@@ -291,6 +291,14 @@ struct SandboxState {
     exec_error: Option<SandboxError>,
     exec_result: Option<ExecResult>,
     exec_delay: Duration,
+    /// 只生效一次的失败（命中即清除）。
+    ///
+    /// `fail_exec` 那几个是**黏的**：每次调用都读同一个字段且不清除，所以「第一次容器没了、
+    /// 重建之后好了」这个时序用它造不出来 —— 重试那一发照样会失败，测出来的是
+    /// 「重试两次都失败」，而不是被测的那条自愈路径。
+    exec_error_once: Option<SandboxError>,
+    list_files_error_once: Option<SandboxError>,
+    put_file_error_once: Option<SandboxError>,
 }
 
 /// SandboxPort 的私有假实现，/work 全在内存里。
@@ -311,6 +319,19 @@ impl FakeGatewaySandbox {
 
     pub fn fail_exec(&self, error: SandboxError) {
         self.state.lock().unwrap().exec_error = Some(error);
+    }
+
+    /// 下一发 `exec` 失败，之后恢复正常（见 `SandboxState::exec_error_once`）。
+    pub fn fail_exec_once(&self, error: SandboxError) {
+        self.state.lock().unwrap().exec_error_once = Some(error);
+    }
+
+    pub fn fail_list_files_once(&self, error: SandboxError) {
+        self.state.lock().unwrap().list_files_error_once = Some(error);
+    }
+
+    pub fn fail_put_file_once(&self, error: SandboxError) {
+        self.state.lock().unwrap().put_file_error_once = Some(error);
     }
 
     pub fn set_exec_result(&self, result: ExecResult) {
@@ -417,6 +438,9 @@ impl SandboxPort for FakeGatewaySandbox {
             tokio::time::sleep(delay).await;
         }
         let mut state = self.state.lock().unwrap();
+        if let Some(error) = state.exec_error_once.take() {
+            return Err(error);
+        }
         if let Some(error) = &state.exec_error {
             return Err(error.clone());
         }
@@ -448,9 +472,11 @@ impl SandboxPort for FakeGatewaySandbox {
         data: &[u8],
     ) -> Result<(), SandboxError> {
         let target = require_file_path(path)?;
-        self.state
-            .lock()
-            .unwrap()
+        let mut state = self.state.lock().unwrap();
+        if let Some(error) = state.put_file_error_once.take() {
+            return Err(error);
+        }
+        state
             .trees
             .entry(sandbox_id.to_string())
             .or_default()
@@ -473,6 +499,9 @@ impl SandboxPort for FakeGatewaySandbox {
     }
 
     async fn list_files(&self, sandbox_id: &str) -> Result<Vec<String>, SandboxError> {
+        if let Some(error) = self.state.lock().unwrap().list_files_error_once.take() {
+            return Err(error);
+        }
         Ok(self.files_of(sandbox_id))
     }
 

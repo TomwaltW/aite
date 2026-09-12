@@ -13,6 +13,7 @@
 //!    1→2→…→30s 退避拨号；edge 不在时 RPC 返回 retryable 错误，edge 起来后自动恢复。
 //! 2. **错误映射是 R0 冻结的**（`aite_proto::status`），这里一条都不自己编。
 //! 3. **`start/stop` 不是连飞书**，而是起/停 core 侧监听 `core_socket` 的 IngressService（D1）。
+mod gate;
 mod ingress;
 mod link;
 mod platform;
@@ -25,6 +26,7 @@ use aite_contracts::{EdgeConfig, PlatformError, PlatformPort, SandboxPort};
 use aite_proto::pb;
 
 pub use aite_proto::pb::EdgeStatus;
+pub use gate::ContractState;
 pub use ingress::IngressServer;
 pub use platform::EdgePlatform;
 pub use sandbox::EdgeSandbox;
@@ -71,6 +73,9 @@ impl EdgeClient {
     }
 
     /// edge 自身健康：RΩ 起飞时拿它比对 `contract_version`（不等就拒绝起飞）。
+    ///
+    /// 每答上来一次都顺手记进契约闸门（`gate.rs`）—— 起飞体检和 `!status` 的健康行
+    /// 走的都是这条路，两处都算「连上就比一次」的入口。
     pub async fn status(&self) -> Result<EdgeStatus, PlatformError> {
         let reply = self
             .link
@@ -79,7 +84,15 @@ impl EdgeClient {
             .await
             .map_err(|st| self.link.platform_error(&st))
             .inspect(|_| self.link.note_ok())?;
-        Ok(reply.into_inner())
+        let status = reply.into_inner();
+        self.link.note_contract(&status);
+        Ok(status)
+    }
+
+    /// 契约闸门此刻的状态（`!status` 的健康行拿它说人话；闸落着时 platform /
+    /// sandbox 的每一发 RPC 都会在本地直接失败）。
+    pub fn contract_state(&self) -> ContractState {
+        self.link.contract_state()
     }
 
     /// edge socket 的绝对路径（日志/体检用）。

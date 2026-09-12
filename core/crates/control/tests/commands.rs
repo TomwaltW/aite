@@ -5,7 +5,10 @@ mod support;
 use std::sync::Arc;
 
 use aite_contracts::{CardStatus, ControlPlane, SessionStatus, SessionStore, TaskStatus};
-use support::{CHAT, Harness, ROOT, active_tasks, ev, turn_texts};
+use support::{
+    CHAT, Harness, ROOT, RunningPlane, ScriptedWorker, WorkerAction, active_tasks, ev, turn_texts,
+    within,
+};
 
 use aite_control::{InProcessControlPlane, UNKNOWN_COMMAND_TEXT};
 
@@ -82,6 +85,108 @@ async fn status_is_scoped_to_this_chat() {
         )
         .await
         .expect("别的群建任务");
+
+    cmd(&plane, "!status", "om_9").await;
+
+    assert_eq!(
+        h.platform.last_text().expect("该回帖").text,
+        "本群没有活跃任务"
+    );
+}
+
+/// 正在交付中的任务不许从 `!status` 里消失（审核记账 4.2 第 3 行）。
+///
+/// worker 的 `deliver()` 在「第一步就 final、一张卡片都没发过」那一路把状态落成
+/// `Answering`（`agent.rs` 里 `let answering = !ctx.card.sent()`），而 `Answering`
+/// **不在** `ACTIVE_TASK_STATUSES` 里 —— contracts 的 `roundtrip.rs` 有一条断言专门
+/// 钉着 `!Answering.is_active()`，`frozen_values.rs` 又逐值钉着那三个值，所以
+/// 「把 Answering 加进活跃口径」这条路是双重关死的，不能走。
+///
+/// 补的是另一半：控制面自己的 `running` 知道谁在 worker 手上。从落 `Answering` 到
+/// `finish()` 落 `Delivered` 之间那几笔（逐个发产物、send_text、写 delivered 证据、
+/// 收卡片）本来会让任务整个消失，用户这时问一句，得到的是「本群没有活跃任务」。
+#[tokio::test]
+async fn status_still_lists_a_task_that_is_answering() {
+    let h = Harness::new();
+    let worker = ScriptedWorker::new(
+        h.store.clone(),
+        h.platform.clone(),
+        vec![WorkerAction::WaitForCancel],
+    );
+    let plane = h.plane_builder().worker(worker.clone()).build();
+    plane
+        .handle_event(
+            ev().id("e1")
+                .text("算一下上周退款")
+                .message_id(ROOT)
+                .build(),
+        )
+        .await
+        .expect("建任务");
+    let task = active_tasks(&h.store, CHAT).await.remove(0);
+
+    let _running = RunningPlane::start(plane.clone());
+    within("等 worker 接手", async {
+        while worker.calls().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(plane.state().running, vec![task.id.clone()]);
+
+    // worker 走到了 deliver()：状态落 Answering，正在往群里发东西
+    let mut answering = h.store.get_task(&task.id).await.expect("读").expect("有");
+    answering.status = TaskStatus::Answering;
+    h.store.update_task(&answering).await.expect("回写");
+    assert!(
+        active_tasks(&h.store, CHAT).await.is_empty(),
+        "前提：库的活跃口径这时确实看不见它"
+    );
+
+    cmd(&plane, "!status", "om_9").await;
+
+    let body = h.platform.last_text().expect("该回帖").text;
+    assert!(
+        body.contains(&task.task_no),
+        "正在把答复发给你的任务不该从 !status 里消失：{body}"
+    );
+    assert!(body.contains("answering"), "{body}");
+    assert!(body.contains("算一下上周退款"), "{body}");
+}
+
+/// `running` 是**进程级**的，别把别的群的任务串进这一句。
+#[tokio::test]
+async fn status_does_not_leak_a_running_task_from_another_chat() {
+    let h = Harness::new();
+    let worker = ScriptedWorker::new(
+        h.store.clone(),
+        h.platform.clone(),
+        vec![WorkerAction::WaitForCancel],
+    );
+    let plane = h.plane_builder().worker(worker.clone()).build();
+    plane
+        .handle_event(
+            ev().id("e1")
+                .text("别的群的活")
+                .message_id("om_x")
+                .chat("oc_other")
+                .build(),
+        )
+        .await
+        .expect("别的群建任务");
+    let other = active_tasks(&h.store, "oc_other").await.remove(0);
+
+    let _running = RunningPlane::start(plane.clone());
+    within("等 worker 接手", async {
+        while worker.calls().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+
+    let mut answering = h.store.get_task(&other.id).await.expect("读").expect("有");
+    answering.status = TaskStatus::Answering;
+    h.store.update_task(&answering).await.expect("回写");
 
     cmd(&plane, "!status", "om_9").await;
 

@@ -308,6 +308,58 @@ async fn grace_timeout_survives_a_protocol_only_sandbox() {
     assert_eq!(model.inner.hold_ticks_yielded(), frozen);
 }
 
+/// 收尾读 `worker.in_flight()` 的时机：必须在 `run_forever` **彻底停下之后**。
+///
+/// 这是审核记账 4.1 第 2 行那条并发窗口的根。原序列在 `abort()` **之前**抄快照，
+/// 抄完到 abort 生效之间 worker 在另一条线上照样在跑（`new_multi_thread`，两条线真并行），
+/// 于是快照两头都可能错：漏掉派发循环刚 pop 出来的新任务（它不在 stranded 里，
+/// 没人给它善终），或者拿到一份过期的（那个任务已经自己跑完落了 delivered，
+/// 而 `cancel_task` 会把它改写成 cancelled、卡片翻成「已取消」）。
+///
+/// 怎么把「之后」钉成**确定的**：`RecordingModel::chat()` 里挂了一个 drop guard，
+/// future 被丢掉的那一刻必然把 `chat_alive` 置假。卡住的 worker 正停在 `chat()` 上，
+/// 所以「抄快照那一刻 `chat_alive` 为假」⟺「`run_forever` 那条 future 已经被 abort 丢掉」。
+/// 不靠 sleep，不靠自旋计数，也不拿墙钟当判据。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_stranded_snapshot_is_taken_after_the_runner_has_stopped() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(tmp.path());
+    let platform = GatedPlatform::new();
+    let model = RecordingModel::new(stuck_script());
+    let sandbox = ClosableFakeSandbox::new();
+    let (app, spy) = build_with_spy(
+        config.clone(),
+        platform.clone(),
+        model.clone(),
+        sandbox.clone(),
+    )
+    .await;
+
+    let mut run = RunningApp::start(app.clone(), &platform, Some(TINY_GRACE_SEC)).await;
+    let inner = sandbox.inner.clone();
+    let task = drive_until_stuck(&app, &platform, &model, || inner.calls.count("acquire")).await;
+    run.shutdown_within(5.0).await.expect("run_app 正常收场");
+
+    let alive = spy.alive_at_calls();
+    assert_eq!(
+        alive.len(),
+        1,
+        "收尾只该读一次 in_flight（多读一次就是又开了一个窗口）：{alive:?}"
+    );
+    assert!(
+        !alive[0],
+        "抄快照的时候 worker 那条 future 还活着 —— 这正是窗口：\
+         抄完到 abort 生效之间它还能把自己跑完（快照就过期了）或者领走一个新任务\
+         （新任务就不在快照里）"
+    );
+
+    // 顺带确认这一轮真的走了超时那一支（不然上面两条断言是空的）
+    let finished = read_task_from_disk(&config, &task.id)
+        .await
+        .expect("任务还在库里");
+    assert_eq!(finished.status, TaskStatus::Cancelled);
+}
+
 /// 被硬取消的任务也得善终：沙箱还回去、任务落 cancelled、证据链 finalize。
 ///
 /// 三条一起断言，免得修的人只看见最先炸的那一条。

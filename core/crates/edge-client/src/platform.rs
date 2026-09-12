@@ -51,7 +51,7 @@ impl EdgePlatform {
         }
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .get_capabilities(pb::GetCapabilitiesRequest {})
             .await
             .map_err(|st| self.link.platform_error(&st))
@@ -90,7 +90,7 @@ impl PlatformPort for EdgePlatform {
     async fn send_text(&self, msg: &OutboundText) -> Result<SendResult, PlatformError> {
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .send_text(pb::OutboundText::from(msg.clone()))
             .await
             .map_err(|st| self.link.platform_error(&st))
@@ -106,7 +106,7 @@ impl PlatformPort for EdgePlatform {
     ) -> Result<SendResult, PlatformError> {
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .send_card(pb::SendCardRequest {
                 chat_id: chat_id.to_string(),
                 reply_to: reply_to.map(str::to_string),
@@ -120,7 +120,7 @@ impl PlatformPort for EdgePlatform {
 
     async fn update_card(&self, card_id: &str, card: &ChecklistCard) -> Result<(), PlatformError> {
         self.link
-            .platform_client()
+            .platform_client()?
             .update_card(pb::UpdateCardRequest {
                 card_id: card_id.to_string(),
                 card: Some(pb::ChecklistCard::from(card.clone())),
@@ -134,7 +134,7 @@ impl PlatformPort for EdgePlatform {
     async fn send_file(&self, msg: &OutboundFile) -> Result<SendResult, PlatformError> {
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .send_file(pb::OutboundFile::from(msg.clone()))
             .await
             .map_err(|st| self.link.platform_error(&st))
@@ -148,7 +148,7 @@ impl PlatformPort for EdgePlatform {
         kind: ReactionKind,
     ) -> Result<(), PlatformError> {
         self.link
-            .platform_client()
+            .platform_client()?
             .add_reaction(pb::AddReactionRequest {
                 message_id: message_id.to_string(),
                 kind: pb::ReactionKind::from(kind) as i32,
@@ -167,7 +167,7 @@ impl PlatformPort for EdgePlatform {
     ) -> Result<Vec<HistoryMessage>, PlatformError> {
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .read_history(pb::ReadHistoryRequest {
                 chat_id: chat_id.to_string(),
                 limit: limit as i32,
@@ -187,7 +187,7 @@ impl PlatformPort for EdgePlatform {
     async fn read_document(&self, url_or_token: &str) -> Result<DocumentContent, PlatformError> {
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .read_document(pb::ReadDocumentRequest {
                 url_or_token: url_or_token.to_string(),
             })
@@ -204,7 +204,7 @@ impl PlatformPort for EdgePlatform {
     ) -> Result<Vec<u8>, PlatformError> {
         let reply = self
             .link
-            .platform_client()
+            .platform_client()?
             .download_file(pb::DownloadFileRequest {
                 message_id: message_id.to_string(),
                 file_key: file_key.to_string(),

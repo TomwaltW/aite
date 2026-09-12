@@ -8,10 +8,12 @@
 //! 文件名只从 `file_key` 推。§3.1 冻结的 schema 里只有 `file_key` 一个参数，拿不到原始
 //! 文件名；而 file_key 是平台给的不透明串，直接当路径用会带上 `/`、`..` 之类，
 //! 所以先过一遍白名单清洗（`_safe_name` 五步，逐步对齐旧实现）。
-use aite_contracts::ToolContext;
+//! 容器被 reaper 收走那一条（见 `python_exec` 头注释第 3 条）在这里也成立：blob 已经
+//! 从平台下来了，写不进去只是因为记账里那个 id 已经没了 —— 摘掉、重建、再写一次。
+use aite_contracts::{SandboxErrorKind, ToolContext};
 use serde_json::{Map, Value, json};
 
-use super::{ToolEnv, ToolFailure, ToolOutcome, as_map, str_arg};
+use super::{ToolEnv, ToolFailure, ToolOutcome, as_map, rebuild_sandbox, str_arg};
 
 const MAX_NAME: usize = 120;
 const INBOX: &str = "/work/in";
@@ -93,10 +95,24 @@ pub async fn download_attachment(
     let path = format!("{INBOX}/{}", safe_name(&file_key));
     let write = async {
         let sandbox_id = env.acquire_sandbox().await?;
-        sandbox
-            .put_file(&sandbox_id, &path, &blob)
-            .await
-            .map_err(|e| ToolFailure::sandbox(e.to_string()))
+        match sandbox.put_file(&sandbox_id, &path, &blob).await {
+            Ok(()) => Ok(()),
+            // 容器已经不在了：摘掉记账、重建一个再写。**只重试这一次**，
+            // 重建之后再撞就照常落成 code=sandbox（§3.3 的连续沙箱失败闸不能架空）。
+            Err(e) if e.kind == SandboxErrorKind::NotFound => {
+                tracing::warn!(
+                    sandbox_id = %sandbox_id,
+                    error = %e,
+                    "gateway.sandbox_gone 容器已不在，重建后重写一次"
+                );
+                let fresh = rebuild_sandbox(&env).await?;
+                sandbox
+                    .put_file(&fresh, &path, &blob)
+                    .await
+                    .map_err(|e| ToolFailure::sandbox(e.to_string()))
+            }
+            Err(e) => Err(ToolFailure::sandbox(e.to_string())),
+        }
     };
     write
         .await

@@ -17,8 +17,8 @@ use aite_contracts::{
     AiteConfig, Anchor, Attachment, CardAction, ChecklistCard, DocumentContent, EventHandler,
     EventKind, EvidenceEvent, HistoryMessage, Message, ModelError, ModelPort, ModelTurn,
     NormalizedEvent, OutboundFile, OutboundText, PlatformCapabilities, PlatformError, PlatformPort,
-    ReactionKind, SandboxError, SandboxPort, SandboxSpec, SendResult, SenderKind, SessionStore,
-    Task, ToolSpec,
+    ReactionKind, RunHooks, SandboxError, SandboxPort, SandboxSpec, SendResult, SenderKind,
+    Session, SessionStore, Task, TaskWorker, ToolSpec,
 };
 use aite_store::SqliteSessionStore;
 use aite_testing::{FakeModel, FakePlatform, FakeSandbox, ScriptStep};
@@ -345,6 +345,22 @@ impl SandboxPort for ClosableFakeSandbox {
 pub struct RecordingModel {
     pub inner: Arc<FakeModel>,
     prompts: std::sync::Mutex<Vec<Vec<Message>>>,
+    /// 此刻有没有一次 `chat()` 正挂在栈上（见 `chat_alive`）
+    chat_alive: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// `chat()` 的在场标记：进去时置真，**future 被 drop 或正常返回时置假**。
+///
+/// 存在的理由是给「worker 那条 future 还在不在」一个**确定性**的读数。
+/// `hold_ticks` 的自旋计数只能说明「刚才还在动」，读到相同值也可能只是这一瞬没被调度到；
+/// 而 `abort()` + `await` 之后 future 一定已经被 drop，这个 guard 就一定已经跑过。
+/// 不靠时序、不靠墙钟。
+struct ChatAliveGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ChatAliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl RecordingModel {
@@ -352,7 +368,13 @@ impl RecordingModel {
         Arc::new(Self {
             inner: Arc::new(FakeModel::new(script)),
             prompts: std::sync::Mutex::new(Vec::new()),
+            chat_alive: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    /// 有没有一次 `chat()` 正挂着（= worker 那条 future 还活着）。
+    pub fn chat_alive(&self) -> bool {
+        self.chat_alive.load(Ordering::SeqCst)
     }
     pub fn call_count(&self) -> usize {
         self.inner.call_count()
@@ -390,6 +412,8 @@ impl ModelPort for RecordingModel {
             .lock()
             .expect("prompts 锁")
             .push(messages.to_vec());
+        self.chat_alive.store(true, Ordering::SeqCst);
+        let _alive = ChatAliveGuard(self.chat_alive.clone());
         self.inner
             .chat(messages, tools, max_tokens, temperature)
             .await
@@ -571,6 +595,82 @@ pub fn read_manifest(config: &AiteConfig, task_id: &str) -> Map<String, Value> {
         Value::Object(m) => m,
         other => panic!("manifest.json 顶层该是对象，实际 {other}"),
     }
+}
+
+/// 只转发的 `TaskWorker` 探针，用来观测**收尾在什么时机读 `in_flight()`**。
+///
+/// `AiteApp.worker` 和控制面手上那一份是同一个 `Arc`，但控制面是在 `build_app` 里就
+/// 捕获好的 —— 组装完再换掉 `app.worker` 只影响 `run.rs` 收尾那一次调用，任务照样由
+/// 真 `AgentWorker` 跑。
+///
+/// 记的是「调用发生时 worker 那条 future 还活着没有」（`RecordingModel::chat_alive`）。
+///
+/// 为什么用它而不是 `hold_ticks` 的自旋计数：后者读到两次相同也可能只是这一瞬没被调度
+/// 到，是概率判据；而 `abort()` + `await` 返回之后 future 一定已经被 drop，
+/// `ChatAliveGuard` 就一定已经跑过 —— 这是确定性的。
+pub struct WorkerSpy {
+    inner: Arc<dyn TaskWorker>,
+    model: Arc<RecordingModel>,
+    alive_at_calls: std::sync::Mutex<Vec<bool>>,
+}
+
+impl WorkerSpy {
+    pub fn wrap(inner: Arc<dyn TaskWorker>, model: Arc<RecordingModel>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            model,
+            alive_at_calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// 每一次 `in_flight()` 被调时 worker 那条 future 还活着没有，按调用顺序。
+    pub fn alive_at_calls(&self) -> Vec<bool> {
+        self.alive_at_calls.lock().expect("spy 锁").clone()
+    }
+}
+
+#[async_trait]
+impl TaskWorker for WorkerSpy {
+    async fn run(
+        &self,
+        task: Task,
+        session: Session,
+        initiator: Option<String>,
+        hooks: RunHooks,
+    ) -> Task {
+        self.inner.run(task, session, initiator, hooks).await
+    }
+
+    fn in_flight(&self) -> Vec<(Task, Session)> {
+        self.alive_at_calls
+            .lock()
+            .expect("spy 锁")
+            .push(self.model.chat_alive());
+        self.inner.in_flight()
+    }
+}
+
+/// `build_with` 外加一个包在 `app.worker` 上的探针。
+pub async fn build_with_spy(
+    config: AiteConfig,
+    platform: Arc<GatedPlatform>,
+    model: Arc<RecordingModel>,
+    sandbox: Arc<dyn SandboxPort>,
+) -> (Arc<AiteApp>, Arc<WorkerSpy>) {
+    let mut app = build_app(
+        config,
+        Injections {
+            platform: Some(platform),
+            model: Some(model.clone()),
+            sandbox: Some(sandbox),
+            repo_root: Some(repo_root()),
+        },
+    )
+    .await
+    .expect("build_app");
+    let spy = WorkerSpy::wrap(app.worker.clone(), model);
+    app.worker = spy.clone();
+    (Arc::from(app), spy)
 }
 
 /// 一套注入齐全的组装。三个口子都给替身，所以不碰 edge、不碰网络。

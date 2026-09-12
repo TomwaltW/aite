@@ -455,8 +455,86 @@ impl InProcessControlPlane {
         }
     }
 
+    /// `!status` 要列的任务。
+    ///
+    /// 库里那一半是 `list_active_tasks`（口径 `status in ACTIVE_TASK_STATUSES` =
+    /// created / planning / working）。那三个值在契约里冻结，还被两条冻结测试逐值钉着
+    /// （`contracts` 的 `frozen_values.rs` 与 `roundtrip.rs`），**不动它**。
+    ///
+    /// **另一半是控制面自己的 `running`。** 漏的是这一条路：worker 的 `deliver()` 在
+    /// 「第一步就 final、一张卡片都没发过」那一路把状态落成 `Answering`
+    /// （`worker/src/agent.rs` 里 `let answering = !ctx.card.sent()`），而 `Answering`
+    /// **不在**活跃口径里 —— `roundtrip.rs` 专门有一条断言钉着 `!Answering.is_active()`。
+    /// 于是从落 `Answering` 到 `finish()` 落 `Delivered` 之间那几笔（逐个发产物、
+    /// send_text、写 delivered 证据、收卡片）任务从 `!status` 里整个消失，
+    /// 用户这时问一句，得到的是「本群没有活跃任务」。
+    ///
+    /// Python 原版一模一样（`store.py` 的 ACTIVE_TASK_STATUSES 同三值，`plane.py` 的
+    /// `!status` 同样只走 `list_active_tasks`），所以这不是 Rust 引入的偏差。补它也
+    /// **不需要动契约**：`!status` 本来就该回答「现在到底什么情况」，一个正在把文件
+    /// 发给你的任务不该从这句话里消失。
+    ///
+    /// **取锁**：只取 `running` 一把，抄完即放，之后才 await（std 的 Mutex 不许跨 await）。
+    /// 全程没有第二把，`Shared` 那条全局锁序（cancelled → owned → running → steer →
+    /// counters）自然成立。
+    async fn status_tasks(&self, chat_id: &str) -> Result<Vec<Task>, IngressError> {
+        let mut tasks = self.store.list_active_tasks(chat_id).await?;
+        let extra: Vec<String> = {
+            let listed: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+            lock(&self.shared.running)
+                .iter()
+                .filter(|id| !listed.contains(id.as_str()))
+                .cloned()
+                .collect()
+        };
+        for task_id in extra {
+            let Some(task) = self.store.get_task(&task_id).await? else {
+                continue;
+            };
+            // 抄的是快照：`RunningGuard` 摘条目和 worker 落终态之间有先后，
+            // 已经收场的不该被这句话重新拉出来。
+            if task.status.is_terminal() {
+                continue;
+            }
+            // `running` 是进程级的，别把别的群的任务串进这一句。
+            let same_chat = self
+                .store
+                .get_session(&task.session_id)
+                .await?
+                .is_some_and(|s| s.chat_id == chat_id);
+            if !same_chat {
+                continue;
+            }
+            tasks.push(task);
+        }
+        // 与 §3.2 给 `list_active_tasks` 的承诺同序：(created_at, id) 正序。
+        tasks.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+        Ok(tasks)
+    }
+
+    /// 取消的那一句回音（`!stop` / 卡片 stop 按钮走到这里；收尾那条路 `notify=false`）。
+    async fn notify_cancelled(
+        &self,
+        task: &Task,
+        session: Option<&Session>,
+        reply_to: Option<String>,
+        chat_id: Option<String>,
+    ) {
+        let chat_id =
+            chat_id.unwrap_or_else(|| session.map(|s| s.chat_id.clone()).unwrap_or_default());
+        let msg = OutboundText {
+            chat_id,
+            text: format!("任务 {} 已停止。", task.task_no),
+            reply_to,
+            in_thread: true,
+        };
+        if let Err(e) = self.platform.send_text(&msg).await {
+            tracing::error!(target: "aite.control", task = %task.id, error = %e, "control.notify_failed");
+        }
+    }
+
     async fn cmd_status(&self, ev: &NormalizedEvent) -> Result<(), IngressError> {
-        let tasks = self.store.list_active_tasks(&ev.chat_id).await?;
+        let tasks = self.status_tasks(&ev.chat_id).await?;
         if tasks.is_empty() {
             let text = format!("{NO_ACTIVE_TASK_TEXT}{}", self.dropped_note());
             return self.reply(ev, &text).await;
@@ -1106,6 +1184,53 @@ impl ControlPlane for InProcessControlPlane {
             cancelled.insert(task.id.clone());
             r
         };
+
+        // 传进来的 `task` 可能是一份**过期快照**，落刀之前按 id 重读一次。
+        //
+        // 真会撞上的是收尾那一支：`app` 的 `shutdown()` 在宽限期超时时抄一份
+        // `worker.in_flight()`，抄到 `runner.abort()` 生效之间，那个任务完全可能已经
+        // 自己跑完了（worker 在别的 task 上，runtime 是 multi_thread，两条线真并行）。
+        // 拿旧快照往下走的后果是硬的：`status = Cancelled` + `update_task` 会把库里
+        // 一条已经 `delivered` 的任务**改写成 cancelled**，卡片跟着翻成「已取消」——
+        // 而用户手上的答复和文件早就收到了；`finalize_evidence` 的幂等判据读的又是
+        // 快照里的 `evidence_root_hash`（旧快照那一份是空的），manifest 还会再
+        // finalize 一遍，和 worker 写的那份对不上。
+        //
+        // 所以：库里已经是终态就一个字都不改，只把 notify 走完（卡片 stop 按钮那条路
+        // 的用户点了得有回音）。多读一次库，换掉一条对用户说假话的路。
+        let settled = match self.store.get_task(&task.id).await {
+            Ok(Some(fresh)) if fresh.status.is_terminal() => {
+                tracing::info!(
+                    target: "aite.control",
+                    task = %task.id,
+                    status = fresh.status.as_str(),
+                    "control.cancel_skipped 任务已经收场，取消不再改写它"
+                );
+                task = fresh;
+                true
+            }
+            // 读不出来（store 抖动 / 已关）就按原样往下走：这条路原本就是「尽力善终」，
+            // 为一次读失败放弃取消，比多写一条 cancelled 更糟。
+            Err(e) => {
+                tracing::warn!(target: "aite.control", task = %task.id, error = %e, "control.cancel_reread_failed");
+                false
+            }
+            _ => false,
+        };
+        if settled {
+            if notify {
+                let session = self
+                    .store
+                    .get_session(&task.session_id)
+                    .await
+                    .ok()
+                    .flatten();
+                self.notify_cancelled(&task, session.as_ref(), reply_to, chat_id)
+                    .await;
+            }
+            return task;
+        }
+
         task.status = TaskStatus::Cancelled;
         task.updated_at = self.now();
         if let Err(e) = self.store.update_task(&task).await {
@@ -1171,21 +1296,8 @@ impl ControlPlane for InProcessControlPlane {
             self.finalize_evidence(&mut task, session.as_ref()).await;
         }
         if notify {
-            let chat_id = chat_id.unwrap_or_else(|| {
-                session
-                    .as_ref()
-                    .map(|s| s.chat_id.clone())
-                    .unwrap_or_default()
-            });
-            let msg = OutboundText {
-                chat_id,
-                text: format!("任务 {} 已停止。", task.task_no),
-                reply_to,
-                in_thread: true,
-            };
-            if let Err(e) = self.platform.send_text(&msg).await {
-                tracing::error!(target: "aite.control", task = %task.id, error = %e, "control.notify_failed");
-            }
+            self.notify_cancelled(&task, session.as_ref(), reply_to, chat_id)
+                .await;
         }
         task
     }
