@@ -418,6 +418,8 @@ pub fn run(args: &[String]) -> Result<Vec<String>, FixtureError> {
     let sub = args.first().cloned().ok_or_else(|| {
         FixtureError("用法：aite evals demo-fixture {csv,history,all} […]".into())
     })?;
+    // `-h` / `--help` 到不了这里 —— `cli::run_capture` 的 demo-fixture 分支先接走了
+    // （stdout + 退出码 0，用的是那份共用 USAGE）。别在这里再补第二条求助分支。
     if !["csv", "history", "all"].contains(&sub.as_str()) {
         return Err(FixtureError(format!(
             "不认识的子命令 {sub:?}，只认 csv / history / all"

@@ -225,6 +225,17 @@ pub fn run_capture(args: Vec<String>, wiring: &Wiring) -> Captured {
     };
     match cmd.as_str() {
         "run" => run_suite_cmd(rest, wiring),
+        // `-h` / `--help`：stdout + 退出码 0，跟 `run` 一个口径。不接这一条的话它会掉进
+        // `demo_fixture::run` 的「不认识的子命令 "--help"」→ stderr + 退出码 2 ——
+        // 那是 RΩ 那次只修了 `evals run` 一半留下的账（审核台账 §4.4）。
+        // 用法就用上面那份 `USAGE`（里面已经有 demo-fixture 那两行），不写第二份。
+        // 跟 argparse 一样「出现在哪都算」；`-o -h` 这种把 `-h` 当取值的写法会被当成求助，
+        // 属于没有真实用途的边角，不为它加一层位置判定。
+        "demo-fixture" if rest.iter().any(|a| a == "-h" || a == "--help") => Captured {
+            stdout: vec![USAGE.to_string()],
+            code: 0,
+            ..Captured::default()
+        },
         "demo-fixture" => match demo_fixture::run(rest) {
             Ok(stdout) => Captured {
                 stdout,
@@ -236,6 +247,17 @@ pub fn run_capture(args: Vec<String>, wiring: &Wiring) -> Captured {
                 code: 2,
                 ..Captured::default()
             },
+        },
+        // 子命令位置上的 `-h` / `--help`（够得着的写法是 `aite evals -- --help`）：
+        // 跟 `run` / `demo-fixture` 一个口径，stdout + 退出码 0，不是「不认识的子命令」。
+        //
+        // **`aite evals --help`（不加 `--`）到不了这里**：它被 clap 截胡，打的是 clap 那份
+        // 不含任何真实选项的帮助（stdout + 0）。跟 `aite run --help` 是同一个病，根治要动
+        // `main.rs`，而 `main.rs` 归 R0。
+        "-h" | "--help" => Captured {
+            stdout: vec![USAGE.to_string()],
+            code: 0,
+            ..Captured::default()
         },
         other => Captured {
             stderr: vec![format!("不认识的子命令 {other:?}"), USAGE.to_string()],
@@ -349,7 +371,20 @@ fn run_suite_cmd(argv: &[String], wiring: &Wiring) -> Captured {
     let mut model_factory: Option<ModelFactory> = None;
     if args.model == "live" {
         match &wiring.model {
-            Some(f) => model_factory = Some(f.clone()),
+            Some(f) => {
+                // **起飞前试造一次，结果丢掉。** 位置对齐 Python `__main__.py` 的
+                // `_live_model_factory`：排在 parse / load_suite / `--only` / `--list` /
+                // docker 体检 / scale **之后** —— 前面那些一件都用不着模型，不该被它挡住
+                // （接线方那侧是惰性的，见 `app::wiring` 的模块头）。
+                //
+                // 但也**不能不造**：不造的话配置缺一样就变成十个场景各自跑到第一次 chat
+                // 才抛，被 worker 的 §3.3 当成模型 5xx 白重试 2 次（2s + 5s），十次 7 秒
+                // 空等，而真正的原因（yaml 没填 / 环境变量没设）一个字都看不到。
+                if let Err(e) = f() {
+                    return fail(format!("--model live 起不来：{e}"));
+                }
+                model_factory = Some(f.clone());
+            }
             None => {
                 return fail(format!(
                     "--model live 起不来：真模型客户端（aite-models，R5）由 RΩ 通过 \

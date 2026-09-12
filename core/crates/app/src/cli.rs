@@ -1,6 +1,8 @@
 //! `aite run` 的命令行（对应旧 `aite/app.py` 的 `_main`）。
 //!
-//! 起飞前体检没过一律「一行人话 + 退出码 2」，裸错误链只在 `--traceback` 时打。
+//! 起飞前体检没过一律「一行人话 + 退出码 2」；`--traceback` 在那之后多打一行
+//! 错误值的 `Debug` 形（**不是**错误链 —— `StartupError` 是个没有 `source()` 的 newtype，
+//! 这条路径上压根没有链可打，见 [`startup_failed`]）。
 use crate::app::{EXIT_STARTUP, Injections, StartupError, build_app, load_config};
 use crate::run::{DEFAULT_SHUTDOWN_GRACE_SEC, ServeOptions, run_app};
 
@@ -9,8 +11,21 @@ const USAGE: &str = "\
   aite run [--config PATH] [--grace SEC] [--traceback]
 
   --config PATH   配置文件路径（默认 config/aite.yaml；样例见 config/aite.example.yaml）
-  --grace SEC     优雅退出的宽限期，默认 20（对齐 compose 的 stop_grace_period）
-  --traceback     起不来时把完整错误链打到 stderr（默认只打一行人话）";
+  --grace SEC     优雅退出的宽限期，0–86400 秒，默认 20（对齐 compose 的 stop_grace_period）
+  --traceback     起不来时在人话后面多打一行错误值的 Debug 形（默认只打一行人话）";
+
+/// `--grace` 的上界（秒）。
+///
+/// 挡的是 `run.rs` 那句 `Duration::from_secs_f64(grace.max(0.0))`：`max(0.0)` 挡住了负数，
+/// 挡不住上溢 —— `--grace 1e300` 一路穿过校验，到收尾那一刻 panic，把它后面的
+/// `sandbox.close_all()` / `store.close()` 整段跳过。
+///
+/// 取一天：宽限期是「等在途任务收完」的上限，超过一天没有任何真实用途；而 86400 离
+/// `Duration` 的上限（`u64::MAX` 秒 ≈ 1.8e19）还差 14 个数量级，f64 怎么舍入都推不过去。
+///
+/// **这是把炸弹挡在门口，不是拆弹**：`ServeOptions::shutdown_grace_sec` 仍然是个裸 `f64`，
+/// 测试和别的调用方还能直接构造出 1e300。真正的拆弹要动 `run.rs`（归 V5），见回执。
+const MAX_GRACE_SEC: f64 = 86_400.0;
 
 #[derive(Debug)]
 struct Args {
@@ -19,7 +34,28 @@ struct Args {
     traceback: bool,
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, String> {
+/// 参数没解析成的两种收场。分开是因为**要人看用法**和**参数写错了**在命令行上是两件事：
+/// 前者是 stdout + 退出码 0（argparse 的 `-h` 就是这样，脚本里 `set -e` 不会被它带死），
+/// 后者是 stderr + 退出码 2。口径与 `aite evals run` 的 `ParseOutcome` 逐字对齐。
+///
+/// **注意 `aite run --help` 够不着这里**：`main.rs` 把 `run` 声明成 `trailing_var_arg`
+/// 的 `Vec<String>`，clap 仍然把 `-h` / `--help` 截胡，打的是它自己那份不含任何真实选项的
+/// 帮助。要根治得在 `main.rs` 的 `Run` variant 上加 `#[command(disable_help_flag = true)]`，
+/// 而 `main.rs` 归 R0（`main.rs:1–2`：要改这个文件 → 停下报告）。现在够得着的是
+/// `aite run -- -h`。
+enum ParseOutcome {
+    /// `-h` / `--help`
+    Help,
+    Bad(String),
+}
+
+impl From<String> for ParseOutcome {
+    fn from(e: String) -> Self {
+        ParseOutcome::Bad(e)
+    }
+}
+
+fn parse_args(argv: &[String]) -> Result<Args, ParseOutcome> {
     let mut args = Args {
         config: crate::app::DEFAULT_CONFIG_PATH.to_string(),
         grace: DEFAULT_SHUTDOWN_GRACE_SEC,
@@ -44,13 +80,18 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                 args.grace = raw
                     .parse()
                     .map_err(|_| format!("--grace 要是数字，收到 {raw:?}"))?;
-                if !args.grace.is_finite() || args.grace < 0.0 {
-                    return Err(format!("--grace 要是 >= 0 的有限数，收到 {raw:?}"));
+                // 范围判据自带 NaN 与 ±inf 的兜底（两者都不在闭区间里）。
+                // 上界的理由见 `MAX_GRACE_SEC`：不挡的话 `1e300` 会穿到收尾那一刻才 panic。
+                if !(0.0..=MAX_GRACE_SEC).contains(&args.grace) {
+                    return Err(format!(
+                        "--grace 要是 0 到 {MAX_GRACE_SEC:.0} 之间的有限秒数，收到 {raw:?}"
+                    )
+                    .into());
                 }
             }
             "--traceback" => args.traceback = true,
-            "-h" | "--help" => return Err(USAGE.to_string()),
-            other => return Err(format!("不认识的参数 {other:?}\n{USAGE}")),
+            "-h" | "--help" => return Err(ParseOutcome::Help),
+            other => return Err(format!("不认识的参数 {other:?}\n{USAGE}").into()),
         }
         i += 1;
     }
@@ -61,7 +102,12 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 pub fn run(argv: Vec<String>) -> i32 {
     let args = match parse_args(&argv) {
         Ok(a) => a,
-        Err(e) => {
+        // 「人要看用法」不是「参数写错了」：stdout + 退出码 0。
+        Err(ParseOutcome::Help) => {
+            println!("{USAGE}");
+            return 0;
+        }
+        Err(ParseOutcome::Bad(e)) => {
             eprintln!("{e}");
             return EXIT_STARTUP;
         }
@@ -99,6 +145,13 @@ pub fn run(argv: Vec<String>) -> i32 {
     })
 }
 
+/// 起不来时的收场：一行人话 + 用的哪份配置，`--traceback` 再多打一行 `Debug` 形。
+///
+/// **那一行不是错误链。** `StartupError`（`app.rs`）是 `#[error("{0}")]` 的 newtype，
+/// 没有 `source()`，所以 `{e:?}` 就是把 `{e}` 那句话外面套一个 `StartupError("…")`。
+/// 文案原来承诺的是「完整错误链」，名不副实 —— 已改成说实话（USAGE 与模块头）。
+/// 真要有链得让 `StartupError` 带 `source`，那是 `app.rs`（归 V5）；顺带一个事实是
+/// `load_config` 早就把底层错误 `{e}` 格式化进字符串了，这条路径上也没东西可链。
 fn startup_failed(e: &StartupError, args: &Args) -> i32 {
     eprintln!("aite 起不来：{e}");
     eprintln!(
