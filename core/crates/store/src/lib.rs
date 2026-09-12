@@ -145,6 +145,19 @@ impl SqliteSessionStore {
             .await
     }
 
+    /// 同 [`Self::pragma`]，但取 INTEGER 那一列。
+    ///
+    /// `busy_timeout` 这类 pragma 回的是数字，用取文本的那个版本会直接报类型错 ——
+    /// 于是 D8 那条「`PRAGMA busy_timeout = 5000`」一直没有测试钉得住（RΩ 补）。
+    pub async fn pragma_int(&self, name: &str) -> Result<i64, StoreError> {
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(StoreError::Other(format!("非法的 pragma 名：{name:?}")));
+        }
+        let sql = format!("PRAGMA {name}");
+        self.with_conn(move |c| c.query_row(&sql, [], |r| r.get::<_, i64>(0)).map_err(sq))
+            .await
+    }
+
     /// 所有方法的公共骨架：进 blocking 线程池 → 持锁 → 拿连接（已 close 则报
     /// `NotInitialized`）→ 干活。
     async fn with_conn<T, F>(&self, f: F) -> Result<T, StoreError>

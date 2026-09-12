@@ -3,7 +3,8 @@
 //!   aite contracts lock --write    # 生成 / 刷新仓库根的 .contracts.lock
 //!   aite contracts lock --check    # 一致 -> "OK <n> files" 退出 0；否则打印差异退出 1
 //!
-//! 锁定面：proto/aite/v1/**、core/crates/contracts/**（Cargo.toml + src + tests）、aite/contracts/**（Python，RΩ 删除时一并重锁）。
+//! 锁定面：proto/aite/v1/**、core/crates/contracts/**（Cargo.toml + src + tests）。
+//! 2026-09-12 删掉 Python 树时把 aite/contracts/** 从锁面摘掉，36 → 25。
 //! 收目录下**所有**文件而不只是源码：往契约目录丢任何东西都会让 --check 变红，保护面没有洞。
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,16 +14,16 @@ use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 pub const LOCK_FILE: &str = ".contracts.lock";
-pub const LOCK_DIRS: &[&str] = &["proto/aite/v1", "core/crates/contracts", "aite/contracts"];
-const HEADER: &str = "# aite contracts lock — sha256 of proto/aite/v1/**, core/crates/contracts/**, aite/contracts/**（lock.py/__pycache__/target 除外）";
-/// 五份 proto + contracts crate（Cargo.toml + 13 源 + 7 测试）+ Python 11 份；少于这个数一定是出事了
+pub const LOCK_DIRS: &[&str] = &["proto/aite/v1", "core/crates/contracts"];
+const HEADER: &str = "# aite contracts lock — sha256 of proto/aite/v1/**, core/crates/contracts/**（__pycache__/target 除外）";
+/// 五份 proto + contracts crate（Cargo.toml + 12 源 + 7 测试）= 25；少于这个数一定是出事了
 pub const MIN_CONTRACT_FILES: usize = 20;
 
 fn skip(rel: &Path) -> bool {
     rel.components().any(|c| {
         let s = c.as_os_str().to_string_lossy();
         s == "__pycache__" || s == "target" || s == ".DS_Store"
-    }) || rel.ends_with("aite/contracts/lock.py")
+    })
 }
 
 pub fn find_repo_root(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -170,8 +171,8 @@ mod tests {
 
     #[test]
     fn skips_tooling_and_caches() {
-        assert!(skip(Path::new("aite/contracts/lock.py")));
-        assert!(skip(Path::new("aite/contracts/__pycache__/x.pyc")));
+        assert!(skip(Path::new("core/crates/contracts/target/x")));
+        assert!(skip(Path::new("core/crates/contracts/src/.DS_Store")));
         assert!(!skip(Path::new("core/crates/contracts/src/lib.rs")));
     }
 }

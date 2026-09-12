@@ -388,14 +388,22 @@ impl ToolGateway for P0ToolGateway {
 }
 
 /// 逐字节 xor 累加，长度不等也走完再判：别让比较耗时泄露匹配了多少位。
+///
+/// `black_box` 是编译器屏障（RΩ 补，审核记账 R6）：这一圈的语义等价形式是「首字节不同
+/// 就可以提前退出」，优化器完全有权改写成那样，于是常数时间就没了。`black_box` 让
+/// 编译器不许对 `diff` 的取值做任何假设，循环也就拆不掉。
+///
+/// **不为这条加 `subtle` 依赖**（依赖表冻结，而且这一处的威胁模型是本机同进程的
+/// 工具调用，不是远程计时攻击）。
 fn constant_time_eq(expected: &[u8], got: &[u8]) -> bool {
     let mut diff: u8 = 0;
     for i in 0..expected.len().max(got.len()) {
         let a = expected.get(i).copied().unwrap_or(0);
         let b = got.get(i).copied().unwrap_or(0);
         diff |= a ^ b;
+        diff = std::hint::black_box(diff);
     }
-    diff == 0 && expected.len() == got.len()
+    std::hint::black_box(diff) == 0 && expected.len() == got.len()
 }
 
 /// 截到恰好 `limit` 个字符（Unicode 标量，不是字节）。
@@ -445,5 +453,67 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
         format!("panic: {s}")
     } else {
         "panic: （payload 不是字符串）".to_string()
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use aite_contracts::SandboxSpec;
+
+    fn gw() -> P0ToolGateway {
+        P0ToolGateway::with_optional_ports(None, None, SandboxSpec::new("img"))
+    }
+
+    fn args(timeout_sec: Option<f64>) -> Map<String, Value> {
+        let mut m = Map::new();
+        if let Some(t) = timeout_sec {
+            m.insert("timeout_sec".into(), Value::from(t));
+        }
+        m
+    }
+
+    /// `DEFAULT_RUN_PYTHON_GRACE_SEC` 被钉住（RΩ 补，审核记账 R6）。
+    ///
+    /// 在这之前两条超时测试都把 grace 换成了 0.05 / 0.5，**常量本身改成 0 一条都不会红**。
+    /// 而它正是「余量为 0 则外层先赢、模型永远拿不到超时前的部分输出」那条的唯一保障：
+    /// 代码的时限由容器内的 coreutils `timeout` 精确执行（超时退出码 124，工具翻成
+    /// timeout 并把已经产出的 stdout 带回去）；外层这道只该在 Docker daemon 卡住时开火。
+    #[test]
+    fn default_run_python_grace_is_five_seconds() {
+        // 余量为 0 的话两个时限同时到，赢的通常是外层 —— 模型就永远拿不到超时前的部分输出
+        assert_eq!(DEFAULT_RUN_PYTHON_GRACE_SEC, 5.0);
+    }
+
+    /// 默认构造出来的 Gateway 真的用的是那个常量，不是别的什么值。
+    #[test]
+    fn run_python_budget_is_request_timeout_plus_the_default_grace() {
+        let g = gw();
+        assert_eq!(
+            g.budget("run_python", &args(Some(30.0))),
+            30.0 + DEFAULT_RUN_PYTHON_GRACE_SEC
+        );
+        // schema 的默认 timeout_sec 是 120
+        assert_eq!(
+            g.budget("run_python", &args(None)),
+            120.0 + DEFAULT_RUN_PYTHON_GRACE_SEC
+        );
+    }
+
+    /// 别的工具走 `DEFAULT_TOOL_TIMEOUT_SEC`，不吃 run_python 那份余量。
+    #[test]
+    fn other_tools_use_the_default_tool_timeout() {
+        let g = gw();
+        assert_eq!(
+            g.budget("list_files", &args(Some(30.0))),
+            aite_contracts::DEFAULT_TOOL_TIMEOUT_SEC as f64
+        );
+    }
+
+    /// `with_run_python_grace` 换得掉（两条超时测试靠它）。
+    #[test]
+    fn grace_is_injectable() {
+        let g = gw().with_run_python_grace(0.25);
+        assert_eq!(g.budget("run_python", &args(Some(1.0))), 1.25);
     }
 }

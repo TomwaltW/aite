@@ -117,8 +117,38 @@ func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
 		})
 	}
 
-	// 按 card.actions 原样渲染：什么时候还该留「停止」按钮是 worker 的决定，
-	// adapter 不替它判断。不认识的名字静默丢弃。
+	// 按钮**当前不渲染**（RΩ 的处置，见 review-findings §二 G1）。
+	//
+	// 事实（本轨复核过 lark-oapi-go v3.12.0 的源码）：
+	//   ws/client_message.go:79  `if MessageType(messageType) != MessageTypeEvent || c.eventHandler == nil { return }`
+	//                            —— 非 event 帧整条丢弃，`card.action.trigger` 到不了任何 handler；
+	//   ws/client.go:53-57       唯一的 `WithCardHandler` 钩子是**注释掉的**；
+	//   ws/const.go:27           `MessageTypeCard` 定义了，全 SDK 无人引用。
+	// Python 靠 monkeypatch 私有方法绕过（T16），Go 没有这条路。
+	//
+	// 于是渲染出来的按钮点了**一定没反应**。渲染一个点不动的按钮比不渲染更糟：
+	// 用户会以为自己点了、以为任务在停。所以这里只留一行提示，告诉他怎么真的停下来。
+	// `!stop` / `!status` 走的是普通消息事件，完全不受这个缺陷影响。
+	//
+	// **渲染那条路没删**（`buildActions` 还在，往返也还被测着）：飞书 SDK 哪天把
+	// `WithCardHandler` 放开，这里改回 `append(elements, actionBlock(card))` 就行。
+	if hint := actionHint(card); hint != "" {
+		elements = append(elements, map[string]any{
+			"tag":      "note",
+			"elements": []any{plainText(hint)},
+		})
+	}
+
+	return elements
+}
+
+// buildActions 按 card.actions 原样渲染按钮：什么时候还该留「停止」是 worker 的决定，
+// adapter 不替它判断。不认识的名字静默丢弃。
+//
+// 现在没有调用方把它拼进卡片（见 `cardElements` 里那段注释），但它与
+// `NormalizeCardAction` 是一对：按钮 value 的形状与读回来的口径必须始终对得上，
+// 所以留着并继续测。
+func buildActions(card *pb.ChecklistCard) []any {
 	var actions []any
 	for _, kind := range card.GetActions() {
 		button, ok := actionButton[kind]
@@ -132,11 +162,34 @@ func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
 			"value": map[string]any{"action": actionName[kind], "task_id": card.GetTaskId()},
 		})
 	}
-	if len(actions) > 0 {
-		elements = append(elements, map[string]any{"tag": "action", "actions": actions})
-	}
+	return actions
+}
 
-	return elements
+// actionHint 是按钮的替代品：本来会有「停止」按钮的卡片上，改成告诉用户发什么命令。
+// 终态卡片（没有 actions）不加这一行 —— 已经结束的任务没什么可停的。
+//
+// 光说「发 !stop」不够，**必须连投递条件一起说**。控制面的 R5 是
+// `text.starts_with('!') && (ev.mentioned || 话题里已有会话)`（core plane.rs），
+// 两个条件都不满足的一条群消息接着往下走：R6 要 thread 命中会话、R7 要 mentioned，
+// 全不命中 → R8「其余丢弃」，只 bump `events.ignored`，用户那边零回复、零反应。
+// 所以「请在群里发 !stop」这种说法本身就是又一个「点了没反应的按钮」。
+//
+// 两条真的走得通的路：
+//  1. 在这条话题里回复 —— 卡片是 SendCard 发的，reply_to = 话题 root、
+//     reply_in_thread 恒为 true（platform.go 的 SendCard / sendMessage），
+//     所以卡片一定在任务话题内；话题里的回复带 root_id，Normalize 取它当 thread_id，
+//     find_session_by_thread 命中 → R5 收下，不需要 @。
+//  2. 在群里 @ 机器人再发 —— mentioned=true，同样命中 R5。
+func actionHint(card *pb.ChecklistCard) string {
+	for _, kind := range card.GetActions() {
+		if kind == pb.CardActionKind_CARD_ACTION_KIND_STOP {
+			no := card.GetTaskNo()
+			return "要停这个任务：在本话题里回复 !stop " + no +
+				"，或在群里发「@我 !stop " + no +
+				"」。（既不 @ 我、也不在本话题里的命令会被丢弃，不会有任何回应。）"
+		}
+	}
+	return ""
 }
 
 // BuildChecklistCard 把 ChecklistCard 渲染成飞书卡片 JSON。

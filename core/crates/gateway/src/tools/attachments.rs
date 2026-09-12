@@ -20,8 +20,7 @@ const INBOX: &str = "/work/in";
 /// （旧实现的正则 `[^0-9A-Za-z._一-鿿-]+`，连续多个折成一个）。
 fn safe_name(file_key: &str) -> String {
     // ① PurePosixPath(file_key).name（空则原串）
-    let trimmed = file_key.trim_end_matches('/');
-    let base = trimmed.rsplit('/').next().unwrap_or("");
+    let base = posix_name(file_key);
     let base = if base.is_empty() { file_key } else { base };
 
     // ② 白名单之外折成 _
@@ -51,6 +50,19 @@ fn safe_name(file_key: &str) -> String {
 
 fn is_safe_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') || ('一'..='鿿').contains(&ch)
+}
+
+/// `PurePosixPath(s).name`：按 `/` 切开，**丢掉空分量和 `.`**，保留 `..`，取最后一个；
+/// 一个都不剩就是空串。
+///
+/// 别写成「砍掉尾部斜杠再 rsplit」—— 那样 `a/b/.` 会拿到 `"."`，折完 strip 完变成空，
+/// 最后落成 `attachment`；而 Python 拿到的是 `b`。file_key 是平台给的不透明串，
+/// 真出现这种结尾时两边就会把同一个附件落到不同的文件名上。
+fn posix_name(file_key: &str) -> &str {
+    file_key
+        .rsplit('/')
+        .find(|part| !part.is_empty() && *part != ".")
+        .unwrap_or("")
 }
 
 pub async fn download_attachment(
@@ -99,4 +111,78 @@ pub async fn download_attachment(
             })),
         ),
     )
+}
+
+#[cfg(test)]
+mod safe_name_tests {
+    use super::{MAX_NAME, safe_name};
+
+    /// ① `PurePosixPath(file_key).name`：丢空分量与 `.`，保留 `..`。
+    #[test]
+    fn step1_takes_the_posix_basename() {
+        assert_eq!(safe_name("a/b/sales.csv"), "sales.csv");
+        assert_eq!(safe_name("a/b//"), "b");
+        assert_eq!(safe_name("a/./b"), "b");
+    }
+
+    /// ①的分歧点（RΩ 修，审核记账 R6）：`file_key` 以 `/.` 结尾时，
+    /// pathlib 丢掉那个 `.` 分量拿到 `b`；旧写法「砍尾斜杠再 rsplit」拿到 `"."`，
+    /// 折完 strip 完变成空，最后落成 `attachment` —— 同一个附件两边落到不同文件名。
+    #[test]
+    fn step1_handles_a_trailing_dot_component_like_pathlib() {
+        assert_eq!(safe_name("a/b/."), "b");
+        assert_eq!(safe_name("a/b/./."), "b");
+        // `..` 是保留的（pathlib 不折叠它），折 + strip 之后才落到 attachment
+        assert_eq!(safe_name("a/b/.."), "attachment");
+    }
+
+    /// ② 白名单之外折成 `_`，**连续多个折成一个**。
+    #[test]
+    fn step2_folds_unsafe_runs_into_a_single_underscore() {
+        assert_eq!(safe_name("a b.csv"), "a_b.csv");
+        assert_eq!(safe_name("a???b.csv"), "a_b.csv");
+        // 汉字在白名单里，原样留着
+        assert_eq!(safe_name("销售 数据.csv"), "销售_数据.csv");
+        // 路径分隔与爬升都被折掉（这就是「不能直接拿 file_key 当路径」的理由）
+        assert_eq!(safe_name("../../etc/passwd"), "passwd");
+    }
+
+    /// ③ 去掉首尾的 `.` 与 `_`（中间的不动）。
+    #[test]
+    fn step3_strips_leading_and_trailing_dots_and_underscores() {
+        assert_eq!(safe_name(".hidden"), "hidden");
+        assert_eq!(safe_name("__name__"), "name");
+        assert_eq!(safe_name("...a.b..."), "a.b");
+        assert_eq!(safe_name("a.b"), "a.b", "中间的点不许动");
+    }
+
+    /// ④ 空则 `attachment`。
+    #[test]
+    fn step4_falls_back_to_attachment_when_nothing_is_left() {
+        for key in ["", ".", "/", "/.", "...", "___", "???"] {
+            assert_eq!(safe_name(key), "attachment", "file_key={key:?}");
+        }
+    }
+
+    /// ④ 再截到 120 个**字符**（不是字节）。
+    #[test]
+    fn step4_clips_to_120_chars_not_bytes() {
+        let long = "a".repeat(500);
+        assert_eq!(safe_name(&long).len(), MAX_NAME);
+
+        // 汉字一个 3 字节：按字节截会切在 rune 中间
+        let cn = "数".repeat(500);
+        let got = safe_name(&cn);
+        assert_eq!(got.chars().count(), MAX_NAME);
+        assert!(!got.contains('\u{fffd}'), "切在了 char 边界里：{got}");
+    }
+
+    /// 真实形状的 file_key 原样过（飞书的是不透明串，不该被改）。
+    #[test]
+    fn a_real_looking_file_key_passes_through() {
+        assert_eq!(
+            safe_name("file_v3_00d1_abc-123.XYZ"),
+            "file_v3_00d1_abc-123.XYZ"
+        );
+    }
 }

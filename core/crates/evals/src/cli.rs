@@ -76,7 +76,22 @@ const USAGE: &str = "\
   aite evals demo-fixture {csv,history,all} [-o PATH | -d DIR] [--start YYYY-MM]
                          [--months N] [--seed N] [--count N]";
 
-fn parse_args(argv: &[String]) -> Result<Args, String> {
+/// 参数没解析成的两种收场。分开是因为**要人看用法**和**参数写错了**在命令行上是两件事：
+/// 前者是 stdout + 退出码 0（argparse 的 `-h` 就是这样，脚本里 `set -e` 不会被它带死），
+/// 后者是 stderr + 退出码 2。原来两者都走后者（审核记账 R7）。
+enum ParseOutcome {
+    /// `-h` / `--help`
+    Help,
+    Bad(String),
+}
+
+impl From<String> for ParseOutcome {
+    fn from(e: String) -> Self {
+        ParseOutcome::Bad(e)
+    }
+}
+
+fn parse_args(argv: &[String]) -> Result<Args, ParseOutcome> {
     let mut args = Args {
         platform: "fake".to_string(),
         model: "scripted".to_string(),
@@ -120,38 +135,37 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
                     _ => args.protocol_report = Some(String::new()),
                 }
             }
-            "-h" | "--help" => return Err(USAGE.to_string()),
-            other if other.starts_with('-') => return Err(format!("不认识的参数 {other:?}")),
+            "-h" | "--help" => return Err(ParseOutcome::Help),
+            other if other.starts_with('-') => {
+                return Err(format!("不认识的参数 {other:?}").into());
+            }
             other => {
                 if args.suite.is_empty() {
                     args.suite = other.to_string();
                 } else {
-                    return Err(format!("多余的位置参数 {other:?}"));
+                    return Err(format!("多余的位置参数 {other:?}").into());
                 }
             }
         }
         i += 1;
     }
     if args.suite.is_empty() {
-        return Err("缺场景目录，例如 aite evals run evals/p0".to_string());
+        return Err("缺场景目录，例如 aite evals run evals/p0"
+            .to_string()
+            .into());
     }
     if !PLATFORMS.contains(&args.platform.as_str()) {
         return Err(format!(
             "不认识的 --platform {:?}，只认 {PLATFORMS:?}",
             args.platform
-        ));
+        )
+        .into());
     }
     if !MODELS.contains(&args.model.as_str()) {
-        return Err(format!(
-            "不认识的 --model {:?}，只认 {MODELS:?}",
-            args.model
-        ));
+        return Err(format!("不认识的 --model {:?}，只认 {MODELS:?}", args.model).into());
     }
     if !SANDBOXES.contains(&args.sandbox.as_str()) {
-        return Err(format!(
-            "不认识的 --sandbox {:?}，只认 {SANDBOXES:?}",
-            args.sandbox
-        ));
+        return Err(format!("不认识的 --sandbox {:?}，只认 {SANDBOXES:?}", args.sandbox).into());
     }
     Ok(args)
 }
@@ -254,7 +268,15 @@ fn run_suite_cmd(argv: &[String], wiring: &Wiring) -> Captured {
     let mut out = Captured::default();
     let args = match parse_args(argv) {
         Ok(args) => args,
-        Err(e) => return fail(e),
+        // `-h` 是「人要看用法」，不是「参数写错了」：stdout + 退出码 0（同 argparse）。
+        Err(ParseOutcome::Help) => {
+            return Captured {
+                stdout: vec![USAGE.to_string()],
+                code: 0,
+                ..Captured::default()
+            };
+        }
+        Err(ParseOutcome::Bad(e)) => return fail(e),
     };
 
     let mut scenarios = match load_suite(Path::new(&args.suite)) {

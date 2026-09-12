@@ -3,24 +3,29 @@
 对应 `docs/dev-spec-2026-09-09.md` §2.4。那张表只写了「操作 → 期望」，本文把它变成
 照着做就能跑的东西：每条 M 拆成**操作 / 在哪看 / 期望 / 不对时查哪**四段。
 
-这是 P0 的最后一关，跟 pytest 最大的不同是：**出了问题没有断言告诉你哪一行红了**，
+这是 P0 的最后一关，跟自动化测试最大的不同是：**出了问题没有断言告诉你哪一行红了**，
 只有群里一条没回的消息、一张卡在 working 的卡片。所以每条 M 都配了「在哪看」——
 把「看起来不对」变成「哪个环节不对」，靠的是日志、证据链、`docker ps` 这三个窗口。
 
-> **标注约定**：带 ⏳ 的命令是 **T7 / T9 并行轨的产物，本文写就时还没合入**，
-> 命令行按各自派单里写死的形状写。**这些命令待 T7/T9 合入后实跑校验。**
-> 没有 ⏳ 的命令（`scripts/evidence_show.py`、`docker`、`git`）都是本机实跑过的。
+> **2026-09-12（RΩ）：命令已换成 Rust + Go 两进程的口径。** 原文写的是 Python 单进程
+> （`python -m aite.app` / `scripts/preflight.py` / `scripts/evidence_show.py`），那棵树已经删了。
+> 判据、期望、排障表基本没动 —— 换的主要是敲什么命令。**唯一改了判据的是 §0.4 与 §8 第 4 条**：
+> 卡片上的按钮从 RΩ 起一个都不渲染（Go SDK 在长连接上丢弃非 event 帧，点了不会有反应），
+> 「停止」改走 `!stop`、「证据」改走 `aite evidence show`。
+>
+> **本轮多出来的一件事：现在要起两个进程。** edge 拿着飞书长连接和 Docker，
+> core 拿着路由、会话、worker。M6 的重启因此要分三种情形各验一遍（见 §6）。
 
 ---
 
 ## 0. 通用前置
 
-### 0.1 起飞前 60 秒：外部依赖自检 ⏳
+### 0.1 起飞前 60 秒：外部依赖自检
 
 ```bash
-.venv/bin/python scripts/preflight.py                 # 七组检查，全 OK → 退出码 0
-.venv/bin/python scripts/preflight.py --offline       # 只跑不需要网络/docker 的 1、2、7
-.venv/bin/python scripts/preflight.py --json          # 机器可读
+core/target/debug/aite preflight                 # 七组检查，全 OK → 退出码 0
+core/target/debug/aite preflight --offline       # 只跑不需要网络/docker 的 1、2、7
+core/target/debug/aite preflight --json          # 机器可读
 ```
 
 七组分别是：① 配置可加载 ② 环境变量齐 ③ 飞书凭证有效 ④ 飞书身份对得上
@@ -30,18 +35,33 @@
 第 ④ 组尤其要过：它拿 token 查机器人自身信息、和 `FEISHU_BOT_OPEN_ID` 的取值比对。
 **配错了应用时 M1 会完全静默**（收得到事件但认不出 @ 的是自己），没有任何报错。
 
-### 0.2 起飞 ⏳
+### 0.2 起飞（**两个进程**）
+
+开两个终端，一个一个：
 
 ```bash
-.venv/bin/python -m aite.app --config config/aite.yaml
+# 终端 A —— edge（Go）：飞书长连接 + Docker 沙箱
+cd edge && go run ./cmd/aite-edge --config ../config/aite.yaml
+# 或先 `make build` 再 edge/bin/aite-edge --config config/aite.yaml
+
+# 终端 B —— core（Rust）：路由 / 会话 / worker / 证据
+core/target/debug/aite run --config config/aite.yaml
 ```
 
-起飞日志有一行「接了谁」，写着 platform / model 名 / sandbox 镜像 / sqlite 路径 /
-evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都从它开始 ——
-尤其是 evidence 目录，`evidence_show.py` 要用。
+**谁先起都行**（§2.1 启动顺序无关）：两边都是懒连接 + 1→2→…→30s 退避重连。
+core 起飞时会问一次 edge 的 `GetStatus`：
 
-- `--traceback`：出错时打完整栈（默认只给人话）。
-- 停：Ctrl-C（SIGINT/SIGTERM 走同一条优雅退出路径）。**再按一次是硬退**。
+- 答得上且 `contract_version` 一致 → 日志 `aite.edge_status`，接着起飞；
+- 答得上但版本不一致 → **拒绝起飞**，两边版本都印出来（两个进程要一起升）；
+- 五秒内答不上（edge 还没起）→ 记一行 `aite.edge_unreachable` 照常起飞，edge 起来后自动恢复。
+
+core 的起飞日志有一行 `aite.up`「接了谁」，写着 platform / model 名 / sandbox 镜像 /
+sqlite 路径 / evidence 目录 / edge socket。**先把这一行抄下来**，后面每一条 M 的排障
+都从它开始 —— 尤其是 evidence 目录，`aite evidence show` 要用。
+
+- `--traceback`：起不来时打完整错误链（默认只给一行人话）。
+- `--grace SEC`：优雅退出的宽限期，默认 20。
+- 停：Ctrl-C（SIGINT/SIGTERM 走同一条优雅退出路径）。**再按一次是硬退**（退出码 130）。
 
 ### 0.3 三个观察窗
 
@@ -49,18 +69,18 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 | 窗口 | 命令 | 看什么 |
 |---|---|---|
-| 进程日志 | `python -m aite.app` 那个终端 ⏳ | 关键字见 §7 速查表 |
-| 证据时间线 | `.venv/bin/python scripts/evidence_show.py --list` | 最近的任务、终态、链是否完整 |
+| 进程日志 | `aite run` 那个终端 | 关键字见 §7 速查表 |
+| 证据时间线 | `core/target/debug/aite evidence show --list` | 最近的任务、终态、链是否完整 |
 | 沙箱 | `docker ps --filter label=aite.task` | 有没有容器、是不是该收没收 |
 
 **每条 M 做完的固定收尾**：
 
 ```bash
 # 1. 找到刚才那个任务（时间倒序，第一行就是）
-.venv/bin/python scripts/evidence_show.py --list
+core/target/debug/aite evidence show --list
 
 # 2. 看它的时间线（--config 指到真配置，花费一栏才算得出来）
-.venv/bin/python scripts/evidence_show.py --config config/aite.yaml <task_id>
+core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 ```
 
 时间线末尾那行 `hash 链` 是这份证据可不可信的判据。链断了 → 退出码 1，
@@ -69,12 +89,25 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 `--list` 里任一任务链断了，整条命令也退出码 1，所以可以直接 `&&` 串在脚本里。
 
-### 0.4 关于「卡片上的证据按钮」
+### 0.4 卡片上没有按钮，改成一行提示
 
-契约 R3 支持卡片的 `evidence` 按钮（点了回帖证据目录路径），但 P0 的
-`aite/worker/card.py` 渲染卡片时用的是 `ChecklistCard.actions` 的默认值 `["stop"]`——
-**实际卡片上只有「停止」按钮，没有「证据」按钮**。拿证据路径请走 `--list`，
-别在卡片上找。（这条已列进 §8 给下一轮的输入。）
+**2026-09-12（RΩ）改**：卡片上**一个按钮都不渲染**（「停止」「证据」都没有），
+改成在卡片末尾加一行文字提示。原因是 lark-oapi-go v3.12.0 在长连接上把非 event 帧
+整条丢弃（`ws/client_message.go:79`），`card.action.trigger` 到不了任何 handler ——
+渲染出来的按钮点了**一定**没反应，比不渲染更糟。
+
+于是这两件事改成这么做：
+
+| 本来想点的按钮 | 现在怎么做 |
+|---|---|
+| 「停止」 | **在卡片所在的那条话题里回复** `!stop <任务号>`；或在群里发 `@我 !stop <任务号>` |
+| 「证据」 | 走 `aite evidence show --list` 找任务，再 `aite evidence show <task_id>` —— 输出开头第二行 `目录 <证据目录>` 就是原来那个按钮会回帖的路径 |
+
+⚠️ **停止命令必须满足投递条件**：路由 R5 收 `!` 命令的条件是「这条消息 @ 了机器人」
+**或**「这条消息在一个已有会话的话题里」。两个都不满足（比如在群主输入框里干发一条
+`!stop #A17`）时，R6 要 thread 命中、R7 要 @，全不命中，最后落到 R8「其余丢弃」——
+只 bump 一次 `events.ignored`，**你那边零回复、零表情，看起来就像没人收到**。
+卡片是 `reply_in_thread=true` 发进任务话题的，所以「在话题里回复」这条路一定走得通。
 
 ---
 
@@ -89,7 +122,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 ### 在哪看
 
 - 群里：**你发的那条消息**上的表情回应（不是机器人新发一条消息）。
-- `scripts/evidence_show.py --list`：应该多出一个任务。
+- `aite evidence show --list`：应该多出一个任务。
 - 日志：没有 `ingress.slow_callback` / `ingress.handle_failed` / `control.dispatch_failed`。
 
 ### 期望
@@ -98,7 +131,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
    在建会话之后、入队之前发出，所以它先于任何回复出现。
 2. 随后线程里出现一条**纯文本**回复（不是卡片）。W3：第一步就 `final` 的
    Answering 路径不发卡片。
-3. `evidence_show.py <task_id>` 的时间线形如：
+3. `aite evidence show <task_id>` 的时间线形如：
 
    ```
    0  task_created     #A1 「你好」 by=ou_… chat=oc_…
@@ -115,8 +148,8 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
 | 没表情、没回复、`--list` 也没有新任务 | 事件根本没到进程 | 开放平台「事件订阅 → 推送记录」看这条有没有推出来；没有就是权限/订阅没配（§3.7 清单）；有就看进程日志有没有连上（0.2 那行起飞日志） |
-| 同上，但推送记录里有 | 认不出 @ 的是自己 → R7 不命中 → R8 丢弃 | `FEISHU_BOT_OPEN_ID` 配的是不是这个应用的 open_id。跑 preflight 第 ④ 组 ⏳ |
-| 有表情，没回复 | 模型这一步炸了 | 日志 `worker.model_failed`；`evidence_show.py <task_id>` 看 `model_call` 那条的 `finish_reason`；跑 preflight 第 ⑤ 组 ⏳ |
+| 同上，但推送记录里有 | 认不出 @ 的是自己 → R7 不命中 → R8 丢弃 | `FEISHU_BOT_OPEN_ID` 配的是不是这个应用的 open_id。跑 preflight 第 ④ 组 |
+| 有表情，没回复 | 模型这一步炸了 | 日志 `worker.model_failed`；`aite evidence show <task_id>` 看 `model_call` 那条的 `finish_reason`；跑 preflight 第 ⑤ 组 |
 | 有表情有回复，但超过 2 秒才出现表情 | 回调里被塞了重活 | 日志 `ingress.slow_callback`（>1s 就 WARNING，带 `elapsed=`） |
 | 机器人自己触发了自己 | R1 没拦住 | 不该发生（`sender_kind != human` 直接丢）。真出现了记下来，这是 bug 不是环境问题 |
 
@@ -128,7 +161,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 ### 操作
 
-1. 关掉跑 `aite.app` 那台机器的网络（拔网线 / 关 Wi-Fi），**不要停进程**。
+1. 关掉跑 `aite run` 那台机器的网络（拔网线 / 关 Wi-Fi），**不要停进程**。
 2. 断网期间在群里发**一条** `@Aite 断网期间这条`。
 3. 等 30 秒，恢复网络。
 
@@ -136,7 +169,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 - 日志：`feishu.reconnecting attempt=N delay=Ns` → `feishu.reconnected after=N attempts`。
   退避是 1s→2s→…→30s 封顶、无限重试（§3.3）。
-- `scripts/evidence_show.py --list`：断网期间那条消息应该**只**对应**一个**任务。
+- `aite evidence show --list`：断网期间那条消息应该**只**对应**一个**任务。
 - 计数器 `events.duplicate`：平台重连后重推同一事件时 +1（R2）。
 
 ### 期望
@@ -153,7 +186,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 |---|---|---|
 | 恢复网络后没有 `feishu.reconnected` | 重连循环挂了 | 看有没有 `feishu.reconnecting` 在持续打；完全没有就是读循环已经死了 —— 记下日志末尾，这是 bug |
 | 断网期间那条 @ 完全没被处理 | 平台没重推 | 飞书的补推不保证；换成「断网 10 秒」再试一次。连续两次都不补推，就是平台行为，记进结论、不算代码问题 |
-| **同一条消息出了两个任务** | R2 去重没生效 | `evidence_show.py` 看这两个任务的 `event_received` 那条，`event=` 是不是同一个 `event_id`。是 → `seen_event` 没落库（查 sqlite 路径可写、`storage.sqlite_path` 配得对不对，preflight 第 ⑦ 组 ⏳）；不是 → 平台推了两个不同 event_id，属于平台行为 |
+| **同一条消息出了两个任务** | R2 去重没生效 | `aite evidence show` 看这两个任务的 `event_received` 那条，`event=` 是不是同一个 `event_id`。是 → `seen_event` 没落库（查 sqlite 路径可写、`storage.sqlite_path` 配得对不对，preflight 第 ⑦ 组）；不是 → 平台推了两个不同 event_id，属于平台行为 |
 | 进程直接退了 | 未捕获异常漏出去了 | §3.3 要求进程不退出。抓日志末尾的栈，这是 bug |
 
 ---
@@ -175,7 +208,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 - 群里那条线程：卡片消息**只有一条**，内容在变。
 - `docker ps --filter label=aite.task`：任务跑的时候应该看得见一个容器。
-- 跑完后：`scripts/evidence_show.py --config config/aite.yaml <task_id>`。
+- 跑完后：`aite evidence show --config config/aite.yaml <task_id>`。
 
 ### 期望
 
@@ -185,7 +218,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
    卡片自始至终只有那一条、不重复出现。
 2. **卡片至少更新 3 次**。怎么数：
    - 肉眼：盯着卡片，checklist 的项从 ○ 逐个变 ✓，footer 的「已用 N 步 · ¥X.XX」在涨。
-   - 证据侧的必要条件：`evidence_show.py <task_id> --only checklist_op` 至少 3 行。
+   - 证据侧的必要条件：`aite evidence show <task_id> --only checklist_op` 至少 3 行。
      每次 `checklist_check` 都写一条 evidence（W8），而卡片更新由它驱动。
    - ⚠️ **`update_card` 本身不写 evidence，也没有日志**，所以「真的调了 3 次」
      只能靠肉眼确认，证据里查不到。见 §8。
@@ -225,7 +258,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 | 回帖里有「产物 x 未找到」 | 模型给的 path 不在 /work 下或不存在 | §3.3 规定跳过该产物、任务仍 delivered。`--only artifact` 看实际写出去几个；`delivered` 那行的 `产物缺失 N 个` |
 | 卡片更新次数不够 3 次 | 模型没建足够的 checklist 项 | `--only checklist_op` 数条数。少于 3 条是模型行为，不是链路故障 —— 换个更需要分步的任务重试 |
 | 6 分钟后容器还在 | reaper 没跑 / 释放失败 | 日志 `control.reap_failed`、`control.gateway_release_failed`、`worker.gateway_release_failed`；都没有就看 reaper 那条协程是不是根本没起（回到 0.2 的起飞日志） |
-| 群里有两条卡片 | W3/W4 的合并没生效 | 这是 bug，把两条卡片的消息 id 和 `evidence_show.py` 输出一起记下来 |
+| 群里有两条卡片 | W3/W4 的合并没生效 | 这是 bug，把两条卡片的消息 id 和 `aite evidence show` 输出一起记下来 |
 
 ---
 
@@ -261,16 +294,16 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 ### 在哪看
 
-- `scripts/evidence_show.py --list`：应该多出**一个新任务**（不是新会话）。
+- `aite evidence show --list`：应该多出**一个新任务**（不是新会话）。
 - 新任务时间线第 0 条 `task_created` 里的 `session=` 字段，要和 M3 那个任务的一致。
 
   ```bash
-  .venv/bin/python scripts/evidence_show.py <M3的task_id> --only task_created
-  .venv/bin/python scripts/evidence_show.py <M4的task_id> --only task_created
+  core/target/debug/aite evidence show <M3的task_id> --only task_created
+  core/target/debug/aite evidence show <M4的task_id> --only task_created
   # 两行的 session= 必须相同
   ```
 
-  用 `--json` 更好比：`.…--json | python -c "import json,sys;print(json.load(sys.stdin)['events'][0]['fields']['session_id'])"`
+  用 `--json` 更好比：`…--json | jq -r '.events[0].fields.session_id'`
 - `docker ps --filter label=aite.task`：M3 的容器多半已经被 reaper 收了，
   这一轮会**重建**一个新的（容器 id 不同）。
 
@@ -332,7 +365,7 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 ### 在哪看
 
 - 群里的回复正文：里面应该带得出**具体的消息内容**，能和群里真实存在的消息对上。
-- `scripts/evidence_show.py <task_id> --only tool_call,tool_result`：
+- `aite evidence show <task_id> --only tool_call,tool_result`：
   应该有一条 `read_group_history`。
 
 ### 期望
@@ -362,16 +395,25 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 
 ### 操作
 
+现在是两个进程，所以 **M6 要跑三遍**（spec §4.4）：只重启 edge / 只重启 core / 两个都重启。
+每一遍都是同样的五步，区别只在第 2–4 步重启的是谁。
+
 1. 记下 M3/M4 那条话题。
-2. **Ctrl-C 停掉进程**（或 `kill <pid>`，SIGTERM 走同一条优雅退出路径）。
-3. **确认进程真的没了**：`ps aux | grep aite.app`。
-4. 重新起飞：`.venv/bin/python -m aite.app --config config/aite.yaml` ⏳
+2. **停掉要重启的那个**（Ctrl-C，或 `kill <pid>`；SIGTERM 走同一条优雅退出路径）。
+3. **确认它真的没了**：`ps aux | grep "aite run"` / `ps aux | grep aite-edge`。
+4. 重新起飞（命令见 §0.2）。
 5. 在**同一条旧话题**里追问：`@Aite 刚才那张图换成柱状的`（按 M4 的结论决定带不带 @）。
+
+| 这一遍重启谁 | 另一边应该发生什么 | 额外要看的 |
+|---|---|---|
+| **只重启 edge** | core 一直活着，会话与任务号都在内存 + 库里。core 日志出现 `edge.reconnecting` → `edge.reconnected` | 重连之后追问照常办；断开期间群里发的消息由飞书重推，**只处理一次**（去重在 core） |
+| **只重启 core** | edge 一直活着，长连接没断。edge 日志出现 `ingress.reconnecting` → `ingress.reconnected`（**第一次连上不算重连**，计数从 0 起） | 这一遍才是「会话从 SQLite 里读回来」的正题，下面的期望 1–3 说的就是它 |
+| **两个都重启** | 两边都从零开始，先起谁都行 | 上面两行的判据合起来都要成立 |
 
 ### 在哪看
 
 - 重启后的起飞日志：`sqlite 路径`那一段要和重启前**是同一个文件**。
-- `scripts/evidence_show.py --list`：新任务的 `session_id` 要和旧任务相同。
+- `aite evidence show --list`：新任务的 `session_id` 要和旧任务相同。
 
 ### 期望
 
@@ -381,26 +423,39 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
 3. 证据链接得上：新任务是**新的** `{evidence_dir}/{task_id}/` 目录
    （证据按 task 分目录，不按 session），链从 GENESIS 重新起，这是对的。
 
-### 顺手多验一条（成本很低，值得做）
+### 顺手多验一条：**杀 core 时正在跑的那个任务会被收场**
 
-杀进程时如果**有任务正在跑**，那个任务的证据目录会停在「没写 manifest.json」的状态。
-渲染它，确认工具认得这种半截证据：
+这是 RΩ 新接上的一条，原来的剧本里没有 —— 别把它当成 bug。
+
+用 `kill -9 <core 的 pid>`（**硬杀**，不走优雅退出）制造一个「崩溃时正在干活」的任务，
+然后重新起飞。起飞会把它收干净，**在 `platform.start()` 之前**：
+
+- core 日志：`aite.orphans n=1` → 逐个收场；
+- 库里那个任务落 `failed`，`result_summary` 是「进程重启前该任务仍在执行，已终止。请重新发起。」；
+- **群里那条话题多一条回帖**：`任务 #A3：进程重启前该任务仍在执行，已终止。请重新发起。`；
+- **那张停在「进行中」的卡片被原地改成 failed**（不新发卡片）；
+- 证据链补一条 `failed`（`by=startup_recovery`）并 finalize。
 
 ```bash
-.venv/bin/python scripts/evidence_show.py <被杀掉的task_id>
-# 期望：manifest 那行显示「未 finalize」，事件照常渲染，hash 链 OK，退出码 0
+core/target/debug/aite evidence show <被杀掉的task_id>
+# 期望：最后一条是 failed，manifest 有了，hash 链 OK，退出码 0
 ```
 
-**「未 finalize」不等于「证据损坏」** —— 这是排障时最容易误判的一处。
+如果是**优雅退出**（Ctrl-C）而不是硬杀，在跑的任务会在宽限期内自己善终，
+落 `delivered` 或 `cancelled`，不会走上面这条收残局的路。
+
+> **「未 finalize」不等于「证据损坏」** —— 这是排障时最容易误判的一处。
+> 硬杀之后、重新起飞**之前**去看那个目录，它就是「未 finalize」的样子，退出码仍然是 0。
 
 ### 不对时查哪
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
 | 重启后追问变成了新会话（`session_id` 不同） | SQLite 换文件了 | 比对重启前后起飞日志里的 sqlite 路径；相对路径 + 换了工作目录最常见 |
-| 重启后追问完全没反应 | 进程没真起来 / 没连上 | 起飞日志那一行；`preflight.py` 第 ③ 组 ⏳ |
+| 重启后追问完全没反应 | 进程没真起来 / 没连上 | 起飞日志那一行；`aite preflight` 第 ③ 组 |
 | `task_no` 从 `#A1` 重来 | `next_task_no` 的计数表没落库 | 编号存在 SQLite 的 `task_counters` 表里，重启该接得上。回退到 `#A1` = sqlite 换文件了（同上一行），或计数没提交 —— 贴 `--list` 输出 |
-| 重启前那个跑到一半的任务，重启后自己接着跑了 | 不该发生 | P0 没有任务恢复。它应该停在没有终态事件的状态（`--list` 里终态列显示「无终态」）。真自己跑起来了，记下来 |
+| 重启前那个跑到一半的任务，重启后自己接着跑了 | 不该发生 | P0 没有任务**恢复**（只有**收场**）。它应该被起飞时收成 `failed` 并在群里回一句，而不是接着跑。真自己跑起来了，记下来 |
+| 硬杀之后重启，群里没有那句「已终止」 | 收残局这一步没走到 | core 日志找 `aite.orphans` / `aite.recover_failed` / `aite.orphan_notice_failed`。一个孤儿收不掉不该连累别人，也不该让进程起不来 —— 进程起来了但没回帖，看这三个日志名哪个出现了 |
 | Ctrl-C 按不动 | 优雅退出卡住了 | **再按一次是硬退**（T7 的实现里第二次信号立即硬退）。要记下第一次为什么没退 |
 
 ---
@@ -445,10 +500,12 @@ evidence 目录。**先把这一行抄下来**，后面每一条 M 的排障都�
    只能靠肉眼数。建议加 `card_sent` / `card_updated` 两类事件（或复用 `checklist_op`）。
 3. **被丢弃的事件不留痕。** R1/R2/R8 丢弃事件时只加内存计数器，INFO 级别没有日志，
    计数器也没有查看入口。M4 判「没投递 vs 投递了被丢」因此只能去开放平台看推送记录。
-4. **卡片上没有「证据」按钮。** 契约 R3 支持 `evidence` 动作，但 `render_card`
-   用的是 `ChecklistCard.actions` 的默认值 `["stop"]`，那条分支实际走不到。
+4. **卡片上一个按钮都没有（RΩ 起）。** 契约 R3 的 `stop` / `evidence` 两个动作都还在，
+   但 lark-oapi-go v3.12.0 收不到卡片回传帧，渲染出来的按钮点了一定没反应，
+   所以现在一个都不渲染，改成卡片末尾一行文字提示（见 §0.4）。
+   「停止」有等价的命令路径（`!stop`，注意投递条件）；「看证据」只能走 CLI。
 5. **`checklist_op` 的 check/fail 只记 `id` 和 `state`，不带那一项的文本。**
-   `evidence_show.py` 已经通过回放前面的 `add` 事件把文本补了回来，
+   `aite evidence show` 已经通过回放前面的 `add` 事件把文本补了回来，
    但这意味着**单看一条 `checklist_op` 是读不懂的**，任何别的消费方都得自己回放。
 6. **`tool_result` 只有 `content_hash`，没有摘要。** 工具失败时证据里只有
    `error` 的错误码（`timeout` / `sandbox` / `invalid_args` …），

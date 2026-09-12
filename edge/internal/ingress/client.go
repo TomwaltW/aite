@@ -14,6 +14,7 @@ package ingress
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
@@ -56,9 +57,16 @@ type Client struct {
 	mu     sync.Mutex
 	conn   *grpc.ClientConn
 	cancel context.CancelFunc
+	// Close() 之后就是终态：再调 HandleEvent 不许把连接和 watch goroutine 复活。
+	// 收尾序列是「停投递 → 关连接」，复活一条就等于收尾没收干净。
+	closed bool
 
-	connected  atomic.Bool
-	everUp     atomic.Bool
+	connected atomic.Bool
+	everUp    atomic.Bool
+	// 「当前认为断着」。watch 与 HandleEvent 两头都会写它：谁先看出来算谁的，
+	// 另一头就是空转。做成字段而不是 watch 的局部变量，是因为一次成功的 RPC
+	// 也是「通了」的证据，而它发生在 watch 之外。
+	down       atomic.Bool
 	sent       atomic.Int64
 	invalid    atomic.Int64
 	errs       atomic.Int64
@@ -75,9 +83,16 @@ func New(coreSocket string, deadline time.Duration, maxMessageMB int) *Client {
 	}
 }
 
+// ErrClosed 是 Close() 之后再投事件的答复。返回 error（而不是静默成功）是因为
+// 这条事件确实没送到 core —— 让平台重推，重复交给 core 靠 event_id 去重。
+var ErrClosed = errors.New("ingress 客户端已关闭")
+
 func (c *Client) client() (pb.IngressServiceClient, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil, ErrClosed
+	}
 	if c.conn == nil {
 		sock := c.socket
 		conn, err := grpc.NewClient("unix:"+sock,
@@ -107,26 +122,35 @@ func (c *Client) client() (pb.IngressServiceClient, error) {
 	return pb.NewIngressServiceClient(c.conn), nil
 }
 
+// noteUp 记一次「通了」。
+//
+// **第一次连上不算重连**，哪怕之前已经 TransientFailure 过一轮：core 晚起来是常态
+// （§2.1 启动顺序无关），那一路必然先 TF 再 Ready —— 照「断过就 +1」算的话
+// `!status` 会说「重连 1 次」，而它从没断过。
+func (c *Client) noteUp() {
+	c.connected.Store(true)
+	wasDown := c.down.Swap(false)
+	if !c.everUp.Swap(true) {
+		slog.Info("ingress.connected", "socket", c.socket)
+		return
+	}
+	if wasDown {
+		c.reconnects.Add(1)
+		slog.Info("ingress.reconnected", "socket", c.socket, "reconnects", c.reconnects.Load())
+	}
+}
+
 // watch 把 gRPC 的连接状态迁移翻成日志与计数。退避本身由 ConnectParams 执行。
 func (c *Client) watch(ctx context.Context, conn *grpc.ClientConn) {
-	down := false
 	for {
 		state := conn.GetState()
 		switch state {
 		case connectivity.Ready:
-			c.connected.Store(true)
-			if down {
-				c.reconnects.Add(1)
-				slog.Info("ingress.reconnected", "socket", c.socket, "reconnects", c.reconnects.Load())
-			} else if !c.everUp.Swap(true) {
-				slog.Info("ingress.connected", "socket", c.socket)
-			}
-			down = false
+			c.noteUp()
 		case connectivity.TransientFailure:
 			// 只在「刚掉下来」时喊一声：一次外网故障里 gRPC 会反复 TF→Connecting→TF，
 			// 每轮都打就把日志刷爆了。
-			if !down {
-				down = true
+			if !c.down.Swap(true) {
 				slog.Warn("ingress.reconnecting", "socket", c.socket,
 					"base_delay", c.baseDelay.String(), "max_delay", c.maxDelay.String())
 			}
@@ -171,6 +195,11 @@ func (c *Client) HandleEvent(ctx context.Context, ev *pb.NormalizedEvent) error 
 		return err
 	}
 	c.sent.Add(1)
+	// 一次成功的 RPC 就是「现在连得上」的最强证据 —— 比 watch 的状态迁移新鲜。
+	// 不加这条的话：watch 那边要等 gRPC 自己迁移到 Ready 才翻 true，而 RPC 已经
+	// 跑通了，`!status` 的健康行会在这中间报「没连上」。
+	// （core 侧 R6 的 `link.note_ok()` 是同一个修法，这边补齐。）
+	c.noteUp()
 	return nil
 }
 
@@ -190,6 +219,7 @@ func (c *Client) Counters() Counters {
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.closed = true
 	if c.cancel != nil {
 		c.cancel()
 		c.cancel = nil

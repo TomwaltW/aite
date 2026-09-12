@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+# 组装面做成 lib：`core/crates/app/tests/` 的集成测试（移植 Python tests/integration 53 条）
+# 要直接调 build_app / run_app 并注入替身，不能只隔着进程看退出码。
+[lib]
+name = "aite_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "aite"
 path = "src/main.rs"
@@ -29,8 +35,21 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# 以下五个都已在 [workspace.dependencies] 里钉过版本，不是新依赖：
+# serde_json 出 preflight 的 --json 与计数器快照；chrono 给孤儿收场盖 updated_at；
+# thiserror 出 StartupError；
+# reqwest 是 preflight 唯一要自己发的 HTTP（飞书凭证 / 机器人身份 / 模型端点）；
+# async-trait 给 tests 里的替身实现契约 trait。
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# 集成测试要直接动库（删 session 行、把 tasks 表改成缺列的样子）来复现崩溃现场；
+# rusqlite 已在 [workspace.dependencies] 里钉过版本，不是新依赖。
+rusqlite.workspace = true
 # cli_smoke 要解析 `aite evals run` 的 JSON 摘要；serde_json 已在 workspace 依赖表里，不是新依赖
 serde_json.workspace = true

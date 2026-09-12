@@ -2,9 +2,9 @@
 //! 移植自 `tests/worker/test_final.py`（9 条）。
 mod common;
 
-use aite_contracts::{EvidenceKind, EvidenceWriter, TaskStatus};
+use aite_contracts::{EvidenceKind, EvidenceWriter, Task, TaskStatus};
 use common::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake";
@@ -254,4 +254,137 @@ async fn gateway_gets_the_task_session_token() {
         run.h.gateway.registered(),
         vec![(run.task.id.clone(), run.task.session_token.clone())]
     );
+}
+
+// ---- `final.artifacts` 的真值语义（RΩ 补，审核记账 R5）------------------
+
+/// Python 那边是 `raw = args.get("artifacts") or []`（loop.py:634）：**假值**一律
+/// 当成「没有产物」照常交付。Rust 原来把 `""` / `{}` / `0` / `false` 都判成
+/// invalid_args 退回重来 —— 交付路径上的行为翻转，而弱模型给 `artifacts: ""` 不罕见。
+///
+/// 四个取值各走一遍：每一个都必须**一步就交付**（模型只被调 1 次），
+/// 而不是退回去再要一轮。
+#[tokio::test]
+async fn falsy_artifacts_are_treated_as_no_artifacts() {
+    for falsy in [json!(""), json!({}), json!(0), json!(false), json!(null)] {
+        let run = run_script(
+            vec![tool_turn(&[(
+                "final",
+                json!({"reply": "干完了。", "artifacts": falsy}),
+            )])],
+            0.0,
+        )
+        .await;
+        assert_eq!(
+            run.task.status,
+            TaskStatus::Delivered,
+            "artifacts={falsy} 该照常交付"
+        );
+        assert_eq!(run.h.platform.last_text(), "干完了。");
+        assert!(
+            run.h.platform.files().is_empty(),
+            "artifacts={falsy} 不该发产物"
+        );
+        assert_eq!(run.model.call_count(), 1, "artifacts={falsy} 不该退回重来");
+    }
+}
+
+/// 反过来：**真值但不是数组**仍然是 invalid_args（这条 Python 也一样）。
+#[tokio::test]
+async fn truthy_non_array_artifacts_are_still_invalid_args() {
+    let run = run_script(
+        vec![
+            tool_turn(&[(
+                "final",
+                json!({"reply": "干完了。", "artifacts": "/work/out.png"}),
+            )]),
+            final_turn("这次给数组了"),
+        ],
+        0.6,
+    )
+    .await;
+
+    assert_eq!(run.model.call_count(), 2, "真值非数组该退回去要第二轮");
+    assert_eq!(run.task.status, TaskStatus::Delivered);
+    assert_eq!(run.h.platform.last_text(), "这次给数组了");
+}
+
+// ---- 单个 artifact 的 title / mime 真值语义（RΩ 补，审核记账 R5 的另一半）----
+
+/// 一步就 final、只带一个产物；沙箱里预置 `/work/out.png`。
+async fn run_one_artifact(art: Value) -> (Task, Harness) {
+    let mut h = Harness::new();
+    h.sandbox.put("/work/out.png", PNG);
+    h.seed("帮我出个图", Vec::new()).await;
+    let model = std::sync::Arc::new(
+        ScriptedModel::new(vec![final_turn_with("图在这里。", json!([art]))])
+            .with_clock(h.clock.clone(), 0.0),
+    );
+    let task = h.run(model).await;
+    (task, h)
+}
+
+/// Python 是 `str(art.get("title") or art.get("path", ""))`（loop.py:464）：**真值语义**。
+/// Rust 原来判的是「字符串化之后为空」，于是 `title: false` / `0` / `{}` 会把标题
+/// 发成字面量 `"false"` / `"0"` / `"{}"`，而不是退回 `path`。
+#[tokio::test]
+async fn falsy_artifact_title_falls_back_to_path() {
+    for falsy in [json!(false), json!(0), json!({}), json!(""), json!(null)] {
+        let (task, h) = run_one_artifact(json!({"path": "/work/out.png", "title": falsy})).await;
+        assert_eq!(task.status, TaskStatus::Delivered, "title={falsy}");
+        let art = h.evidence.payloads(&task.id, EvidenceKind::Artifact)[0].clone();
+        assert_eq!(
+            art["title"],
+            json!("/work/out.png"),
+            "title={falsy} 该退回 path"
+        );
+    }
+
+    // 干脆没写 title 的那一路
+    let (task, h) = run_one_artifact(json!({"path": "/work/out.png"})).await;
+    let art = h.evidence.payloads(&task.id, EvidenceKind::Artifact)[0].clone();
+    assert_eq!(art["title"], json!("/work/out.png"), "缺 title 该退回 path");
+}
+
+/// 产物取不到时回帖那行「未找到」用的是同一个 title（Python `missing.append(title or path)`），
+/// 所以假值 title 在这条路上也该显示成 `path`，而不是字面量 "false"。
+#[tokio::test]
+async fn falsy_title_on_missing_artifact_shows_path() {
+    let (task, h) = run_one_artifact(json!({"path": "/work/nope.png", "title": false})).await;
+    assert_eq!(task.status, TaskStatus::Delivered);
+    assert!(
+        h.platform
+            .last_text()
+            .contains("产物 /work/nope.png 未找到"),
+        "回帖该报 path 而不是 \"false\"，实际：{}",
+        h.platform.last_text()
+    );
+}
+
+/// Python 是 `art.get("mime") or mimetypes.guess_type(path)[0] or "application/octet-stream"`
+/// （loop.py:469）：同一个真值语义。Rust 原来同样只看「字符串化之后为空」，
+/// `mime: false` 会把 `Content-Type` 发成 `"false"`。
+#[tokio::test]
+async fn falsy_artifact_mime_falls_back_to_guess() {
+    for falsy in [json!(false), json!(0), json!({}), json!(""), json!(null)] {
+        let (task, h) = run_one_artifact(json!({"path": "/work/out.png", "mime": falsy})).await;
+        let files = h.platform.files();
+        assert_eq!(files.len(), 1, "mime={falsy}");
+        assert_eq!(files[0].mime, "image/png", "mime={falsy} 该按扩展名猜");
+        let art = h.evidence.payloads(&task.id, EvidenceKind::Artifact)[0].clone();
+        assert_eq!(
+            art["mime"],
+            json!("image/png"),
+            "mime={falsy} 证据里也要一致"
+        );
+    }
+
+    // 干脆没写 mime 的那一路
+    let (_, h) = run_one_artifact(json!({"path": "/work/out.png"})).await;
+    assert_eq!(h.platform.files()[0].mime, "image/png", "缺 mime 该猜");
+
+    // 反过来：真值 mime 照用，别矫枉过正成一律猜
+    let (_, h) =
+        run_one_artifact(json!({"path": "/work/out.png", "mime": "application/x-custom"})).await;
+    assert_eq!(h.platform.files()[0].mime, "application/x-custom");
 }

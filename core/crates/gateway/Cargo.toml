@@ -14,8 +14,6 @@ async-trait.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-sha2.workspace = true
-hex.workspace = true
 # FutureExt::catch_unwind —— 保护圈要罩住整个 dispatch（含 token_resolver 闭包），
 # 不只是工具那个 future。futures 已在 workspace 依赖表里，不是新增第三方依赖。
 futures.workspace = true
@@ -23,6 +21,5 @@ futures.workspace = true
 [dev-dependencies]
 # test-util 给 tokio::time::pause()：超时测试不靠真实 sleep（纪律 4）
 tokio = { workspace = true, features = ["test-util"] }
-tempfile.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

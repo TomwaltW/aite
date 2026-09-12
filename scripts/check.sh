@@ -37,10 +37,9 @@ run "B 全量 cargo test"             bash -c 'cd core && cargo test --workspace
 # 就是靠它抓出 fakeFeishu 的读取侧没持锁（TestTransportErrorIsRetryable 现行）。
 run "B 全量 go test（-race）"       bash -c 'cd edge && go test -race ./... -count=1'
 
-# 评测本身在 RΩ 之前允许 not implemented / passed k/10，不计入 FAILED，只打印出来看。
-echo; echo "=== B8 评测（RΩ 前允许不满分 / not implemented）==="
-echo "\$ core/target/debug/aite evals run evals/p0 --platform fake --model scripted"
-core/target/debug/aite evals run evals/p0 --platform fake --model scripted 2>&1 | tail -n 2
+# B8 自 RΩ 合入起是硬门禁：退出码 0 **且**最后一行逐字是 passed 10/10。
+# 两条都要判 —— 只看退出码的话，将来 runner 把失败收成 phase="error" 却仍然 exit 0 就漏了。
+run "B8 评测（passed 10/10）" bash -c 'o=$(core/target/debug/aite evals run evals/p0 --platform fake --model scripted 2>&1); c=$?; printf "%s\n" "$o" | tail -n 2; [ "$c" = 0 ] && printf "%s\n" "$o" | tail -n 1 | grep -qx "passed 10/10"'
 
 echo
 if [ ${#FAILED[@]} -eq 0 ]; then echo "全部通过"; exit 0; fi

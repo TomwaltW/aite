@@ -137,6 +137,12 @@ pub struct PlaneState {
 ///
 /// 单独拎出来是因为 `RunHooks` 里那两个回调是 `Arc<dyn Fn() + 'static>`，没有生命周期
 /// 参数可借 `&self`，只能捕获一个 `Arc`。
+///
+/// **锁序（全局，不许反向取）**：`cancelled` → `owned` → `running` → `steer` → `counters`。
+/// 同时持有两把以上的地方只有三处，都按这个顺序：`dispatch_task` 的准入
+/// （cancelled → running）、`cancel_task` 的同序对偶（cancelled → running）、
+/// `continue_session` 的 steer 目标判定（owned → running）与 `FinishGuard::drop`
+/// （owned → steer）。加新的组合前先回来看这一行。
 struct Shared {
     queue: DispatchQueue,
     /// 待合并的追问文本，只在内存（进程一换就没了，见 test_steer_routing ①）
@@ -191,8 +197,26 @@ struct FinishGuard<'a> {
 
 impl Drop for FinishGuard<'_> {
     fn drop(&mut self) {
-        lock(&self.shared.steer).remove(self.task_id);
-        lock(&self.shared.owned).remove(self.task_id);
+        // 两个容器必须在**同一个临界区**里清：只清掉 steer 就放手的话，
+        // `continue_session` 的 `steer_target`（它持 owned + running）还会把这个任务
+        // 挑成 steer 目标，于是一条追问排进一个再也不会被 drain 的队列。
+        // 取锁顺序照本文件的全局序 owned → steer（见 `Shared` 的注释），不反向取。
+        let mut owned = lock(&self.shared.owned);
+        let mut steer = lock(&self.shared.steer);
+        steer.remove(self.task_id);
+        owned.remove(self.task_id);
+    }
+}
+
+/// `run_one` 那圈 `finally`：不管是跑完、报错，还是整条 future 被 `abort()` 丢掉，
+/// 队列的完成计数都要落一笔。
+struct TaskDoneGuard<'a> {
+    shared: &'a Shared,
+}
+
+impl Drop for TaskDoneGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.queue.task_done();
     }
 }
 
@@ -755,11 +779,17 @@ impl InProcessControlPlane {
     }
 
     async fn run_one(&self, task_id: &str) {
+        // `task_done()` 必须是 drop-safe（Python 那边是 `finally`）：收尾时
+        // `runner.abort()` 会在任意一个 await 点把这条 future 整个丢掉，而 `join()`
+        // 等的就是这个计数 —— 漏一次，队列永远清不空，下一次优雅退出就卡满整个宽限期，
+        // 而且 `pending()` 会一直报一个不存在的任务。
+        let _done = TaskDoneGuard {
+            shared: &self.shared,
+        };
         // §3.3 任何未捕获异常都不能让进程退出
         if let Err(e) = self.run_task(task_id).await {
             tracing::error!(target: "aite.control", task = %task_id, error = %e, "control.dispatch_failed");
         }
-        self.shared.queue.task_done();
     }
 
     async fn run_task(&self, task_id: &str) -> Result<(), IngressError> {

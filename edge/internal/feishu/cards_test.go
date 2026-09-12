@@ -276,17 +276,19 @@ func TestFooterBecomesANote(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestButtonValueRoundTripsIntoCardAction 对应 test_button_value_round_trips_into_card_action。
+//
+// 按钮当前不拼进卡片（G1：lark-oapi-go v3.12.0 收不到 card.action.trigger 帧），
+// 所以这里直接对 `buildActions` 验往返 —— 要钉的本来就是「发出去的 value 与
+// 点回来的 card_action 对得上」这一对口径，跟渲不渲染是两件事。
 func TestButtonValueRoundTripsIntoCardAction(t *testing.T) {
 	card := sampleCard()
-	built := asAnyMap(t, BuildChecklistCard(card))
-	var value map[string]any
-	for _, e := range asList(built["elements"]) {
-		if m := asMap(e); mapStr(m, "tag") == "action" {
-			value = asMap(asMap(asList(m["actions"])[0])["value"])
-		}
+	actions := buildActions(card)
+	if len(actions) == 0 {
+		t.Fatal("buildActions 没造出按钮")
 	}
+	value := asMap(asMap(actions[0])["value"])
 	if value == nil {
-		t.Fatal("卡片里没有按钮")
+		t.Fatal("按钮 value 不是对象")
 	}
 
 	event := NormalizeCardAction(map[string]any{
@@ -315,29 +317,28 @@ func TestButtonValueRoundTripsIntoCardAction(t *testing.T) {
 // TestActionsAreRenderedAsGiven 对应 test_actions_are_rendered_as_given。
 //
 // 按 card.actions 原样渲染 —— 留不留「停止」是 worker 的决定，adapter 不替它判。
+// 验的是 `buildActions`（卡片当前不拼它，理由见 cards.go 里那段注释）。
 func TestActionsAreRenderedAsGiven(t *testing.T) {
+	names := func(card *pb.ChecklistCard) []string {
+		var out []string
+		for _, a := range buildActions(card) {
+			out = append(out, mapStr(asMap(asMap(a)["value"]), "action"))
+		}
+		return out
+	}
+
 	card := sampleCard()
 	card.Actions = []pb.CardActionKind{
 		pb.CardActionKind_CARD_ACTION_KIND_STOP,
 		pb.CardActionKind_CARD_ACTION_KIND_EVIDENCE,
 	}
-	var names []string
-	for _, e := range asList(asAnyMap(t, BuildChecklistCard(card))["elements"]) {
-		if m := asMap(e); mapStr(m, "tag") == "action" {
-			for _, a := range asList(m["actions"]) {
-				names = append(names, mapStr(asMap(asMap(a)["value"]), "action"))
-			}
-		}
-	}
-	if strings.Join(names, ",") != "stop,evidence" {
-		t.Errorf("按钮顺序 = %v，要 [stop evidence]", names)
+	if got := strings.Join(names(card), ","); got != "stop,evidence" {
+		t.Errorf("按钮顺序 = %v，要 [stop evidence]", got)
 	}
 
 	card.Actions = nil
-	for _, e := range asList(asAnyMap(t, BuildChecklistCard(card))["elements"]) {
-		if mapStr(asMap(e), "tag") == "action" {
-			t.Error("actions 为空时不该有 action 元素")
-		}
+	if got := buildActions(card); len(got) != 0 {
+		t.Errorf("actions 为空时不该造出按钮：%v", got)
 	}
 
 	// 不在 ACTION_BUTTON 里的名字静默丢弃。
@@ -345,16 +346,60 @@ func TestActionsAreRenderedAsGiven(t *testing.T) {
 		pb.CardActionKind_CARD_ACTION_KIND_UNSPECIFIED,
 		pb.CardActionKind_CARD_ACTION_KIND_STOP,
 	}
-	names = nil
-	for _, e := range asList(asAnyMap(t, BuildChecklistCard(card))["elements"]) {
-		if m := asMap(e); mapStr(m, "tag") == "action" {
-			for _, a := range asList(m["actions"]) {
-				names = append(names, mapStr(asMap(asMap(a)["value"]), "action"))
+	if got := strings.Join(names(card), ","); got != "stop" {
+		t.Errorf("未知按钮该静默丢弃，得到 %v", got)
+	}
+}
+
+// G1 的处置（RΩ）：卡片上**不出现**点不动的按钮，改成一行告诉用户发什么命令。
+//
+// lark-oapi-go v3.12.0 在长连接上把非 event 帧整条丢弃
+// （ws/client_message.go:79），`card.action.trigger` 到不了任何 handler；
+// 唯一的 `WithCardHandler` 钩子在 ws/client.go 里是注释掉的。所以渲染出来的按钮
+// 点了一定没反应 —— 那比不渲染更糟。
+func TestNoDeadButtonsAndAHintInstead(t *testing.T) {
+	card := sampleCard()
+	card.Actions = []pb.CardActionKind{pb.CardActionKind_CARD_ACTION_KIND_STOP}
+	built := asAnyMap(t, BuildChecklistCard(card))
+
+	var notes []string
+	for _, e := range asList(built["elements"]) {
+		m := asMap(e)
+		if mapStr(m, "tag") == "action" {
+			t.Fatal("卡片上不许出现点不动的按钮")
+		}
+		if mapStr(m, "tag") == "note" {
+			for _, inner := range asList(m["elements"]) {
+				notes = append(notes, mapStr(asMap(inner), "content"))
 			}
 		}
 	}
-	if strings.Join(names, ",") != "stop" {
-		t.Errorf("未知按钮该静默丢弃，得到 %v", names)
+	joined := strings.Join(notes, "\n")
+	t.Logf("卡片上那行提示的实际渲染文本：%q", joined)
+	if !strings.Contains(joined, "!stop "+card.GetTaskNo()) {
+		t.Errorf("该告诉用户怎么停（!stop %s），实际 note：%q", card.GetTaskNo(), joined)
+	}
+
+	// 光有命令还不够：这条命令只有**在本话题里回复**或**在群里 @ 机器人**才会被路由收下。
+	// 控制面 R5 是 `text.starts_with('!') && (mentioned || 已在话题内)`；两条都不满足时
+	// 一路落到 R8「其余丢弃」，只 bump 一个计数器 —— 用户那边零回复、零反应。
+	// 也就是说，只写「在群里发 !stop」的提示，本身就是又一个「点了没反应的按钮」。
+	// 所以提示里必须点明投递条件，这条断言就是拦着以后有人把它改回去。
+	if !strings.Contains(joined, "话题") && !strings.Contains(joined, "@") {
+		t.Errorf("提示里必须点明投递条件（在话题里回复 / 在群里 @），"+
+			"否则用户照做会命中 R8 被静默丢弃；实际 note：%q", joined)
+	}
+
+	// 终态卡片没有 actions，也就不该多这一行
+	card.Actions = nil
+	built = asAnyMap(t, BuildChecklistCard(card))
+	for _, e := range asList(built["elements"]) {
+		m := asMap(e)
+		for _, inner := range asList(m["elements"]) {
+			if strings.Contains(mapStr(asMap(inner), "content"), "!stop") {
+				t.Error("没有停止按钮的卡片不该提示怎么停")
+			}
+		}
 	}
 }
 

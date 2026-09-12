@@ -420,20 +420,44 @@ func (d *Docker) ReapIdle(ctx context.Context, idleSec int) ([]string, error) {
 	sort.Strings(victims)
 	victims = append(victims, d.orphans(ctx, idle, known)...)
 
+	released, err := reapVictims(ctx, victims, d.Release)
+	if len(released) > 0 {
+		slog.Info("sandbox.reaped", "count", len(released), "idle_sec", idleSec)
+	}
+	return released, err
+}
+
+// reapVictims 逐个释放，**一个失败不连累其余**，也不把已经真删掉的 id 弄丢。
+//
+// 为什么不是「一失败就 return」：gRPC 的返回值是二选一的 —— 带错误返回时
+// `ReapIdleResponse` 整个丢掉，`released` 到不了 core。而 core 手上按
+// `task → sandbox_id` 记着账，收不到这批 id 就不会清，之后拿一个**容器已经没了**的
+// 死 id 去 exec，报出来是「sandbox_not_found」，跟真正的原因（reap 半路失败）
+// 一点关系都看不出来。
+//
+// 所以：失败的记一条 WARN 继续扫，成功的一个不少地回去。只有**一个都没释放成**
+// （典型是 daemon 整个不可达）才把错误抛上去 —— 那时 released 本来就是空的，
+// 两者不会互相吃掉。没收掉的那些是幂等的，下一轮 reaper（60s）自己会再试。
+func reapVictims(ctx context.Context, victims []string, release func(context.Context, string) error) ([]string, error) {
 	released := make([]string, 0, len(victims))
 	seen := make(map[string]struct{}, len(victims))
+	var lastErr error
+	failed := 0
 	for _, id := range victims {
 		if _, dup := seen[id]; dup {
 			continue
 		}
 		seen[id] = struct{}{}
-		if err := d.Release(ctx, id); err != nil {
-			return released, err
+		if err := release(ctx, id); err != nil {
+			failed++
+			lastErr = err
+			slog.Warn("sandbox.release_failed", "sandbox", short(id), "err", err)
+			continue
 		}
 		released = append(released, id)
 	}
-	if len(released) > 0 {
-		slog.Info("sandbox.reaped", "count", len(released), "idle_sec", idleSec)
+	if len(released) == 0 && failed > 0 {
+		return released, lastErr
 	}
 	return released, nil
 }
