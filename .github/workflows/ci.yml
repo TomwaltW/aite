@@ -58,9 +58,119 @@ jobs:
       # 这一步红 = 十个 P0 场景里有跑不过的，不许合。
       - name: "B8 评测（硬门禁：passed 10/10）"
         run: core/target/debug/aite evals run evals/p0 --platform fake --model scripted
-      # compose 从 RΩ 起是两个 service（core + edge），文件本身也要能被解析。
+
+  # compose 起飞冒烟 —— 独立 job，跟 checks 并行。
+  #
+  # 为什么独立：真 build 两个镜像在 4 核 runner 上估 6–8 分钟（本地 10 核 M1 Max 实测
+  # `docker compose build --no-cache` 75s，其中 cargo 编 248 个 crate 占 54s，是 CPU 并行
+  # 受限项），塞进 checks 会顶到那边的 timeout-minutes: 30。分开各拿一份预算最省事。
+  #
+  # 为什么要这一步：到 RΩ 合并前，compose 门禁只有一条
+  # `docker compose config --services`，纯解析 YAML。那次真 `up` 一撞就是四条 blocker
+  # （登录 shell 洗掉 PATH、rust 镜像里没 protoc、cwd 不是仓库根、socket 落到非共享卷），
+  # **四条它一条都抓不到** —— 实测：把 compose 退回 `bash -lc` 那份坏的，这一步退出码照样 0。
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # 解析这一关留着：它很便宜，而且能在花 6 分钟 build 之前先抓到 YAML 写坏。
       # 刻意清掉那几个密钥环境变量：`docker compose config` 会把 ${VAR} 解析成取值再打出来。
       - name: "compose 双 service 可解析"
         run: |
           env -u FEISHU_APP_ID -u FEISHU_APP_SECRET -u FEISHU_BOT_OPEN_ID -u AITE_MODEL_API_KEY \
             docker compose config --services | sort | tr '\n' ' ' | grep -qx 'core edge '
+
+      # config/aite.yaml 不入库（.gitignore:14），checkout 里根本没有，而两个 service 的
+      # command 都指着它 —— 所以 CI 得自己造。两份而不是一份，因为 core 与 edge 读的是
+      # **同一个 platform 字段**，含义却相反：
+      #   · core：`platform: fake` 会被直接拒绝起飞（app.rs:143-146，fake 是「必须由调用方
+      #     注入平台实现」的标记，不是内建替身），所以 core 必须 feishu；
+      #     而 model.base_url / model.model 为空会 StartupError 退 2（models/lib.rs:318-327），
+      #     example 里这两项就是空的，得填上。core 自己不连飞书（出入站都在 edge），
+      #     所以没有飞书凭证也起得来。
+      #   · edge：`platform: feishu` 配假凭证时 platform.Start 返回 err
+      #     → edge.component_failed → 进程退出（main.go:128-141, 151-157），配
+      #     restart: unless-stopped 就是崩溃循环。所以 edge 必须 fake ——
+      #     它那一档只是不起长连接，gRPC 服务面照常提供（main.go 的 edge.platform_fake）。
+      - name: "造 CI 用的两份配置"
+        run: |
+          sed -e 's#^  base_url: ""#  base_url: "https://example.invalid/v1"#' \
+              -e 's#^  model: ""#  model: "ci-smoke"#' \
+              config/aite.example.yaml > config/aite.yaml
+          sed -e 's#^platform: feishu.*#platform: fake#' config/aite.yaml > config/aite.ci-edge.yaml
+          grep -E '^platform:|^  base_url:|^  model:' config/aite.yaml
+          grep -E '^platform:' config/aite.ci-edge.yaml
+
+      # 这一步就是 blocker 2 的门禁：protoc 缺了 core/crates/proto/build.rs 当场炸。
+      # 沙箱镜像（aite-sandbox:p0）刻意不建 —— 它是 R2 的验收面，而且 edge 只在真起任务时
+      # 才 ImageInspect（docker.go:168-172），起飞与冒烟都不需要它。
+      - name: "两个镜像真编出来"
+        run: docker compose build
+
+      # README.md:90 写着「--offline 只跑 1、2、7，不碰网络也不碰 docker，CI 用这一档」——
+      # 在此之前 CI 里并没有对应步骤。这一条让那句话成立。
+      # 注意镜像的 ENTRYPOINT 就是 `aite`，所以命令里不要再写一遍。
+      - name: "preflight --offline（配置 / 环境变量 / 落盘目录）"
+        env:
+          AITE_MODEL_API_KEY: ci-smoke-not-a-real-key
+        run: docker compose run --rm core preflight --offline
+
+      # 最强的那一档：两个进程都真起，断言它们真的**互相连上了**。
+      # 等就绪一律轮询 + 上限重试，不拿 `sleep N` 当判据。
+      - name: "起飞冒烟：两个 socket 真连上"
+        env:
+          AITE_EDGE_CONFIG: config/aite.ci-edge.yaml
+          AITE_MODEL_API_KEY: ci-smoke-not-a-real-key
+        run: |
+          set -euo pipefail
+          docker compose up -d
+          # ---- 就绪：两边的 healthcheck 都得转 healthy（上限 40 次 x 3s = 120s）
+          for i in $(seq 1 40); do
+            ch=$(docker inspect --format '{{.State.Health.Status}}' aite-core-1)
+            eh=$(docker inspect --format '{{.State.Health.Status}}' aite-edge-1)
+            echo "[$i] core=$ch edge=$eh"
+            [ "$ch" = healthy ] && [ "$eh" = healthy ] && break
+            [ "$i" = 40 ] && { echo "120s 内没都转 healthy"; exit 1; }
+            sleep 3
+          done
+          # ---- blocker 4：两个 socket 都要落在共享命名卷 /app/data/run 里
+          docker compose exec -T edge ls -l /app/data/run/
+          docker compose exec -T edge test -S /app/data/run/aite-edge.sock
+          docker compose exec -T edge test -S /app/data/run/aite-core.sock
+          # ---- blocker 3：进程 cwd 必须是仓库根
+          test "$(docker compose exec -T core pwd | tr -d '\r')" = /app
+          test "$(docker compose exec -T edge pwd | tr -d '\r')" = /app
+          # ---- blocker 1：运行层里压根没有工具链，也就不存在「登录 shell 洗掉 PATH」
+          docker compose exec -T core sh -c '! command -v cargo && ! command -v protoc'
+          docker compose exec -T edge sh -c '! command -v go'
+          # ---- 真连上了：core 侧四行起飞日志
+          # `--no-color` 只关 compose 自己那个 `core-1 |` 前缀的着色，**管不到应用吐的字节**：
+          # core 的 tracing fmt 默认开 ANSI，日志里 `socket=` 长这样
+          # `^[[3msocket^[[0m^[[2m=^[[0m/app/...`，所以「edge.connected socket=/app/...」
+          # 这种紧挨着的字面量 grep **一定不中**（实测）。先把 ANSI 剥掉再断言。
+          # （NO_COLOR=1 也能从源头关掉，实测有效；但那是启动期决定，而人看
+          #  `docker compose logs -f` 时颜色是有用的，所以颜色留着、在这里剥。）
+          docker compose logs --no-color core | perl -pe 's/\e\[[0-9;]*m//g' > /tmp/core.log
+          grep -q 'edge.connected socket=/app/data/run/aite-edge.sock' /tmp/core.log
+          grep -q 'aite.edge_status' /tmp/core.log
+          grep -q 'ingress.listening socket=/app/data/run/aite-core.sock' /tmp/core.log
+          grep -q 'aite.up ' /tmp/core.log
+          # ---- 没有崩溃循环
+          test "$(docker inspect --format '{{.RestartCount}}' aite-core-1)" = 0
+          test "$(docker inspect --format '{{.RestartCount}}' aite-edge-1)" = 0
+
+      - name: "红了把两边日志都打出来"
+        if: failure()
+        run: |
+          docker compose ps -a || true
+          docker compose logs --no-color --tail=200 core edge | perl -pe 's/\e\[[0-9;]*m//g' || true
+          docker inspect --format '{{.Name}} {{.State.Status}} rc={{.RestartCount}} exit={{.State.ExitCode}}' \
+            aite-core-1 aite-edge-1 || true
+
+      - name: "收干净"
+        if: always()
+        run: |
+          docker compose down -v || true
+          test "$(docker ps -a --filter label=aite.task -q | wc -l | tr -d ' ')" = 0

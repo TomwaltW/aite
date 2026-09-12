@@ -5,10 +5,12 @@
 #   core（Rust，`aite run`）  监听 data/run/aite-core.sock  —— IngressService
 #   edge（Go，`aite-edge`）   监听 data/run/aite-edge.sock  —— Platform/Sandbox/EdgeStatus
 #
-# 沙箱不是这里的 service —— 它由 **edge** 用 Docker client 按任务起**兄弟容器**
+# 沙箱不是这里的常驻 service —— 它由 **edge** 用 Docker client 按任务起**兄弟容器**
 # （标签 `aite.task=<task_id>`），所以只有 edge 需要 /var/run/docker.sock。
 # core 这一侧压根不认识 Docker，别给它挂（多挂一份就是白白多一个提权面）。
-# 镜像 `aite-sandbox:p0` 由 `docker build -t aite-sandbox:p0 docker/sandbox` 单独构建。
+# 镜像 `aite-sandbox:p0` 由下面那个 `sandbox-image` service 建（profile: images）——
+# edge 只 `ImageInspect`、**不 pull**（edge/internal/sandbox/docker.go:168-172），
+# 镜像不在就报「沙箱镜像不存在」。所以起飞前必须先建好它，`make compose-up` 会连它一起建。
 #
 # **只跑一个副本**：同一飞书应用的多副本长连接只有一个能收到事件（Python spec 附录 A 末条）。
 # 这条约束现在落在 edge 上 —— 它才是拿着长连接的那个。
@@ -17,61 +19,94 @@
 # 所以刻意**不写 depends_on** —— 谁先起都行，先起的那个会等另一个。
 # core 起飞时会问一次 edge 的 `GetStatus`：`contract_version` 不等就拒绝起飞；
 # 问不到（edge 还没起）就记一行 `aite.edge_unreachable` 照常起飞。
+# 下面两个 healthcheck 也**不许**被拿去当启动顺序用（不加
+# `depends_on: condition: service_healthy`）—— 它们只是让人在 `docker compose ps` 里
+# 看得见谁就绪，不是排序机制。
 #
 # 密钥一律走环境变量，compose 文件里只出现变量名，而且**按进程分**：
 # 飞书三项只有 edge 用得上（出站入站都在它那儿），模型密钥只有 core 用得上。
 # 本地用法：把取值放进仓库根的 .env，或直接 export 后再 docker compose up。
 # ⚠️ `docker compose config` 会把 `${VAR}` **解析成取值**再打出来 —— 它的完整输出是带密钥的，
 #    别往回执/工单/聊天里贴。要给人看用 `docker compose config --services`，
-#    或者 `env -u FEISHU_APP_SECRET -u AITE_MODEL_API_KEY docker compose config`。
+#    要校验语法用 `env -u FEISHU_APP_ID -u FEISHU_APP_SECRET -u FEISHU_BOT_OPEN_ID \
+#    -u AITE_MODEL_API_KEY docker compose config -q`（Makefile 的 compose-config 就是这个口径）。
 #
-# P0 的构建形态沿用 Python 版那套「把仓库挂进去、在容器里现编」——
-# 仓库里没有 core/edge 的 Dockerfile，也没到要做多阶段镜像的时候。
-# 代价是每次重启都重编一次（cargo/go 的缓存放在命名卷里，第二次很快）。
+# **构建形态（2026-09-12 V1 改）**：真镜像，两个多阶段 Dockerfile。
+# 上一版是「把仓库挂进去、在容器里现编」，代价被低估了三处，现在都没了：
 #
-# 两条 command 的写法有三处是**踩过坑才这么写的**，别顺手改回去：
+# 1. `cargo build` 的产物落进宿主机仓库的 `core/target`（本机实测 6.5G）。linux 与 darwin
+#    两个 host triple 挤同一个目录：`.fingerprint`/`deps` 按 triple 分所以不会互相重编，
+#    但 **`target/debug/` 下的顶层 uplift 产物是后编者覆盖前编者** —— 容器编完那一刻，
+#    宿主机的 `core/target/debug/aite` 是个 ELF，scripts/check.sh 与 docs/acceptance-M.md
+#    里所有直接 exec 它的命令全报 exec format error，直到有人在宿主机上再 `cargo build` 一次。
+#    现在编译在 builder 阶段、`CARGO_TARGET_DIR=/target`，仓库树一个字节都不碰。
+# 2. Go 的 module 缓存在容器层（只给了 GOCACHE 的卷，没给 /go/pkg/mod），
+#    `down` 之后再 `up` 把 233M 依赖重下一遍（实测每个新容器 12–14s）。
+#    现在走 builder 阶段的 BuildKit cache mount。
+# 3. 运行层带着整条 Rust/Go 工具链。现在是 debian:trixie-slim + 一个二进制。
 #
-# 1. `bash -c`，**不是 `-lc`**。`-l` 会 source /etc/profile，Debian 的 profile 把 PATH
-#    重置成系统默认，官方镜像的工具链（/usr/local/go/bin、/usr/local/cargo/bin）不在里面 ——
-#    `go` / `cargo` 当场 command not found（exit 127）。脚本第一行还是显式 export 了一次 PATH，
-#    这样哪天真有人把 -l 加回来也炸不了。
-# 2. 两个进程都**以 /app（仓库根）为 cwd** exec。config/aite.yaml 里的路径按契约全是
-#    相对仓库根的（worker.system_prompt_path、storage.sqlite_path、edge.*_socket）——
-#    在 /app/core 或 /app/edge 里 exec，core 会在 require_system_prompt 就 StartupError 退 2，
-#    edge 会把 socket 建到 /app/edge/data/run/（那儿不是共享卷），两个进程永远连不上。
-#    所以是 `cd <子目录> && 编译 && cd /app && exec ...`，working_dir 也都写 /app。
-# 3. core 要现装 protoc（rust 镜像里没有，core/crates/proto 的 build.rs 必须要）。
-#    来源与 CI 的 arduino/setup-protoc@v3（version: "31.x"）同一个：protocolbuffers/protobuf
-#    的官方 release 二进制。装进 CARGO_HOME 那个命名卷，重启不重下。
+# 编译期踩过的三个坑，改成真镜像之后是**从形态上**没了，不是靠写法绕开的
+# （逐条证据见 review/paste-V1.md 的回执）：
+#   · 登录 shell 洗掉 PATH  → 运行层 `ENTRYPOINT ["aite"]` 直接 exec 二进制，不过 shell；
+#                              运行层里压根没有 cargo / go
+#   · rust 镜像里没 protoc → 编译全在 builder 阶段，运行层不编东西
+#   · cwd 必须是 /app      → Dockerfile 的 `WORKDIR /app` + 这里的 `working_dir: /app`
+#   · socket 落对地方       → 共享命名卷仍然挂 /app/data/run，两边 working_dir 都是 /app
 name: aite
 
 services:
   edge:
     # 对外连接面：飞书长连接 + REST、Docker 沙箱
-    image: golang:1.27
-    # 仓库根，不是 /app/edge：socket / 配置里的路径全相对仓库根（见抬头第 2 条）
+    build:
+      context: .
+      dockerfile: docker/edge/Dockerfile
+    image: aite-edge:p0
+    # 仓库根，不是 /app/edge：socket / 配置里的路径全相对仓库根
     working_dir: /app
-    command:
-      - bash
-      - -c
-      - |
-        set -e
-        export PATH=/usr/local/go/bin:/go/bin:$$PATH
-        cd edge && go build -o /usr/local/bin/aite-edge ./cmd/aite-edge
-        cd /app && exec aite-edge --config config/aite.yaml
+    # 默认两个 service 吃同一份 config/aite.yaml —— 那是真机验收（docs/acceptance-M.md）
+    # 的形态，别的都别想。两个环境变量只是给「要让两边吃不同配置」的场合留的口子：
+    # core 与 edge 读的是**同一个 platform 字段**，而 `platform: fake` 对两边的含义相反
+    # （core 拒绝起飞、edge 不起长连接只提供 gRPC 面），所以 CI 冒烟与没有飞书凭证的
+    # 本机要两边同时真起，只能给 edge 换一份 platform: fake 的配置。
+    command: ["--config", "${AITE_EDGE_CONFIG:-config/aite.yaml}"]
     environment:
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_BOT_OPEN_ID: ${FEISHU_BOT_OPEN_ID:-}
-      GOCACHE: /gocache
     volumes:
-      - ./:/app
-      # 两个 socket 都落在这里，两个 service 共享它
+      # 真配置 config/aite.yaml 不入库（.gitignore:14），只能挂进来。
+      # 挂的是整个目录而不是那一个文件：文件不存在时 docker 会替你建一个**同名空目录**，
+      # 那种错比「配置读不到」难查得多。
+      - ./config:/app/config:ro
+      # data/ 必须是 bind mount：SQLite 与证据链要在宿主机上看得到，
+      # 否则 docs/acceptance-M.md §0.3 的第二个观察窗（evidence show）直接废掉。
+      - ./data:/app/data
+      # 两个 socket 都落在这里，两个 service 共享它（比 ./data 那层更深，所以盖住它）
       - run:/app/data/run
       # 沙箱是兄弟容器：只有 edge 需要 docker daemon
       - /var/run/docker.sock:/var/run/docker.sock
-      - gocache:/gocache
+    # edge 的 gRPC server 注册了标准 health（internal/server/server.go:38-40），
+    # 与三个业务服务同一个 unix socket。探针二进制烤在镜像里（docker/edge/Dockerfile）。
+    healthcheck:
+      test:
+        - CMD
+        - grpc-health-probe
+        - -addr=unix:///app/data/run/aite-edge.sock
+        - -connect-timeout=2s
+        - -rpc-timeout=2s
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      # 真镜像之后起飞是秒级（不再现编）。给 15s 是留给 daemon 慢的机器，
+      # 不是计时器 —— 崩溃循环靠 restart 计数看，不靠这个。
+      start_period: 15s
     restart: unless-stopped
+    # 默认 json-file 驱动**无上限**，配 restart: unless-stopped，崩溃循环时日志涨得很快。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # edge 的收尾：GracefulStop gRPC（上限 10s）→ 关长连接（上限 5s）→ 还沙箱
     stop_grace_period: 20s
     deploy:
@@ -79,45 +114,66 @@ services:
 
   core:
     # 状态与判定面：路由、会话、worker、证据、模型
-    image: rust:1.98
+    build:
+      context: .
+      dockerfile: docker/core/Dockerfile
+    image: aite-core:p0
     working_dir: /app
-    command:
-      - bash
-      - -c
-      - |
-        set -e
-        export PATH=/usr/local/cargo/bin:/cargo/protoc/bin:$$PATH
-        if ! command -v protoc >/dev/null 2>&1; then
-          v=31.1
-          case "$$(uname -m)" in aarch64|arm64) a=aarch_64 ;; *) a=x86_64 ;; esac
-          curl -fsSL -o /tmp/protoc.zip \
-            "https://github.com/protocolbuffers/protobuf/releases/download/v$$v/protoc-$$v-linux-$$a.zip"
-          unzip -q -o /tmp/protoc.zip -d /cargo/protoc
-          rm -f /tmp/protoc.zip
-        fi
-        protoc --version
-        cd core && cargo build --workspace
-        cd /app && exec core/target/debug/aite run --config config/aite.yaml
+    # 见 edge 那边同一条注释：默认就是 config/aite.yaml。
+    command: ["run", "--config", "${AITE_CORE_CONFIG:-config/aite.yaml}"]
     environment:
       AITE_MODEL_API_KEY: ${AITE_MODEL_API_KEY:-}
       RUST_LOG: ${RUST_LOG:-info}
-      CARGO_HOME: /cargo
     volumes:
-      # 源码与 config/aite.yaml 一起挂进去；data/ 在仓库里，落盘的 SQLite 与
-      # evidence 因此在宿主机上直接看得到（StorageConfig 的默认路径）
-      - ./:/app
+      - ./config:/app/config:ro
+      - ./data:/app/data
       - run:/app/data/run
-      - cargo:/cargo
+    # core 的 ingress **没有** gRPC health service（edge-client/src/ingress.rs 只
+    # add_service(IngressServiceServer)），`aite` 也没有 status 子命令。所以判据是
+    # 「ingress socket connect 得上」——`ingress.listening` 是起飞的最后一步，
+    # connect 得上就等于前面每一步都过了。
+    # 必须真 connect，不能 `test -S`：优雅退出（SIGTERM）那条路 ingress.stop() 会把
+    # socket 文件自己收掉，但 SIGKILL / panic / OOM 这条路不走 stop()，文件就留在命名卷里
+    # （ingress.rs 的「删残留」只在下次 bind 时才跑）。实测：SIGKILL 之后
+    # `test -S` 返回 0（假绿），`nc -U -z` 是 Connection refused、退 1。
+    # 判据**刻意不依赖 edge**：edge 没起时 core 记一行 aite.edge_unreachable 照常起飞，
+    # 那是正常状态，不是不健康。
+    healthcheck:
+      test: ["CMD", "nc", "-U", "-z", "/app/data/run/aite-core.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      # edge 压根没起时 core 会先退避重试 GetStatus（attempts=5），记一行
+      # aite.edge_unreachable 再照常起飞 —— 实测从 `up -d core` 到 healthy 是 5s。
+      # 给 15s 是留给 daemon 慢的机器，不是计时器。
+      start_period: 15s
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     # 对齐 `run_app` 的 DEFAULT_SHUTDOWN_GRACE_SEC = 20.0：
     # SIGTERM 之后 core 要把在跑的任务收完（platform.stop → plane.join(20s) → 还沙箱 → 关库）
     stop_grace_period: 20s
     deploy:
       replicas: 1
 
+  # 沙箱镜像 —— **只为 build 存在的 service**，不是常驻进程。
+  # 放在 profile 里：`docker compose up` / `docker compose config --services` 都看不见它
+  # （CI 那条 `grep -qx 'core edge '` 因此不受影响），只有点名带 profile 才建：
+  #   docker compose --profile images build sandbox-image
+  # 内容归 R2，这里一个字都不改，只是把「一条命令起得来」补齐。
+  sandbox-image:
+    profiles: ["images"]
+    image: aite-sandbox:p0
+    build:
+      context: docker/sandbox
+    # 万一真被 up 起来，让它立刻干净退出，别变成一个 sleep infinity 的僵尸
+    command: ["true"]
+    restart: "no"
+
 volumes:
-  # 两个进程的 unix socket。用命名卷而不是让它跟着 ./ 那份 bind mount 走：
+  # 两个进程的 unix socket。用命名卷而不是让它跟着 ./data 那份 bind mount 走：
   # socket 是进程间的运行期产物，不该往宿主机仓库里落（.gitignore 也挡着 /data/run/）。
   run:
-  cargo:
-  gocache:
