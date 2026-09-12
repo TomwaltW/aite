@@ -30,9 +30,9 @@ use std::time::{Duration, Instant};
 
 use aite_contracts::{
     AiteConfig, CONTRACT_VERSION, ExecRequest, Message, ModelConfig, ModelProvider, Role,
-    SandboxError, SandboxErrorKind, SandboxNetwork, SandboxSpec,
+    SandboxError, SandboxErrorKind, SandboxNetwork, SandboxPort, SandboxSpec,
 };
-use aite_edge_client::EdgeClient;
+use aite_edge_client::{EdgeClient, EdgeStatus};
 use aite_models::{OpenAiCompatModel, cost_of, env_snapshot, resolve_api_key};
 use serde_json::{Map, Value, json};
 
@@ -69,6 +69,11 @@ const SANDBOX_PROBE_TIMEOUT_SEC: u32 = 60;
 
 /// 取值短于这个长度的不做脱敏替换 —— 那种东西本来也不是密钥，
 /// 而拿一两个字符去全局 replace 会把正常输出打成马赛克。
+///
+/// 按**字符**数算，不是字节数（[`Redactor::add`]）。这是个取舍：只有 2–3 个字符的
+/// 取值此后不再被抹。理由是「2–3 个字符的东西不是密钥」，而按字节算会让两个汉字
+/// （6 字节）过闸 —— 于是自检输出里凡出现这两个字都被替换掉，排障最需要说人话的
+/// 时刻反被自己的脱敏闸打成马赛克。Python 原版 `len()` 数的就是字符。
 const MIN_REDACT_LEN: usize = 4;
 
 /// 标题列宽（按显示宽度，中文算 2）。
@@ -209,7 +214,9 @@ impl Redactor {
 
     pub fn add(&mut self, value: &str, label: &str) {
         let value = value.trim();
-        if value.len() < MIN_REDACT_LEN || self.items.iter().any(|(v, _)| v == value) {
+        // 数字符不数字节：`"配置".len()` 是 6，按字节算它就过闸了，于是任何输出里
+        // 出现「配置」两个字都会被替换成占位符（见 [`MIN_REDACT_LEN`]）。
+        if value.chars().count() < MIN_REDACT_LEN || self.items.iter().any(|(v, _)| v == value) {
             return;
         }
         self.items.push((value.to_string(), label.to_string()));
@@ -247,6 +254,33 @@ impl Redactor {
 // --------------------------------------------------------------------------
 // 小工具
 // --------------------------------------------------------------------------
+
+/// 把 `source()` 链一路拼进消息 —— 不拼的话三种完全不同的网络病打出来一模一样。
+///
+/// `reqwest::Error` 的 `Display` 只写 kind + url，真正的原因（连接被拒 / DNS 解析不了 /
+/// TLS 被中间设备换掉 / 代理不通）全在链上。实测：`HTTPS_PROXY=http://127.0.0.1:9`
+/// （端口关着）和 `HTTPS_PROXY=http://no-such-proxy-host.invalid:8080`（主机名解析不了）
+/// 这两种病，改之前打出来逐字相同：
+/// `换 tenant_access_token 失败：error sending request for url (https://open.feishu.cn/...)`。
+/// 总管拿到这一行，不知道该去查代理、查 DNS 还是查公司的 TLS 拦截 ——
+/// 而 `docs/acceptance-M.md` §0.1 说的是「任一 FAIL 就别往下走」，这一行就是他唯一的线索。
+///
+/// 链尾才是根因，所以拼在后面：[`tail`] 截的也是尾巴，截完根因还在。
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let msg = s.to_string();
+        // 上游常把下一层的 Display 原样嵌进自己的消息里（hyper / rustls 都这么干），
+        // 拼两遍只会更难读。
+        if !msg.is_empty() && !out.contains(&msg) {
+            out.push_str(" ← ");
+            out.push_str(&msg);
+        }
+        cur = s.source();
+    }
+    out
+}
 
 /// 错误输出只留尾巴 —— 自检行是给人一眼扫的，完整栈去看日志。
 fn tail(text: &str, limit: usize) -> String {
@@ -302,6 +336,24 @@ pub fn env_var_names(cfg: &AiteConfig) -> Vec<(String, String)> {
     }
     walk(&value, "", &mut out);
     out
+}
+
+/// 把名字表点到的每个环境变量的取值都交给 [`Redactor`]。
+///
+/// 吃的是 `[(字段路径, 变量名)]` 而不是 `&AiteConfig`，因为名字表的**唯一**来源是
+/// [`env_var_names`] 那套泛化扫描。写死那四个字段的话，契约哪天加第 5 个 `*_env`，
+/// 第 2 组会自动报它「在不在」，而 [`Redactor`] 永远不认识它的取值 —— 脱敏静默漏，
+/// 且没有任何一条测试会红。
+fn arm_redactor(
+    redactor: &mut Redactor,
+    names: &[(String, String)],
+    env: &HashMap<String, String>,
+) {
+    for (_field, var) in names {
+        if let Some(value) = env.get(var) {
+            redactor.add(value, var);
+        }
+    }
 }
 
 // --------------------------------------------------------------------------
@@ -498,7 +550,7 @@ async fn check_feishu(
                 token: fail(
                     "feishu_token",
                     "飞书凭证有效",
-                    format!("HTTP 客户端建不起来：{}", tail(&e.to_string(), 300)),
+                    format!("HTTP 客户端建不起来：{}", tail(&error_chain(&e), 300)),
                 )
                 .with_fix("这行连同上面的输出一起报告 —— 不是环境的问题"),
                 identity: skipped(
@@ -560,7 +612,7 @@ async fn check_feishu_token(
                         "飞书凭证有效",
                         format!(
                             "换 tenant_access_token 的响应读不懂：{}",
-                            tail(&e.to_string(), 300)
+                            tail(&error_chain(&e), 300)
                         ),
                     )
                     .with_fix("确认 base 域名是 open.feishu.cn，本机没有被代理改写响应"),
@@ -573,7 +625,10 @@ async fn check_feishu_token(
                 fail(
                     "feishu_token",
                     "飞书凭证有效",
-                    format!("换 tenant_access_token 失败：{}", tail(&e.to_string(), 300)),
+                    format!(
+                        "换 tenant_access_token 失败：{}",
+                        tail(&error_chain(&e), 300)
+                    ),
                 )
                 .with_fix("先确认本机能出网访问 open.feishu.cn，再核对两个凭证环境变量"),
                 None,
@@ -647,7 +702,7 @@ async fn check_feishu_identity(
             return fail(
                 "feishu_identity",
                 title,
-                format!("查机器人信息失败：{}", tail(&e.to_string(), 300)),
+                format!("查机器人信息失败：{}", tail(&error_chain(&e), 300)),
             )
             .with_fix(format!("确认应用开了机器人能力；接口 GET {PATH_BOT_INFO}"));
         }
@@ -763,7 +818,7 @@ async fn probe_history_scope(
             return Note {
                 name: "feishu_group_history_scope",
                 status: "unverified",
-                detail: format!("§3.7(b) 探测没跑成：{}", tail(&e.to_string(), 300)),
+                detail: format!("§3.7(b) 探测没跑成：{}", tail(&error_chain(&e), 300)),
             };
         }
     };
@@ -866,7 +921,7 @@ async fn check_model(
     let model = match OpenAiCompatModel::from_config(mcfg, env) {
         Ok(m) => m,
         Err(e) => {
-            return fail("model", title, tail(&e.to_string(), 300))
+            return fail("model", title, tail(&error_chain(&e), 300))
                 .with_fix("按上面那句把 config 的 model 段补齐");
         }
     };
@@ -896,7 +951,7 @@ async fn check_model(
             ));
         }
         Ok(Err(e)) => {
-            return fail("model", title, tail(&e.to_string(), 300)).with_fix(format!(
+            return fail("model", title, tail(&error_chain(&e), 300)).with_fix(format!(
                 "401/403 → 换 {} 的取值；404 → 核对 model.base_url 结尾是否要带 /v1、\
                  model.model={} 这个模型名在该厂商是否存在",
                 mcfg.api_key_env, mcfg.model
@@ -962,7 +1017,7 @@ async fn check_sandbox(cfg: &AiteConfig, repo_root: &Path) -> CheckResult {
             return fail(
                 "sandbox",
                 title,
-                format!("连不上 edge：{}", tail(&e.to_string(), 300)),
+                format!("连不上 edge：{}", tail(&error_chain(&e), 300)),
             )
             .with_fix("先起 `aite-edge --config <配置>`（它才是认识 Docker 的那一侧）")
             .with_extra(extra);
@@ -977,13 +1032,29 @@ async fn check_sandbox(cfg: &AiteConfig, repo_root: &Path) -> CheckResult {
                 format!(
                     "edge 不应答（{}）：{}",
                     repo_root.join(&cfg.edge.edge_socket).display(),
-                    tail(&e.to_string(), 300)
+                    tail(&error_chain(&e), 300)
                 ),
             )
             .with_fix("先起 `aite-edge --config <配置>`；起着的话看它的日志为什么不应答")
             .with_extra(extra);
         }
     };
+    if let Some(verdict) = edge_status_verdict(title, &status, &mut extra) {
+        return verdict;
+    }
+    probe_sandbox(&*edge.sandbox(), cfg, extra).await
+}
+
+/// `EdgeStatus` 上那两条判据：两边契约版本要一致、docker daemon 要可达。
+///
+/// 抽出来是为了不起真 edge 就能造出「daemon 挂了」的现场（Python 那边的
+/// `test_docker_daemon_down_is_one_fail_row_not_a_crash`）。返回 `Some` = 这一组已经
+/// 有结论了，别再往下探容器。
+fn edge_status_verdict(
+    title: &'static str,
+    status: &EdgeStatus,
+    extra: &mut Map<String, Value>,
+) -> Option<CheckResult> {
     extra.insert("edge_version".into(), json!(status.version));
     extra.insert(
         "edge_contract_version".into(),
@@ -991,28 +1062,44 @@ async fn check_sandbox(cfg: &AiteConfig, repo_root: &Path) -> CheckResult {
     );
     extra.insert("sandbox_ok".into(), json!(status.sandbox_ok));
     if status.contract_version != CONTRACT_VERSION {
-        return fail(
-            "sandbox",
-            title,
-            format!(
-                "两边契约版本不一致：core {CONTRACT_VERSION} vs edge {}",
-                status.contract_version
-            ),
-        )
-        .with_fix("两个进程要一起升：重新 `cargo build` + `go build` 之后再起")
-        .with_extra(extra);
+        return Some(
+            fail(
+                "sandbox",
+                title,
+                format!(
+                    "两边契约版本不一致：core {CONTRACT_VERSION} vs edge {}",
+                    status.contract_version
+                ),
+            )
+            .with_fix("两个进程要一起升：重新 `cargo build` + `go build` 之后再起")
+            .with_extra(extra.clone()),
+        );
     }
     if !status.sandbox_ok {
-        return fail(
-            "sandbox",
-            title,
-            "edge 连得上，但它报 docker daemon 不可达（EdgeStatus.sandbox_ok=false）",
-        )
-        .with_fix("启动 Docker Desktop（或 `colima start`），`docker info` 能出东西再重跑；容器化部署要把 /var/run/docker.sock 挂给 edge")
-        .with_extra(extra);
+        return Some(
+            fail(
+                "sandbox",
+                title,
+                "edge 连得上，但它报 docker daemon 不可达（EdgeStatus.sandbox_ok=false）",
+            )
+            .with_fix("启动 Docker Desktop（或 `colima start`），`docker info` 能出东西再重跑；容器化部署要把 /var/run/docker.sock 挂给 edge")
+            .with_extra(extra.clone()),
+        );
     }
+    None
+}
 
-    let sandbox = edge.sandbox();
+/// 拿到 [`SandboxPort`] 之后的那一段：起容器 → 跑四个 import → **一定收掉**。
+///
+/// 吃 `&dyn SandboxPort` 而不是自己 `EdgeClient::connect`：这一段是第 6 组最值钱的
+/// 部分（收尾顺序、探针炸掉、缺包、镜像不在），而真造这四种现场要一台能按需坏掉的
+/// docker。抽出来之后，测试拿一个自写的假 `SandboxPort` 就能把四条判据分支都走一遍。
+async fn probe_sandbox(
+    sandbox: &dyn SandboxPort,
+    cfg: &AiteConfig,
+    mut extra: Map<String, Value>,
+) -> CheckResult {
+    let title = "沙箱可用";
     let task_id = format!("preflight-{}", short_nonce());
     extra.insert("task_id".into(), json!(task_id));
     let mut spec: SandboxSpec = sandbox_spec_of(cfg);
@@ -1212,10 +1299,14 @@ fn check_storage(cfg: &AiteConfig, repo_root: &Path) -> CheckResult {
             repo_root.join(p)
         }
     };
+    // 卡住的那层恰好**就是**仓库根时，`strip_prefix` 得到的是空路径，`display()` 出
+    // 空串 —— 打出来是「写不下去：data/aite.db（卡在 ）」，总管看不出卡在哪一层。
+    // 空串回退成绝对路径：那一行本来就是要拿去 `ls -ld` 的。
     let rel = |p: &Path| -> String {
-        p.strip_prefix(repo_root)
-            .map(|r| r.display().to_string())
-            .unwrap_or_else(|_| p.display().to_string())
+        match p.strip_prefix(repo_root) {
+            Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
+            _ => p.display().to_string(),
+        }
     };
 
     let mut bad: Vec<String> = Vec::new();
@@ -1279,6 +1370,18 @@ fn check_storage(cfg: &AiteConfig, repo_root: &Path) -> CheckResult {
 }
 
 /// 目录写得进去吗。不用 libc 的 access() —— 真建一个临时条目再删掉，问的就是要问的那件事。
+///
+/// **副作用是明知故犯的**，记在这儿免得下一个人当 bug 修掉：这一发会在「三个落盘路径
+/// 的最近已存在祖先」里真建一个 `.aite-preflight-<nonce>` 目录再删掉。真机上
+/// `evidence_dir` / `artifacts_dir` 已经存在时，探针就落在它们里面。
+///
+/// 留着的理由：`access(2)` 在 macOS 上对 ACL、只读挂载、以及容器里的 bind mount 都判不准，
+/// 而 preflight 的全部价值就是「别让总管在飞书群里瞎试」—— 一个判不准的第 7 组比没有
+/// 第 7 组更害人。真写一次是唯一诚实的问法，而 preflight 本来就是起飞前跑的。
+///
+/// 代价（也是残留面）：进程恰好在 `create_dir` 与 `remove_dir` 之间被 kill，会留下一个
+/// 空目录。它不进任何判据、不影响起飞，下次 `rm -rf` 掉即可 —— nonce 让它不会撞名，
+/// 也就不会把上一次的残留误判成「写得进去」。
 fn writable_dir(dir: &Path) -> bool {
     let probe = dir.join(format!(".aite-preflight-{}", short_nonce()));
     match std::fs::create_dir(&probe) {
@@ -1315,6 +1418,14 @@ pub async fn run_checks(
         .map(|r| r.display().to_string())
         .unwrap_or_else(|_| config_path.display().to_string());
 
+    // 装料必须赶在 `check_config` 之前。配置读不出来时走的是下面那条早退路径，而
+    // `redactor.add()` 原本的五个调用点全在第 3/4/5 组里 —— 那条路上一个都到不了，
+    // [`Redactor`] 是空的。偏偏 `check_config` 的 FAIL detail 回显的是 serde_yaml 的
+    // 错误，**它会把出错的标量原样打出来**：真机上最典型的形态就是用户把 app_secret
+    // 粘进了 `config/aite.yaml`，于是自检一边教他「密钥只写环境变量名，不写取值」，
+    // 一边把取值打在屏幕上。这里先按契约默认的那几个 `*_env` 兜一遍。
+    arm_redactor(redactor, &env_var_names(&AiteConfig::default()), env);
+
     let mut notes: Vec<Note> = Vec::new();
     let (cfg_result, cfg) = check_config(&config_path, fell_back);
     let mut checks = vec![cfg_result];
@@ -1339,6 +1450,8 @@ pub async fn run_checks(
         };
     };
 
+    // 真 config 可以把 `*_env` 指到默认之外的名字上，上面那遍兜不住，按它再补一遍。
+    arm_redactor(redactor, &env_var_names(&cfg), env);
     checks.push(check_env(&cfg, env, opts.offline));
 
     if opts.offline {
@@ -1604,6 +1717,8 @@ pub fn run(argv: Vec<String>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 产品代码没显式提到它（`exec()` 的返回类型是推断出来的），只有测试要造探针结果。
+    use aite_contracts::ExecResult;
 
     /// 假取值。真密钥一个字都不会出现在这个文件里。
     const FAKE_KEY: &str = "sk-preflight-unit-fake-key";
@@ -1827,5 +1942,673 @@ mod tests {
         assert!(r.detail.contains("容器已收干净"), "{}", r.detail);
         assert_eq!(r.extra["released"], json!(true));
         assert_eq!(r.extra["sandbox_gone"], json!(false));
+    }
+
+    // =======================================================================
+    // 以下为 V2 接管 Python `tests/scripts/test_preflight.py`（564 行 / 25 条）的部分。
+    //
+    // 分工：私有函数（`check_*` / `probe_sandbox` / `arm_redactor` / `error_chain`）钉在
+    // 这里；公开面（`run_checks` / `render_*` / 七行齐不齐 / 脱敏端到端）钉在
+    // `tests/preflight_e2e.rs`，那边有一台按 path 路由的 HTTP 假服务。
+    // =======================================================================
+
+    /// 一条能自己嵌套的假错误，用来造 `source()` 链。
+    #[derive(Debug)]
+    struct Layer(String, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|inner| inner as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    fn layer(msg: &str, inner: Option<Layer>) -> Layer {
+        Layer(msg.to_string(), inner.map(Box::new))
+    }
+
+    /// 链要一路走到底 —— 根因在最后一层，而 `Display` 只给得出第一层。
+    ///
+    /// 这就是 §6.2 那条的根：`reqwest::Error` 的 Display 只写 kind + url，于是「代理端口
+    /// 关着」「代理主机名解析不了」「TLS 被中间设备换掉」三种病打出来一模一样。
+    #[test]
+    fn error_chain_walks_all_the_way_down() {
+        let e = layer(
+            "error sending request for url (https://open.feishu.cn/…)",
+            Some(layer(
+                "client error (Connect)",
+                Some(layer(
+                    "tcp connect error: Connection refused (os error 61)",
+                    None,
+                )),
+            )),
+        );
+
+        let out = error_chain(&e);
+
+        assert!(out.starts_with("error sending request"), "{out}");
+        assert!(
+            out.contains("Connection refused (os error 61)"),
+            "根因没拼上，这条链等于白走：{out}"
+        );
+        // 自检行还要过 tail()，截的是尾巴 —— 根因必须活到截断之后。
+        assert!(
+            tail(&out, 60).contains("Connection refused"),
+            "根因被 tail 截掉了，那拼链就白拼：{}",
+            tail(&out, 60)
+        );
+    }
+
+    /// 上游常把下一层的 `Display` 原样嵌进自己的消息里（hyper / rustls 都这么干），
+    /// 拼两遍只会更难读。
+    #[test]
+    fn error_chain_skips_a_layer_the_parent_already_quoted() {
+        let e = layer(
+            "dns error: failed to lookup address information",
+            Some(layer("failed to lookup address information", None)),
+        );
+
+        let out = error_chain(&e);
+
+        assert_eq!(
+            out.matches("failed to lookup address information").count(),
+            1,
+            "{out}"
+        );
+        assert!(!out.contains(" ← "), "重复的一层不该拼进来：{out}");
+    }
+
+    // ---- 脱敏：字符闸（§6.5）与装料（§6.3 / §6.4）--------------------------
+
+    /// [`MIN_REDACT_LEN`] 数的是**字符**不是字节。
+    ///
+    /// 改之前 `"配置".len()` 是 6，两个汉字就过闸 —— 于是自检输出里凡出现「配置」两个字
+    /// 都被替换掉。真跑出来的样子（`AITE_MODEL_API_KEY` 恰好设成了「配置」两个字）：
+    /// 「配置不全，缺：model.base_url / model.model」变成
+    /// 「«AITE_MODEL_API_KEY 的取值已隐去»不全，缺：…」，第 6 组的「怎么补」里
+    /// 「aite-edge --config <配置文件>」也被打成同样的马赛克。preflight 最该说人话的
+    /// 时刻，反被自己的脱敏闸打烂。
+    ///
+    /// [`scrub_leaves_values_shorter_than_the_floor_alone`] 那条用的是
+    /// `"x".repeat(MIN_REDACT_LEN)`，字节与字符恰好一致，钉不住这一条。
+    #[test]
+    fn the_floor_counts_characters_not_bytes() {
+        let mut r = Redactor::new();
+        r.add("配置", "AITE_MODEL_API_KEY");
+
+        assert_eq!(
+            r.scrub("配置不全，缺：model.base_url / model.model"),
+            "配置不全，缺：model.base_url / model.model"
+        );
+
+        // 边界的另一头：正好 MIN_REDACT_LEN 个**字符**的非 ASCII 取值照样要抹掉。
+        let four_chars = "配置密钥";
+        assert_eq!(four_chars.chars().count(), MIN_REDACT_LEN);
+        assert!(
+            four_chars.len() > MIN_REDACT_LEN,
+            "这条边界得靠多字节才有意义"
+        );
+        let mut long = Redactor::new();
+        long.add(four_chars, "AITE_MODEL_API_KEY");
+
+        let out = long.scrub(&format!("v={four_chars}"));
+
+        assert!(!out.contains(four_chars), "{out}");
+        assert!(out.contains(PLACEHOLDER), "{out}");
+    }
+
+    /// 对拍 Python 的 `test_env_var_names_covers_every_env_field`，但判据换了个写法。
+    ///
+    /// Python 那条是快照（「等于那四个名字」）。照搬的话，契约加第 5 个 `*_env` 的那天
+    /// 它会红 —— 可红的是**测试过期**，不是**脱敏漏了**，读的人还得先分辨是哪一种。
+    /// 这里钉的是那层恒等关系：[`env_var_names`] 报出来的每一项，只要环境里有取值，
+    /// [`Redactor`] 就必须认得它。名字表里多出来的那一项就是「契约以后加的第 5 个
+    /// `*_env`」—— 把 [`arm_redactor`] 改回写死 `cfg.feishu.app_id_env` 那四个字段，
+    /// 这一条立刻红，而契约真加第 5 个的那天它自动跟着覆盖，不用改一个字。
+    #[test]
+    fn arm_redactor_covers_every_name_the_contract_reports() {
+        let cfg = AiteConfig::default();
+        let mut names = env_var_names(&cfg);
+        assert!(names.len() >= 4, "契约至少点名四个 *_env：{names:?}");
+        names.push((
+            "future.some_new_token_env".to_string(),
+            "AITE_FUTURE_FAKE_TOKEN".to_string(),
+        ));
+
+        let env: HashMap<String, String> = names
+            .iter()
+            .enumerate()
+            .map(|(i, (_f, var))| (var.clone(), format!("fake-value-{i}-for-{var}")))
+            .collect();
+        let mut r = Redactor::new();
+        arm_redactor(&mut r, &names, &env);
+
+        for (field, var) in &names {
+            let value = &env[var];
+            let out = r.scrub(&format!("上游回显了 {value}"));
+            assert!(
+                !out.contains(value.as_str()),
+                "{field}（{var}）的取值没进脱敏表：{out}"
+            );
+            assert!(out.contains(PLACEHOLDER), "{out}");
+        }
+    }
+
+    /// 环境里没有的变量不占位 —— 空取值进了表会把 [`Redactor::scrub`] 变成噪音源。
+    #[test]
+    fn arm_redactor_ignores_names_with_no_value_in_the_environment() {
+        let names = vec![(
+            "model.api_key_env".to_string(),
+            "AITE_UNSET_FAKE".to_string(),
+        )];
+        let mut r = Redactor::new();
+
+        arm_redactor(&mut r, &names, &HashMap::new());
+
+        assert_eq!(r.scrub("原样不动的一句话"), "原样不动的一句话");
+    }
+
+    // ---- 第 1 / 2 组 -------------------------------------------------------
+
+    /// 对拍 Python 的 `test_bad_config_fails_but_still_reports_seven_rows` 的前一半：
+    /// yaml 读不懂就是 FAIL，且不许交出一个半成品 config。
+    #[test]
+    fn check_config_fails_on_a_yaml_it_cannot_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bad = root.path().join("bad.yaml");
+        std::fs::write(&bad, "platform: 不存在的平台\n").expect("write");
+
+        let (r, cfg) = check_config(&bad, false);
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(cfg.is_none(), "读不出来就不该交出 config");
+        assert!(
+            r.fix.contains("密钥只写环境变量名，不写取值"),
+            "「怎么补」要把红线说出来：{}",
+            r.fix
+        );
+    }
+
+    /// 对拍 Python 的 `test_missing_env_var_fails_and_names_it`：非 offline 下缺变量就是
+    /// FAIL，而且要**点名**缺的那一个 —— 点名这件事本身就是判据的一半。
+    #[test]
+    fn check_env_fails_and_names_the_missing_var() {
+        let cfg = AiteConfig::default();
+        let names = env_var_names(&cfg);
+        let env: HashMap<String, String> = names
+            .iter()
+            .filter(|(_f, var)| var != &cfg.feishu.bot_open_id_env)
+            .map(|(_f, var)| (var.clone(), format!("fake-value-for-{var}")))
+            .collect();
+
+        let r = check_env(&cfg, &env, false);
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(
+            r.detail.contains(&format!("1/{} 个未设置", names.len())),
+            "{}",
+            r.detail
+        );
+        assert!(
+            r.detail.contains(&cfg.feishu.bot_open_id_env),
+            "{}",
+            r.detail
+        );
+        assert_eq!(r.extra["missing"], json!([cfg.feishu.bot_open_id_env]));
+        assert!(
+            r.fix.starts_with("export "),
+            "「怎么补」要能直接粘：{}",
+            r.fix
+        );
+        // 红线：第 2 组只报「在不在」，一个取值都不许出现。
+        for value in env.values() {
+            assert!(!r.detail.contains(value), "第 2 组打出了取值：{}", r.detail);
+            assert!(!r.fix.contains(value), "第 2 组打出了取值：{}", r.fix);
+        }
+    }
+
+    /// 对拍 Python 的 `test_offline_with_no_credentials_still_exits_zero`：
+    /// CI 和没凭证的机器上要能跑 —— 缺变量降成 WARN，但一个名字都不少报。
+    #[test]
+    fn check_env_downgrades_to_warn_offline_but_names_them_all() {
+        let cfg = AiteConfig::default();
+
+        let r = check_env(&cfg, &HashMap::new(), true);
+
+        assert_eq!(r.status, Status::Warn, "{}", r.detail);
+        assert!(!r.failed(), "WARN 不该拦起飞");
+        for (_field, var) in env_var_names(&cfg) {
+            assert!(r.detail.contains(&var), "少报了 {var}：{}", r.detail);
+        }
+        assert_eq!(r.extra["offline_downgraded"], json!(true));
+    }
+
+    // ---- 第 3 / 4 组：前置未满足 -------------------------------------------
+
+    /// 对拍 Python 的 `test_missing_feishu_creds_block_checks_three_and_four`：
+    /// 本机（没凭证）跑出来的就是这个分支 —— 两组都 FAIL，且说清是前置没满足。
+    ///
+    /// 「一个包都不发」这件事是这么钉住的：`blocked()` 早退在 `reqwest::Client::builder()`
+    /// **之前**，所以拿到的必须是「前置未满足」而不是任何网络错误。`domain` 给一个
+    /// 真发就会连接被拒的地址，真发出去了 detail 会变成另一句话，这条就红。
+    #[tokio::test]
+    async fn check_feishu_blocks_three_and_four_without_sending_anything() {
+        let cfg = AiteConfig::default();
+        let mut r = Redactor::new();
+
+        let outcome = check_feishu(&cfg, &HashMap::new(), &mut r, None, "http://127.0.0.1:1").await;
+
+        for c in [&outcome.token, &outcome.identity] {
+            assert_eq!(c.status, Status::Fail, "{}", c.detail);
+            assert!(c.detail.contains("前置未满足"), "{}", c.detail);
+            assert!(c.detail.contains(&cfg.feishu.app_id_env), "{}", c.detail);
+            assert!(
+                c.detail.contains(&cfg.feishu.app_secret_env),
+                "{}",
+                c.detail
+            );
+        }
+        assert_eq!(outcome.notes.len(), 2, "§3.7 那两条提示行照样要在");
+    }
+
+    // ---- 第 6 组：假沙箱 ---------------------------------------------------
+
+    /// 自写的假 [`SandboxPort`]：造得出「镜像不在」「探针炸了」「缺包」「release 失败」
+    /// 四种现场，并**按调用顺序记账** —— 收尾的先后顺序是这一组最值钱的判据。
+    ///
+    /// 为什么不用 `aite-testing` 的 `FakeSandbox`：它没有「让 release 失败」的开关，
+    /// 而 `core/crates/testing/**` 不在本轨的可写面上。
+    struct StubSandbox {
+        acquire_err: Option<SandboxError>,
+        exec_result: Result<ExecResult, SandboxError>,
+        release_err: Option<SandboxError>,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl StubSandbox {
+        /// 一切正常：容器起得来、四个 import 跑得通、收得掉。
+        fn green() -> Self {
+            Self {
+                acquire_err: None,
+                exec_result: Ok(probe_ok()),
+                release_err: None,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn exec(mut self, r: Result<ExecResult, SandboxError>) -> Self {
+            self.exec_result = r;
+            self
+        }
+        fn acquire_fails(mut self, e: SandboxError) -> Self {
+            self.acquire_err = Some(e);
+            self
+        }
+        fn release_fails(mut self, e: SandboxError) -> Self {
+            self.release_err = Some(e);
+            self
+        }
+        fn log(&self, what: &str) {
+            self.calls.lock().expect("calls").push(what.to_string());
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("calls").clone()
+        }
+        fn at(&self, what: &str) -> Option<usize> {
+            self.calls().iter().position(|c| c == what)
+        }
+    }
+
+    /// 探针跑通时容器回的那一行。
+    fn probe_ok() -> ExecResult {
+        exec_result(
+            0,
+            &format!(
+                r#"{SANDBOX_PROBE_MARK} {{"pandas":"2.2.3","matplotlib":"3.9.2","openpyxl":"3.1.5","docx":"1.1.2"}}"#
+            ),
+            "",
+        )
+    }
+
+    fn exec_result(exit_code: i32, stdout: &str, stderr: &str) -> ExecResult {
+        ExecResult {
+            exit_code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            duration_ms: 120,
+            truncated: false,
+            files_out: Vec::new(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SandboxPort for StubSandbox {
+        async fn acquire(
+            &self,
+            task_id: &str,
+            _spec: &SandboxSpec,
+        ) -> Result<String, SandboxError> {
+            self.log("acquire");
+            match &self.acquire_err {
+                Some(e) => Err(e.clone()),
+                None => Ok(format!("sb-for-{task_id}")),
+            }
+        }
+        async fn exec(&self, _id: &str, _req: &ExecRequest) -> Result<ExecResult, SandboxError> {
+            self.log("exec");
+            self.exec_result.clone()
+        }
+        async fn list_files(&self, _id: &str) -> Result<Vec<String>, SandboxError> {
+            self.log("list_files");
+            // 真 edge 的 `Release` 先删记账再 `ContainerRemove`，所以收尾之后这一发回的
+            // 就是 NotFound —— 哪怕容器还留在宿主机上。判据不认它，只认 release 自己。
+            Err(SandboxError::new(SandboxErrorKind::NotFound, "沙箱不存在"))
+        }
+        async fn release(&self, _id: &str) -> Result<(), SandboxError> {
+            self.log("release");
+            match &self.release_err {
+                Some(e) => Err(e.clone()),
+                None => Ok(()),
+            }
+        }
+        // 下面四个第 6 组根本不碰。碰了就是 `probe_sandbox` 变了形状，当场炸出来。
+        async fn put_file(&self, _: &str, _: &str, _: &[u8]) -> Result<(), SandboxError> {
+            panic!("第 6 组不该碰 put_file")
+        }
+        async fn get_file(&self, _: &str, _: &str) -> Result<Vec<u8>, SandboxError> {
+            panic!("第 6 组不该碰 get_file")
+        }
+        async fn touch(&self, _: &str) -> Result<(), SandboxError> {
+            panic!("第 6 组不该碰 touch")
+        }
+        async fn reap_idle(&self, _: u32) -> Result<Vec<String>, SandboxError> {
+            panic!("第 6 组不该碰 reap_idle")
+        }
+    }
+
+    /// 一份 storage 指到临时目录的 config。
+    ///
+    /// 整轨硬约束：`core/crates/app/tests/` 一个字节都不许写进仓库的 `data/`
+    /// （`tests/cold_start_to_delivery.rs:220`、`tests/evidence_on_disk.rs:340`）。
+    /// 第 7 组的可写探测是**真建一个目录再删掉**，所以 `storage.*` 一律指到 tempfile。
+    fn cfg_in(root: &Path) -> AiteConfig {
+        let mut cfg = AiteConfig::default();
+        cfg.storage.sqlite_path = root.join("data/aite.db").display().to_string();
+        cfg.storage.evidence_dir = root.join("data/evidence").display().to_string();
+        cfg.storage.artifacts_dir = root.join("data/artifacts").display().to_string();
+        cfg
+    }
+
+    /// 对拍 Python 的 `test_sandbox_releases_container_on_success` +
+    /// `test_json_carries_model_and_sandbox_evidence` 的沙箱那一半。
+    #[tokio::test]
+    async fn probe_sandbox_releases_the_container_on_success() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sandbox = StubSandbox::green();
+
+        let r = probe_sandbox(&sandbox, &cfg_in(root.path()), Map::new()).await;
+
+        assert_eq!(r.status, Status::Ok, "{}", r.detail);
+        assert!(r.detail.contains("容器已收干净"), "{}", r.detail);
+        assert!(sandbox.calls().contains(&"acquire".to_string()), "没起容器");
+        assert!(sandbox.calls().contains(&"release".to_string()), "没收容器");
+        assert_eq!(r.extra["released"], json!(true));
+        assert_eq!(r.extra["sandbox_gone"], json!(true));
+        // 证据：四个包的版本号要带回来（Python 那条断言的是 packages.pandas）。
+        assert_eq!(r.extra["packages"]["pandas"], json!("2.2.3"));
+        assert_eq!(r.extra["packages"]["docx"], json!("1.1.2"));
+        assert!(r.extra["elapsed_ms"].is_number(), "{:?}", r.extra);
+    }
+
+    /// **第 6 组最值钱的一条** —— 对拍 Python 的
+    /// `test_sandbox_releases_container_when_probe_blows_up`：探针炸了，容器照样得收。
+    ///
+    /// 判据是 `exec` 与 `release` 的**先后顺序**：把 `probe_sandbox` 里那两句调换
+    /// （探针一炸就 `return`，不 release），这一条立刻红。自检自己漏容器，比它检出来的
+    /// 问题还讨厌。
+    #[tokio::test]
+    async fn probe_sandbox_releases_the_container_even_when_the_probe_blows_up() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sandbox = StubSandbox::green().exec(Err(SandboxError::new(
+            SandboxErrorKind::Internal,
+            "exec 挂了",
+        )));
+
+        let r = probe_sandbox(&sandbox, &cfg_in(root.path()), Map::new()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(r.detail.contains("探针没跑成"), "{}", r.detail);
+        assert!(
+            sandbox.at("acquire").is_some(),
+            "没起容器，这条用例就没验到收尾：{:?}",
+            sandbox.calls()
+        );
+        assert_eq!(
+            sandbox.at("release"),
+            sandbox.at("exec").map(|i| i + 1),
+            "探针炸了之后紧接着就该 release：{:?}",
+            sandbox.calls()
+        );
+        assert_eq!(r.extra["released"], json!(true));
+    }
+
+    /// 对拍 Python 的 `test_sandbox_fails_when_imports_missing`：镜像缺包就是红，
+    /// 缺的那个包名要带出来，重建命令要能直接粘 —— 而且**照样得把容器收掉**。
+    #[tokio::test]
+    async fn probe_sandbox_fails_when_the_four_imports_are_missing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sandbox = StubSandbox::green().exec(Ok(exec_result(
+            1,
+            "",
+            "ModuleNotFoundError: No module named 'docx'",
+        )));
+
+        let r = probe_sandbox(&sandbox, &cfg_in(root.path()), Map::new()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(r.detail.contains("docx"), "{}", r.detail);
+        assert!(r.fix.contains("docker build"), "{}", r.fix);
+        assert_eq!(
+            r.extra["released"],
+            json!(true),
+            "import 没跑通也得把容器收掉"
+        );
+    }
+
+    /// 退出码是 0 但少了那行标记，同样不算通过 —— 探针的判据是**两条**，不是一条。
+    #[tokio::test]
+    async fn probe_sandbox_fails_when_the_mark_is_missing_even_at_exit_zero() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sandbox = StubSandbox::green().exec(Ok(exec_result(0, "什么都没打印", "")));
+
+        let r = probe_sandbox(&sandbox, &cfg_in(root.path()), Map::new()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert_eq!(r.extra["released"], json!(true));
+    }
+
+    /// 接管 Python 的 `test_missing_image_names_the_build_command`。
+    ///
+    /// 语义在 Rust 侧变了：Python 单独查「镜像在不在」，Rust 把镜像与四个 import 合并成
+    /// 「真起一个容器跑一遍探针」，于是「镜像不在」表现为 `acquire` 失败。判据不变 ——
+    /// 那一行要点名镜像，重建命令要能直接粘。外加一条 Python 没有的：容器都没起来，
+    /// 就不该去 release。
+    #[tokio::test]
+    async fn probe_sandbox_names_the_build_command_when_the_image_is_missing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut cfg = cfg_in(root.path());
+        cfg.sandbox.image = "aite-sandbox:nope".to_string();
+        let sandbox = StubSandbox::green().acquire_fails(SandboxError::new(
+            SandboxErrorKind::Unavailable,
+            "No such image: aite-sandbox:nope",
+        ));
+
+        let r = probe_sandbox(&sandbox, &cfg, Map::new()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(r.detail.contains("aite-sandbox:nope"), "{}", r.detail);
+        assert!(
+            r.fix
+                .contains("docker build -t aite-sandbox:nope docker/sandbox"),
+            "「怎么补」要能直接粘：{}",
+            r.fix
+        );
+        assert!(
+            sandbox.at("release").is_none(),
+            "容器压根没起来，不该去收：{:?}",
+            sandbox.calls()
+        );
+    }
+
+    /// 收尾失败那条路走到底：`release()` 说没收掉，这一组就红，并把手动收容器的命令
+    /// 带上真 task_id。[`release_failure_fails_the_row_even_though_edge_already_forgot_the_id`]
+    /// 钉的是判据纯函数，这条钉的是**它真的接在 `probe_sandbox` 上**。
+    #[tokio::test]
+    async fn probe_sandbox_reports_a_release_failure_as_a_red_row() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sandbox = StubSandbox::green().release_fails(SandboxError::new(
+            SandboxErrorKind::Internal,
+            "Error response from daemon: removal already in progress",
+        ));
+
+        let r = probe_sandbox(&sandbox, &cfg_in(root.path()), Map::new()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(!r.detail.contains("容器已收干净"), "{}", r.detail);
+        assert_eq!(r.extra["released"], json!(false));
+        assert!(
+            r.extra["release_error"]
+                .as_str()
+                .is_some_and(|s| s.contains("removal already in progress")),
+            "{:?}",
+            r.extra
+        );
+        assert!(
+            r.fix.contains("docker rm -f"),
+            "「怎么补」要能直接粘：{}",
+            r.fix
+        );
+    }
+
+    fn edge_status(contract: &str, sandbox_ok: bool) -> EdgeStatus {
+        EdgeStatus {
+            version: "unit-fake-edge".to_string(),
+            contract_version: contract.to_string(),
+            platform_connected: true,
+            reconnect_count: 0,
+            sandbox_ok,
+            platform: "fake".to_string(),
+        }
+    }
+
+    /// 对拍 Python 的 `test_docker_daemon_down_is_one_fail_row_not_a_crash`：
+    /// daemon 挂了只红一行，并给出怎么补 —— 后面那组照样跑得到（那一半在
+    /// `tests/preflight_e2e.rs` 的「一项失败不阻断后面的」里钉）。
+    #[test]
+    fn edge_status_verdict_turns_a_dead_daemon_into_one_fail_row() {
+        let mut extra = Map::new();
+
+        let r = edge_status_verdict(
+            "沙箱可用",
+            &edge_status(CONTRACT_VERSION, false),
+            &mut extra,
+        )
+        .expect("daemon 挂了就该当场有结论");
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(r.detail.contains("docker daemon 不可达"), "{}", r.detail);
+        assert!(r.fix.contains("Docker Desktop"), "没给出怎么补：{}", r.fix);
+        assert_eq!(r.extra["sandbox_ok"], json!(false));
+    }
+
+    /// 两边契约版本对不上也是当场红：这时候起容器只会得到更难懂的错。
+    #[test]
+    fn edge_status_verdict_catches_a_contract_version_skew() {
+        let mut extra = Map::new();
+
+        let r = edge_status_verdict("沙箱可用", &edge_status("0.0.0-other", true), &mut extra)
+            .expect("版本对不上就该当场有结论");
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(r.detail.contains(CONTRACT_VERSION), "{}", r.detail);
+        assert!(r.detail.contains("0.0.0-other"), "{}", r.detail);
+    }
+
+    /// edge 是好的就放行，并把三项证据留在 extra 里。
+    #[test]
+    fn edge_status_verdict_lets_a_healthy_edge_through() {
+        let mut extra = Map::new();
+
+        let verdict =
+            edge_status_verdict("沙箱可用", &edge_status(CONTRACT_VERSION, true), &mut extra);
+
+        assert!(verdict.is_none(), "健康的 edge 不该在这里被拦下");
+        assert_eq!(extra["sandbox_ok"], json!(true));
+        assert_eq!(extra["edge_version"], json!("unit-fake-edge"));
+        assert_eq!(extra["edge_contract_version"], json!(CONTRACT_VERSION));
+    }
+
+    // ---- 第 7 组：落盘 -----------------------------------------------------
+
+    /// 对拍 Python 的 `test_storage_fails_when_ancestor_not_writable`，外加 §6.6(a)：
+    /// 卡住的那层恰好**就是** `repo_root` 时，改之前 `rel()` 出的是空串，打出来是
+    /// 「写不下去：data/aite.db（卡在 ）」—— 总管看不出卡在哪一层。
+    ///
+    /// 别在测试里 chmod 仓库自己的目录，用 tempfile 建一个。
+    #[test]
+    fn check_storage_fails_and_says_which_layer_is_stuck() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let locked = root.path().join("locked");
+        std::fs::create_dir(&locked).expect("mkdir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+        // config 用相对路径 → 三个目标都落在 `locked` 下面，而最近的已存在祖先就是
+        // `locked` 自己 —— 正是「卡住的那层就是 repo_root」这个现场。
+        let r = check_storage(&AiteConfig::default(), &locked);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(r.detail.contains("写不下去"), "{}", r.detail);
+        assert!(
+            !r.detail.contains("（卡在 ）"),
+            "卡在哪一层要说得出来，不能是空串：{}",
+            r.detail
+        );
+        assert!(
+            r.detail.contains(&locked.display().to_string()),
+            "卡住的那层要指得出来：{}",
+            r.detail
+        );
+        assert_eq!(
+            r.extra["storage.sqlite_path"]["existing_ancestor"],
+            json!(locked.display().to_string())
+        );
+    }
+
+    /// 对拍 Python 的 `test_storage_ok_when_parent_missing_but_creatable`：判据是
+    /// 「落得下去」而不是「已经在」—— evidence writer 和 store 都会自建目录。
+    #[test]
+    fn check_storage_is_ok_when_the_parent_is_missing_but_creatable() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert!(!root.path().join("data").exists());
+
+        let r = check_storage(&AiteConfig::default(), root.path());
+
+        assert_eq!(r.status, Status::Ok, "{}", r.detail);
+        assert!(r.detail.contains("待建"), "{}", r.detail);
+        assert_eq!(r.extra["storage.evidence_dir"]["writable"], json!(true));
+        assert!(
+            !root.path().join("data").exists(),
+            "第 7 组只是探测，不该真把 data/ 建出来"
+        );
     }
 }
