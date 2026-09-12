@@ -277,3 +277,45 @@ async fn cancel_before_dispatch_never_reaches_the_worker() {
     let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
     assert_eq!(saved.status, TaskStatus::Cancelled);
 }
+
+/// `task_done()` 是 drop-safe 的（RΩ 补，对应 Python 的 `finally`）。
+///
+/// 收尾时 `runner.abort()` 会在任意一个 await 点把 `run_one` 整条 future 丢掉，
+/// 而 `join()` 等的就是这一笔计数。漏一次 → 队列永远清不空 —— 真机上表现为
+/// 「每次优雅退出都卡满 20s 宽限期」，而且 `!status` 之后那句 pending 数永远不归零。
+///
+/// 拆掉 `TaskDoneGuard` 实测这条会在 `join` 那一步超时。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aborting_the_runner_still_marks_the_task_done() {
+    let h = Harness::new();
+    // WaitForCancel 会一直等 is_cancelled 变真 —— 没人取消它，就等于卡在 worker 手上
+    let worker = ScriptedWorker::new(
+        h.store.clone(),
+        h.platform.clone(),
+        vec![WorkerAction::WaitForCancel],
+    );
+    let plane = h.plane_builder().worker(worker.clone()).build();
+
+    plane
+        .handle_event(ev().text("一个收不完的活").build())
+        .await
+        .expect("建任务");
+    assert_eq!(plane.pending(), 1);
+
+    let handle = {
+        let plane = plane.clone();
+        tokio::spawn(async move { plane.run_forever().await })
+    };
+    within("worker 领走任务", async {
+        while worker.calls().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    assert_eq!(plane.pending(), 0, "已经从队列里取走了");
+
+    handle.abort();
+    let _ = handle.await;
+
+    within("abort 之后 join 立刻返回", plane.join()).await;
+}

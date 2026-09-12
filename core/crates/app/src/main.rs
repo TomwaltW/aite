@@ -1,5 +1,10 @@
 //! `aite` —— core 侧唯一的可执行入口。子命令一律转发到各 crate 的 cli::run，
 //! 所以各轨落地时不需要动这个文件（R0 归属；要加子命令 → 停下报告）。
+//!
+//! RΩ 改了三处，都是"把转发接上"而不是加子命令：
+//!   run / preflight  → 从 `not implemented` 换成 `aite_app::{cli, preflight}::run`
+//!   evals            → 从 `cli::run(args)` 换成 `cli::run_with_wiring(args, &wiring)`，
+//!                      把真 ControlPlane / 真模型 / 真沙箱的工厂注进去（§要做什么 ③）
 mod lock;
 
 use clap::{Parser, Subcommand};
@@ -58,10 +63,7 @@ enum ContractsCmd {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.cmd {
-        Cmd::Run { args } => {
-            eprintln!("not implemented: aite run（RΩ 组装）args={args:?}");
-            2
-        }
+        Cmd::Run { args } => aite_app::cli::run(args),
         Cmd::Contracts {
             cmd: ContractsCmd::Lock { check, write, repo },
         } => {
@@ -78,12 +80,17 @@ fn main() {
                 }
             }
         }
-        Cmd::Evals { args } => aite_evals::cli::run(args),
+        Cmd::Evals { args } => match aite_app::wiring::evals_wiring(&args) {
+            Ok(wiring) => aite_evals::cli::run_with_wiring(args, &wiring),
+            // 接线本身起不来（配置读不出来 / edge 连不上 / live 模型配置缺一样）：
+            // 一行人话 + 退出码 2，与 `cli` 自己的「起不来」一个口径。
+            Err(e) => {
+                eprintln!("{e}");
+                2
+            }
+        },
         Cmd::Evidence { args } => aite_evidence::cli::run(args),
-        Cmd::Preflight { args } => {
-            eprintln!("not implemented: aite preflight（RΩ）args={args:?}");
-            2
-        }
+        Cmd::Preflight { args } => aite_app::preflight::run(args),
     };
     std::process::exit(code);
 }

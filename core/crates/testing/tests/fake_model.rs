@@ -2,6 +2,7 @@
 //! 脚本化出牌、repeat、hold、那条纯文本兜底的牌造得出来。
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use aite_contracts::{Message, ModelPort, PlatformPort, Role, Usage, all_model_tools};
 use aite_testing::{FakeModel, ScriptStep};
@@ -246,15 +247,35 @@ async fn hold_lets_go_when_the_budget_runs_out() {
 }
 
 /// 确定性的根据：让出的是调度 tick，不是 sleep 真实时间。
-#[tokio::test]
+///
+/// 判据分两条，各挡一类「偷偷睡过去」：
+///
+/// * **虚拟时钟不动**（主判据，确定性）：`start_paused` 把 tokio 时钟冻住，
+///   只有运行时无事可做、且有 timer 在等的时候才会自动把它推到下一个到期点。
+///   `yield_now` 让出的任务立刻又可运行，永远不会触发这个自动推进 —— 于是
+///   「两万个 tick 之后虚拟时钟纹丝不动」就等价于「实现里没有 `tokio::time::sleep`
+///   这类 timer」。这条判据只看时钟有没有跳，和 CPU 忙闲无关，不会随机抖。
+/// * **真实时间兜底**（粗判据）：`std::thread::sleep` 之类的阻塞不走 tokio timer，
+///   虚拟时钟照样不动，只能拿墙钟抓。阈值取 10s —— 两万次 yield 空闲时是毫秒量级、
+///   满载时也就百毫秒量级，离 10s 远得离谱，所以它只在真有秒级阻塞时才响。
+#[tokio::test(start_paused = true)]
 async fn hold_spends_scheduler_ticks_not_wall_clock() {
     let m = model(vec![json!({"text": "x", "hold_ticks": 20000})]);
-    let started = std::time::Instant::now();
+    let virtual_start = tokio::time::Instant::now();
+    let wall_start = std::time::Instant::now();
     chat(&m).await.unwrap();
     assert_eq!(m.hold_ticks_yielded(), 20000);
+
+    let virtual_elapsed = virtual_start.elapsed();
+    assert_eq!(
+        virtual_elapsed,
+        Duration::ZERO,
+        "虚拟时钟走了 {virtual_elapsed:?}：hold 里有 tokio timer sleep，不是纯调度 tick"
+    );
+    let wall_elapsed = wall_start.elapsed();
     assert!(
-        started.elapsed().as_secs_f64() < 1.0,
-        "两万个 tick 花了一秒以上，八成 sleep 了真实时间"
+        wall_elapsed < Duration::from_secs(10),
+        "两万个 tick 花了 {wall_elapsed:?}：八成有 std::thread::sleep 这类阻塞（虚拟时钟抓不到）"
     );
 }
 

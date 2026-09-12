@@ -19,9 +19,9 @@ build:  ## A1/A2 编译 core（Rust）与 edge（Go）
 	cd core && $(CARGO) build --workspace
 	cd edge && $(GO) build ./...
 
-test:  ## B 全量测试：cargo test + go test（要 Docker 的 Go 测试用 -tags docker 单独跑）
+test:  ## B 全量测试：cargo test + go test -race（要 Docker 的 Go 测试用 -tags docker 单独跑）
 	cd core && $(CARGO) test --workspace --no-fail-fast
-	cd edge && $(GO) test ./... -count=1
+	cd edge && $(GO) test -race ./... -count=1
 
 lint:  ## A4 静态检查：clippy -D warnings、fmt --check、go vet、gofmt
 	cd core && $(CARGO) clippy --workspace --all-targets -- -D warnings
@@ -29,7 +29,7 @@ lint:  ## A4 静态检查：clippy -D warnings、fmt --check、go vet、gofmt
 	cd edge && $(GO) vet ./...
 	@cd edge && test -z "$$(gofmt -l .)" || (echo "gofmt 未通过："; gofmt -l .; exit 1)
 
-lock c2: build  ## A3/C2 契约锁校验（proto/** + core/crates/contracts/** + aite/contracts/**）
+lock c2: build  ## A3/C2 契约锁校验（proto/** + core/crates/contracts/**）
 	$(AITE) contracts lock --check
 
 evals: build  ## B8 跑 P0 场景，最后一行 passed k/10

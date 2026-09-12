@@ -1,189 +1,205 @@
-> **2026-09-11 起：本仓库正在用 Rust + Go 重写。** 权威文档是 `docs/dev-spec-2026-09-11-rustgo.md`。
-> 新代码在 `core/`（Rust，状态与判定面）、`edge/`（Go，飞书与 Docker 对外连接面）、`proto/`（两者的 gRPC 契约）。
-> `aite/`、`tests/`、`pyproject.toml` 这棵 Python 树是**移植参考，只读**，RΩ 合流后整体删除。
-> 常用命令：`make build` / `make test` / `make lint` / `make lock` / `scripts/check.sh`。
-> 下面是 Python 版（P0）的原 README，移植期间仍可按它跑旧代码。
-
 # Aite
 
 飞书单平台闭环 P0：群里 @Aite → 线程绑定会话 → Checklist 卡片原地更新 → 沙箱执行 →
 结果与文件回到线程。
 
-唯一权威文档是 [`docs/dev-spec-2026-09-09.md`](docs/dev-spec-2026-09-09.md)（已冻结）。
+唯一权威文档是 [`docs/dev-spec-2026-09-11-rustgo.md`](docs/dev-spec-2026-09-11-rustgo.md)（已冻结）。
 本 README 只讲「怎么跑起来」；口径冲突时以 spec 为准。
+
+> **2026-09-12：Python 树（`aite/`、`tests/`、`pyproject.toml`、`scripts/*.py`）已整体删除。**
+> 它当过一整轮的移植规格，留下的账在 [`review/inventory-core.md`](review/inventory-core.md)、
+> [`review/inventory-feishu.md`](review/inventory-feishu.md)、
+> [`review/inventory-gateway-evals.md`](review/inventory-gateway-evals.md) ——
+> 那三份是它唯一的存世记录，别删。
+
+## 两个进程
+
+```
+                    ┌──────────── edge（Go，aite-edge）────────────┐
+  飞书 WS 长连接 ──▶│ 归一化 ──▶ IngressService.HandleEvent（1s）──┼──▶ core
+  飞书 REST     ◀──│ PlatformService（发文本 / 卡片 / 文件 / 表情）│◀── core
+  Docker daemon ◀──│ SandboxService（起容器、跑代码、收文件）      │◀── core
+                    └──── 监听 data/run/aite-edge.sock ───────────┘
+
+                    ┌──────────── core（Rust，aite run）───────────┐
+                    │ ControlPlane 路由 → 串行派发 → AgentWorker   │
+                    │ SQLite 会话存储 · 证据链落盘 · 模型客户端    │
+                    └──── 监听 data/run/aite-core.sock ───────────┘
+```
+
+- **状态与判定在 core（Rust）**，**对外连接在 edge（Go）**，两边只通过
+  [`proto/aite/v1/`](proto/aite/v1) 的 gRPC 契约说话（unix socket）。
+- **启动顺序无关**：谁先起都行，另一边按 1→2→…→30s 退避重连，进程不退出。
+  core 起飞时问一次 edge 的 `GetStatus`，`contract_version` 不等就拒绝起飞。
+- **沙箱不是第三个进程**：edge 用 Docker client 按任务起**兄弟容器**
+  （标签 `aite.task=<task_id>`），所以只有 edge 需要 `/var/run/docker.sock`。
+- **单副本**：同一飞书应用的多副本长连接只有一个能收到事件。
 
 ## 环境
 
-- Python **3.12+**（`pyproject.toml` 里 `requires-python = ">=3.12"`）
-- Docker（沙箱要用；不跑沙箱测试时可以没有）
-- 依赖表冻结在 spec §3.0，新增依赖要先找总管
-
-```bash
-python -m venv .venv && . .venv/bin/activate
-python -m pip install -e ".[dev]"
-```
+- rustup（版本钉在 `core/rust-toolchain.toml`）、Go ≥ 1.27、Docker（跑沙箱才要）
+- macOS 上 brew 装的 rustup 把 cargo 放在 `/opt/homebrew/opt/rustup/bin`，
+  Go 插件在 `~/go/bin` —— 两个都要在 `PATH` 上
+- 依赖表冻结在 spec §2.4，新增依赖要先找总管
 
 ## 跑起来
 
 ```bash
 cp config/aite.example.yaml config/aite.yaml     # 按需改；aite.yaml 不入库
-export FEISHU_APP_ID=... FEISHU_APP_SECRET=... FEISHU_BOT_OPEN_ID=...
-export AITE_MODEL_API_KEY=...                    # 变量名由 config 里的 *_env 决定
-python -m aite.app
+export FEISHU_APP_ID=... FEISHU_APP_SECRET=... FEISHU_BOT_OPEN_ID=...   # edge 用
+export AITE_MODEL_API_KEY=...                    # core 用；变量名由 config 的 *_env 决定
+
+docker build -t aite-sandbox:p0 docker/sandbox   # 沙箱镜像
+make build                                       # 编 core + edge
+
+core/target/debug/aite preflight                 # 起飞前自检，七项各一行结论
+edge/bin/aite-edge --config config/aite.yaml &   # 或 cd edge && go run ./cmd/aite-edge
+core/target/debug/aite run                       # 组装并起飞
 ```
 
 **密钥只走环境变量。** 配置文件里存的是变量名（`api_key_env: AITE_MODEL_API_KEY`），
 不是取值 —— 别把密钥写进 `config/aite.yaml`，也别写进代码。
+`aite preflight` 的任何输出都不会出现取值（只报变量在不在）。
 
-容器方式（单副本；同一飞书应用多副本长连接只有一个能收到事件）：
+容器方式：
 
 ```bash
-docker build -t aite-sandbox:p0 docker/sandbox   # 沙箱镜像
-docker compose up -d
+docker compose up -d          # core + edge 两个 service，共享 data/run 卷
 ```
 
-`docker-compose.yml` 把宿主机的 docker socket 挂了进去：沙箱不是 compose 里的
-service，而是由 `aite/sandbox/` 按任务起的兄弟容器（打标签 `aite.task=<task_id>`）。
+> ⚠️ `docker compose config` 会把 `${VAR}` **解析成取值**再打出来，它的完整输出是带密钥的。
+> 要贴给别人用 `docker compose config --services`。
+
+停机：`SIGTERM` 走优雅退出（停投递 → 等在跑的任务善终，宽限 20s → 还沙箱 → 关库），
+退出码 0；**再来一次**信号立刻硬退，退出码 130。
+
+## 命令面
+
+`aite` 是 core 侧唯一的可执行入口：
+
+```bash
+aite run [--config PATH] [--grace SEC] [--traceback]   # 组装并起飞
+aite preflight [--offline] [--json] [--chat-id ID]     # 起飞前自检（七组）
+aite evals run evals/p0 --platform fake --model scripted
+aite evidence show <task_id> [--json] [--list] [--tail N]
+aite contracts lock --check
+```
+
+`aite preflight` 的七组：配置可加载 / 环境变量齐 / 飞书凭证有效 / 机器人身份对得上 /
+模型端点通 / 沙箱可用 / 落盘目录可写。任一 FAIL → 退出 1，**一项失败不阻断后面的**；
+`--offline` 只跑 1、2、7（不碰网络也不碰 docker，CI 用这一档）。
 
 ## 验收
 
-spec §2 那几条，`make` 里一条一个 target，名字就是编号：
+spec §4 那几条，`make` 里一条一个 target：
 
 ```bash
-make check          # A2 A3 A4 A5 C1 + 替身自测 + 场景清单 + compose config
-make a3             # python -m aite.contracts.lock --check
-make a4             # ruff check .
-make a5             # pytest -q --co
-make c1             # pytest tests/contracts -q
-make e2e            # pytest tests/e2e -q
-make evals          # 10 个 P0 场景
-scripts/check.sh    # 同上，但把每条的实际输出都打出来（写回执时用这个）
+make check          # = scripts/check.sh，把每条的实际输出都打出来（写回执用这个）
+make build          # A1/A2
+make lock           # A3/C2 契约锁 --check
+make lint           # A4 clippy -D warnings / fmt --check / go vet / gofmt
+make test           # B 全量 cargo test + go test
+make evals          # B8 十个 P0 场景，最后一行 passed 10/10
 ```
 
-`make` 挑解释器的顺序是 `.venv/bin/python` → `python` → `python3`；
-指定就 `make test PYTHON=/path/to/python`。CI 里用的是 `python`。
+要 Docker 的那两条单独跑：
+
+```bash
+cd edge && go test -tags docker ./internal/sandbox/... -count=1   # B4 真容器
+docker ps -a --filter label=aite.task -q | wc -l                  # 跑完必须是 0
+```
 
 ## 目录
 
 ```
-aite/contracts/     冻结契约（§3.1 数据形状 / §3.2 调用面），改动 = 任务失败
-aite/adapters/      飞书 adapter：长连接、事件归一化、出站
-aite/ingress/       事件入口
-aite/control/       ControlPlane 路由（§3.5 R1-R8）+ SQLite SessionStore
-aite/worker/        Agent Loop、Checklist 协议、产出（§3.6 W1-W9）
-aite/gateway/       Tool Gateway；aite/tools/ 是五个 Gateway 工具
-aite/sandbox/       Docker 沙箱；docker/sandbox/ 是镜像
-aite/evidence/      证据链落盘
-aite/models/        ModelPort 的 live 实现（OpenAI 兼容，指向百炼/智谱）
-aite/testing/       官方测试替身
-aite/evals/         评测 runner
-evals/p0/           §3.8 的 10 个场景
+proto/aite/v1/          冻结契约（跨进程）：events / outbound / capabilities / sandbox / edge
+core/                   Rust workspace
+  crates/contracts      冻结契约：domain 类型 + trait + 常量 + hash / 配置形状
+  crates/proto          tonic 生成代码 + domain↔pb 互转 + gRPC status 映射
+  crates/store          SqliteSessionStore
+  crates/evidence       FileEvidenceWriter + `aite evidence show`
+  crates/control        ControlPlane（路由 R1–R8）+ Ingress + 命令
+  crates/worker         AgentWorker（W1–W9）+ 卡片 + 上下文 + prompts/platform.md
+  crates/models         OpenAI 兼容 ModelPort
+  crates/gateway        P0ToolGateway + 五个工具 + schema 校验
+  crates/edge-client    到 edge 的 gRPC 客户端（两个 Port）+ core 侧 IngressServer
+  crates/testing        官方测试替身 + CallLog + samples
+  crates/evals          评测 runner / 场景 / checks / protocol probe
+  crates/app            `aite` 二进制：组装起飞、preflight、契约锁
+edge/                   Go module
+  internal/feishu       飞书 adapter：长连接、归一化、REST 出站
+  internal/sandbox      Docker 沙箱
+  internal/ingress      edge → core 的客户端
+  cmd/aite-edge         守护进程入口
+evals/p0/               十个验收场景（原文件不动）
+docker/sandbox/         沙箱镜像
+review/inventory-*.md   三份移植清单（Python 树删除后唯一的规格记录）
 ```
 
-## 测试替身（`aite/testing/`）
+## 组装面（`core/crates/app`）
 
-`FakePlatform` / `FakeModel` / `FakeSandbox` / `FakeToolGateway` /
-`FakeSessionStore` / `FakeEvidenceWriter` —— §3.2 六个 Port 的官方替身。
-它们只**记账**不断言：谁被以什么参数调用了全进 `CallLog`，断言留给使用方。
+`build_app(config, injections)` **只组装**：不连网、不起容器、不发消息，唯一的副作用是
+按 `StorageConfig` 建那三个落盘目录。三个口子（platform / model / sandbox）给了就用给的，
+不给才按 config 去连 edge —— `core/crates/app/tests/` 那 50 条集成测试全靠它注入替身，
+测的是**真实接线**而不是替身之间的默契。
 
-```python
-from aite.testing import FakeModel, FakePlatform
+`config.platform: fake` 是「**必须注入**」的标记，不是「内建替身」：不注入就
+`StartupError`，不会去连真实飞书。
 
-platform = FakePlatform(history=[...], documents={...}, files={...})
-model = FakeModel([{"tool_calls": [{"name": "final", "arguments": {"reply": "好了"}}]}])
-...
-assert platform.count("send_card") == 1
-assert platform.update_count >= 3
-assert platform.card_count == 1          # 没有第二条卡片
+`run_app` 的退出序列是冻结的，一步都不跳：
+
+```
+platform.stop()                     先闭嘴，不再收新事件
+plane.join() 限时 grace（默认 20s）  在跑 / 排队的任务收尾
+  超时 → 先抄 worker.in_flight      取消之后就再也问不出它们是谁了
+runner.abort()
+cancel_task(notify=false) × stranded 给硬取消的任务善终（证据 + 卡片 + 还沙箱）
+sandbox.close_all()
+store.close()
 ```
 
-几个刻意做严的地方：
+起飞时还会把**上一条命的残局**收干净（库里 failed + 群里回帖 + 卡片置 failed +
+证据链收口），而且排在 `platform.start()` **之前**。
 
-- `update_card` 只认已存在的 `card_id`，拿别的 id 更新会当场抛错 —— 「原地更新，
-  不新发消息」这条必须在替身层就炸，而不是绕着弯被断言发现。
-- `FakePlatform.read_history` **不**过滤 `sender_kind`（契约注释写死：过滤归
-  Gateway 的 `read_group_history`）。
-- `FakeModel` 支持只回文本、不带任何 tool_call 的出牌，用来验 §3.3 那条兜底
-  （`steps==0` 视为 `final`，`steps>0` 回 system 提示）——**兜底逻辑本身归 worker**。
-- `FakeSandbox` 的时钟可注入，`reap_idle` 因此不用真等 5 分钟。
-
-> 并行开发期间 T1/T2/T3 **不要** import 这个包（§3.4 测试替身规则），各自在
-> `tests/<自己的目录>/` 下写私有替身。这一份是给 `tests/e2e/`、评测 runner 和 TΩ 用的。
-
-## 评测（`aite/evals/`）
+## 评测（`core/crates/evals`）
 
 ```bash
-python -m aite.evals run evals/p0 --list                          # 列出场景名
-python -m aite.evals run evals/p0 --platform fake --model scripted # 跑，最后一行 passed k/10
-python -m aite.evals run evals/p0 --only 04_csv_to_chart --traceback
+aite evals run evals/p0 --list                            # 列出场景名
+aite evals run evals/p0 --platform fake --model scripted  # 最后一行 passed k/10
+aite evals run evals/p0 --only 04_csv_to_chart --traceback
+aite evals run evals/p0 --only 04_csv_to_chart --sandbox docker   # 真容器真跑
+aite evals run evals/p0 --only 04_csv_to_chart --model live       # 真模型
 ```
 
-跑完打印 JSON 摘要，最后一行是 `passed k/10`；全过退出 0，否则 1。
-**每个没过的场景都会给一句人话原因和阶段标记**，不吐异常栈：
+stdout 是「一份 JSON 摘要 + 最后一行 `passed k/10`」；全过退出 0，否则 1，
+参数 / 环境问题 2。**scripted 那一档 stderr 一个字节都没有**（CI 与 `check.sh` 读的就是它）。
+每个没过的场景给一句人话原因和阶段标记（`wiring` / `dispatch` / `drive` / `assert` /
+`error` / `ok`），不吐异常栈。
 
-| phase | 意思 |
-|---|---|
-| `wiring` | 接不上被测系统（某条轨还没合入就停在这里） |
-| `dispatch` | `handle_event` 抛了 |
-| `drive` | `run_forever` 起不来 / 中途炸了 / 超时没静下来 |
-| `assert` | 跑到了，但断言没过（`failures` 里逐条写明期望与实际） |
-| `ok` | 全过 |
+`--sandbox docker` 与 `--model live` 需要 `aite-edge` 在跑（真沙箱在 Go 那一侧）；
+前者起飞前会连 daemon、真起一个容器跑一遍四个 import，不行就一行人话 + 退出 2，
+不会让十个场景各自烂在第一个工具调用上。
 
-### 场景文件长什么样
-
-一个场景 = 喂什么（`events` / `platform` / `sandbox`）+ 模型怎么出牌（`model_script`）
-+ 该看到什么（`expect`）。字段默认值给得很足，只写关心的那几个：
-
-```yaml
-name: 01_simple_qa
-title: 一问一答不发卡片
-verifies: 第一步就 final → 只有 1 条 send_text，没有卡片
-spec_ref: "§3.8 01_simple_qa；§3.6 W3"
-
-events:
-  - {event_id: e1, text: 今天北京天气怎么样, mentioned: true}
-
-model_script:
-  - tool_calls:
-      - {name: final, arguments: {reply: 北京今天晴。}}
-
-expect:
-  - {check: platform_calls, method: send_text, equals: 1}
-  - {check: platform_calls, method: send_card, equals: 0}
-  - {check: task, which: last, status: delivered}
-```
-
-`expect` 的 check 类型见 [`aite/evals/checks.py`](aite/evals/checks.py) 的 `REGISTRY`：
-`platform_calls` / `outbound_total` / `cards` / `text` / `distinct_matches` / `file` /
-`gateway_calls` / `gateway_result` / `model_tools` / `model_calls` / `sandbox_calls` /
-`store` / `task` / `evidence`。比较子统一是 `equals` / `min` / `max`。
-
-### runner 怎么接到被测系统上
-
-`aite/evals/wiring.py` 不写死任何类名，而是运行时发现，按优先级：
-
-1. `aite.control` 暴露 `build_control_plane(**deps)` 工厂（最省事，参数名随便起）
-2. 否则找 `aite.control.plane` 里同时带 `handle_event` 和 `run_forever` 的类，
-   按参数名喂 `config` / `platform` / `model` / `sandbox` / `gateway` / `store` /
-   `evidence`（别名表在 `PARAM_ALIASES`）
-3. 跑起来后优先调 plane 的 `drain()` / `run_until_idle()`；没有就让 `run_forever()`
-   后台跑、轮询到所有替身都不再被调用为止再取消
-
-> §3.2 里没有「跑到队列空为止」这个接口，第 3 条是 runner 自己的兜底。TΩ 接线时
-> 给 plane 加一个 `drain()` 会让评测更确定，也更快。
-
-平台与模型按 `--platform fake --model scripted` 用替身；沙箱、Gateway、
-SessionStore、EvidenceWriter 在 runner 里也用替身，这样评测不依赖 Docker、
-结果可复现。真沙箱由 `pytest tests/sandbox -q -m docker` 单独验（§2.2 B4）。
-
-`--model live` 会用 `config/aite.yaml` 里的模型真跑一遍（模型实测用），
-这时 `model_script` 不生效、`expect` 也不该当验收看。
+场景文件长什么样、`expect` 有哪些 check —— 见 [`evals/README.md`](evals/README.md)。
 
 ## CI
 
-`.github/workflows/ci.yml`，一步一条判据：A1 → A2 → **A3 `lock --check`** →
-**A4 `ruff check .`** → **A5 `pytest -q --co`** → C1 契约测试 → 替身自测 →
-全量测试 → 场景清单 → B8 评测 → `docker compose config`。
+`.github/workflows/ci.yml`，一步一条判据：A1 编译 → A2 编译 → A3 契约锁 →
+A4 lint → A5 测试可编译 → C1 契约测试 → B 全量测试 → B go test `-race` →
+**B8 评测（硬门禁，要 `passed 10/10`）** → compose 双 service 可解析。
 
-B8 那步现在挂着 `continue-on-error: true`：并行期间 T1/T2/T3 还没合进来，
-必然是 `passed 0/10`。TΩ 合流后删掉那一行，它就变成硬门禁。
+## 已知边界
+
+- **卡片上的「停止」「证据」按钮当前不渲染。** lark-oapi-go v3.12.0 在长连接上把非
+  event 帧整条丢弃（`ws/client_message.go:79`），唯一的 `WithCardHandler` 钩子是
+  注释掉的 —— 渲染出来的按钮点了一定没反应，那比不渲染更糟。卡片上改成一行提示
+  ——「要停这个任务：在本话题里回复 `!stop <任务号>`，或在群里发 `@我 !stop <任务号>`」。
+  **提示里的投递条件是必须的**：路由 R5 收命令的条件是「已 @ 机器人」或「已在话题内」，
+  两者都不满足的一条群消息会一路落到 R8「其余丢弃」，用户那边零回复 —— 一句
+  「请在群里发 `!stop`」等于又造了一个点了没反应的按钮。卡片本身是
+  `reply_in_thread=true` 发进任务话题的，所以「在本话题里回复」这条路一定走得通。
+  `!stop` / `!status` 走的是普通消息事件，不受 SDK 那个缺陷影响。
+  渲染那条路（`buildActions`）没删，SDK 放开钩子后改回去即可。
+- **乱序重推的话题追问会被丢弃**：追问被平台重推在它的 root 之前时，到达那一刻话题
+  会话还不存在、它自己又没 @，于是命中路由 R8「其余丢弃」。飞书的重推通常保序，
+  所以这是「乱序时才炸」而不是常态；要补得靠事件级的重排或缓冲，属于路由规则本身要改。

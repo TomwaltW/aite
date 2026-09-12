@@ -19,10 +19,17 @@
 
 ## 0. 先说三件事
 
-### 0.1 这里的 `python` 一律写成 `.venv/bin/python`
+### 0.1 现在是**两个进程**，命令一律写全路径
 
-不是洁癖：本机默认 `python3` 是 3.11，满足不了 `requires-python>=3.12`，
-而 `python` 这个命令在这台 Mac 上压根不存在。照着敲 `python -m aite.app` 会 command not found。
+2026-09-12 起 Python 树已删，演示跑的是 Rust + Go 两个进程：
+
+```bash
+cd edge && go run ./cmd/aite-edge --config ../config/aite.yaml   # 终端 A：飞书 + Docker
+core/target/debug/aite run --config config/aite.yaml             # 终端 B：路由 + worker
+```
+
+谁先起都行（两边都是懒连接 + 退避重连）。命令写全路径而不是靠 PATH：
+`cargo build` 出来的二进制在 `core/target/debug/`，没装到任何全局位置。
 `docs/acceptance-M.md` 也是这个写法，两份对得上。
 
 ### 0.2 「3 分钟」是剪出来的，不是跑出来的
@@ -58,18 +65,21 @@ Claude Tag 不一样的地方就在这儿 —— 一张卡片，从头到尾就�
 
 | | 干什么 | 入镜？ |
 |---|---|---|
-| **A** | 跑常驻进程（`aite.app`） | 入镜，右下小窗 |
+| **A** | 跑 core（`aite run`） | 入镜，右下小窗 |
 | **B** | 容器面板 | 入镜，右上小窗 |
 | **C** | 敲命令（热身、清理、第四幕） | 只有第四幕入镜，全屏 |
+| **D** | 跑 edge（`aite-edge`） | **不入镜**，缩到后台 |
 
-A 窗口里跑着前台进程，**在那儿敲不了字** —— 这就是为什么要第三个窗口。
+A 和 D 窗口里各跑着一个前台进程，**在那儿敲不了字** —— 这就是为什么要第三个窗口。
+D 不入镜是刻意的：观众要看的是群里发生了什么，不是两个进程的日志各刷各的；
+edge 的日志真出事时再切过去（`feishu.reconnected` / `sandbox.acquired` 都在那边）。
 
 ---
 
 **① 起飞前自检 —— 不带 `--offline`**（C 窗口）
 
 ```bash
-.venv/bin/python scripts/preflight.py            # 七组全跑，FAIL 必须是 0
+core/target/debug/aite preflight            # 七组全跑，FAIL 必须是 0
 ```
 
 第 ④ 组（飞书身份对得上）尤其要过：**配错了应用，第一幕会完全静默**，
@@ -98,7 +108,7 @@ docker images aite-sandbox:p0                    # 有一行
 **④ 生成素材**（C 窗口）
 
 ```bash
-.venv/bin/python scripts/demo_fixture.py all
+core/target/debug/aite evals demo-fixture all
 # → /tmp/aite-demo/sales.csv     第二幕的附件，也是 ⑤ 热身要用的那份
 # → /tmp/aite-demo/history.txt   垫场文本，⑦ 要用
 ```
@@ -117,7 +127,7 @@ docker images aite-sandbox:p0                    # 有一行
 A 窗口起飞：
 
 ```bash
-.venv/bin/python -m aite.app --config config/aite.yaml
+core/target/debug/aite run --config config/aite.yaml
 ```
 
 然后把**第二幕原样跑一次**（拖 `sales.csv` 进群、发那句话、等到卡片变绿）。
@@ -141,7 +151,7 @@ docker rm -f $(docker ps -aq --filter label=aite.task)
 热身留下的容器会一直躺在面板里 —— 于是**第一幕「面板保持空」和第二幕「凭空冒出一个容器」
 这两个信号同时失效**，而这两个是全片唯二的现场证据。
 
-> ⚠️ 这条会删掉**所有**带 `aite.task` 标签的容器。别在正跑着 `pytest tests/sandbox`
+> ⚠️ 这条会删掉**所有**带 `aite.task` 标签的容器。别在正跑着 `go test -tags docker ./internal/sandbox/...`
 > 的机器上敲它。演示机上没这个问题。
 
 清 `data/` 的理由：`task_no` 从 `#A1` 重新开始，卡片抬头干净（`#A1` / `#A2` / `#A3`
@@ -171,8 +181,8 @@ while true; do printf '\033[H\033[2J'; date +%H:%M:%S; \
 
 ```bash
 # 确认 C 窗口的当前目录就是仓库根目录 —— ev 里的 config/aite.yaml 是相对路径
-ev()   { .venv/bin/python scripts/evidence_show.py --config config/aite.yaml "$@"; }
-last() { ev --list --json | .venv/bin/python -c 'import json,sys;print(json.load(sys.stdin)["tasks"][0]["task_id"])'; }
+ev()   { core/target/debug/aite evidence show --config config/aite.yaml "$@"; }
+last() { ev --list --json | jq -r '.tasks[0].task_id'; }
 ```
 
 第四幕要敲的就是 `ev --list` 和 `ev $(last)` 两行。
@@ -181,7 +191,7 @@ last() { ev --list --json | .venv/bin/python -c 'import json,sys;print(json.load
 **⑩ A 窗口重新起飞**
 
 ```bash
-.venv/bin/python -m aite.app --config config/aite.yaml
+core/target/debug/aite run --config config/aite.yaml
 ```
 
 **把 `aite.up` 那一行留在屏幕上**（它写着接了谁：platform / model / sandbox / sqlite / evidence）。
@@ -207,7 +217,7 @@ last() { ev --list --json | .venv/bin/python -c 'import json,sys;print(json.load
 │   飞书群窗口         │ (docker ps)  │     │   C 命令窗（全屏）             │
 │   （话题展开）        ├──────────────┤     │     ev --list                │
 │                    │ A 进程日志    │     │     ev $(last)               │
-│      ~65%          │  (aite.app)  │     │                              │
+│      ~65%          │  (aite run)  │     │                              │
 └────────────────────┴──────────────┘     └──────────────────────────────┘
         C 窗口此时不在画面里 ↑                    A / B 此时不在画面里
 ```
@@ -334,7 +344,7 @@ happy path 上全仓只有两条 INFO 会出现：起飞那条 `aite.up`，和 r
 | 时间 | 信号 |
 |---|---|
 | ≤2 秒 | 你那条消息上 👀 |
-| 5–20 秒 | **卡片出现**：蓝色抬头 `#A2 把这个 CSV 画成月度趋势图…`；下面三格「发起人 / 开始于 / 状态：进行中」；再下面几行 ⬜ 待办；底部 note 一行 `已用 N 步 · ¥X.XX`；一个红色「停止」按钮 |
+| 5–20 秒 | **卡片出现**：蓝色抬头 `#A2 把这个 CSV 画成月度趋势图…`；下面三格「发起人 / 开始于 / 状态：进行中」；再下面几行 ⬜ 待办；底部 note **两行**：`已用 N 步 · ¥X.XX`，以及一行「要停这个任务：在本话题里回复 `!stop #A2`…」。**卡片上一个按钮都没有**（见 §6） |
 | 之后每十几秒 | 卡片**原地**变：⬜ 逐个翻成 ✅，footer 的步数和金额在涨。**消息条数不变** |
 | 它下载附件那一步 | 容器面板里**冒出一个容器**，`aite.task` 那列就是这个任务的 id |
 | 收尾三连（顺序固定） | ① 一个 `.png` 文件消息 → ② 一条文本回复 → ③ **卡片抬头由蓝变绿，状态变「已交付」** |
@@ -590,7 +600,7 @@ hash 链   OK · 21 条全部闭合，root_hash 与 manifest 一致
 | **M6 · 重启后旧线程续接** | 同样是「什么都不发生」的 30 秒：杀进程、确认没了、重新起飞、等长连接接上。而且 §1 ⑥ 清空了 `data/`，会话历史本来就没了。留给验收 |
 | **§3.7(a) 的实验（话题里不带 @）** | 第三幕已经说明理由：赌赢了只证明一件观众不关心的事，赌输了是 30 秒死画面。留给验收（`acceptance-M.md` M4 写了怎么判「没投递」还是「投递了被丢」） |
 | **`!status` / `!stop` / `!restart` / `!new`** | 有用，但它们是**操作员**的功能，不是让人看懂这东西凭什么值钱的东西。观众此刻还不是操作员 |
-| **卡片上的「停止」按钮** | 同上。而且卡片上**没有**「证据」按钮（`render_card` 用的是 `actions` 的默认值 `["stop"]`），第四幕的证据是在终端里拿的 —— 现场别去点卡片找证据，找不到 |
+| **卡片上的按钮** | 从 RΩ 起卡片**一个按钮都不渲染**：lark-oapi-go v3.12.0 在长连接上把非 event 帧整条丢弃，「停止」「证据」点了都不会有任何反应，与其给一个死按钮不如不给。卡片底部改成一行文字提示（`!stop`，且点明必须在话题里回复或 @）。第四幕的证据本来就是在终端里拿的 —— 现场别去卡片上找按钮，没有 |
 | **故意篡改证据、演示 hash 链变红** | 很有说服力，但要多花 40 秒，而且要在镜头前 `vi` 一个 jsonl 文件，画面很技术、很啰嗦。第四幕那句「改掉一个字这里就会红」讲到就够了。真被追问，当场演给他看（`acceptance-M.md` §0.3 有命令） |
 
 ---

@@ -652,9 +652,13 @@ impl AgentWorker {
         let mut missing: Vec<String> = Vec::new();
         for art in artifacts {
             let path = plain_string(art.get("path"));
-            let title = {
-                let t = plain_string(art.get("title"));
-                if t.is_empty() { path.clone() } else { t }
+            // Python 是 `str(art.get("title") or art.get("path", ""))`（loop.py:464）：
+            // 退回 `path` 的判据是**真值语义**，不是「字符串化之后为空」。
+            // 弱模型给 `title: false` / `0` / `{}` 时，后者会把标题发成字面量 "false"。
+            let title = if art.get("title").is_some_and(is_truthy) {
+                plain_string(art.get("title"))
+            } else {
+                path.clone()
             };
             let Some(data) = self.fetch_artifact(ctx, &path).await else {
                 missing.push(if title.is_empty() {
@@ -664,15 +668,15 @@ impl AgentWorker {
                 });
                 continue;
             };
-            let mime = {
-                let m = plain_string(art.get("mime"));
-                if m.is_empty() {
-                    mime::guess(&path)
-                        .unwrap_or("application/octet-stream")
-                        .to_string()
-                } else {
-                    m
-                }
+            // 同一条真值语义：Python 是
+            // `art.get("mime") or mimetypes.guess_type(path)[0] or "application/octet-stream"`
+            // （loop.py:469）。
+            let mime = if art.get("mime").is_some_and(is_truthy) {
+                plain_string(art.get("mime"))
+            } else {
+                mime::guess(&path)
+                    .unwrap_or("application/octet-stream")
+                    .to_string()
             };
             let name = Path::new(&path)
                 .file_name()
@@ -975,13 +979,19 @@ fn parse_final(call: &ToolCallRequest) -> Result<(String, Vec<Map<String, Value>
         });
     };
     let artifacts = match args.get("artifacts") {
-        None | Some(Value::Null) => Vec::new(),
+        None => Vec::new(),
         Some(Value::Array(items)) => items
             .iter()
             .filter_map(Value::as_object)
             .filter(|m| m.get("path").is_some_and(is_truthy))
             .cloned()
             .collect(),
+        // Python 是 `raw = args.get("artifacts") or []`（loop.py:634）：**假值**
+        // （`null` / `""` / `{}` / `0` / `false` / `[]`）一律当成「没有产物」照常交付，
+        // 只有**真值但不是数组**才判 invalid_args。
+        // 这条曾经是 Rust 侧的行为翻转：弱模型给 `artifacts: ""` 不罕见，那时 Python
+        // 交付、Rust 退回重来 —— 而这是**交付路径**，退回去的代价是用户什么都收不到。
+        Some(v) if !is_truthy(v) => Vec::new(),
         Some(_) => {
             return Err(FinalError {
                 content: texts::FINAL_ARTIFACTS_MUST_BE_ARRAY,

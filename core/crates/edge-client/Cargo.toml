@@ -10,13 +10,10 @@ publish.workspace = true
 aite-contracts.workspace = true
 aite-proto.workspace = true
 tonic.workspace = true
-tonic-prost.workspace = true
-prost.workspace = true
 tokio.workspace = true
 # net 给 UnixListenerStream（IngressServer 的 incoming）；tonic 的 server feature 也要它
 tokio-stream = { workspace = true, features = ["net"] }
 async-trait.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

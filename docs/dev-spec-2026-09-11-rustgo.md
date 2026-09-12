@@ -132,11 +132,12 @@ review/paste-R*.md                  派单
 
 ## 3. 冻结契约
 
-以下在本轮内不可更改。任何任务需要改动 = 停下来报告，不要自己改。守卫（`.claude/hooks/guard_bash.py`）拦写入；`.contracts.lock` 记 sha256，`core/target/debug/aite contracts lock --check` 必须始终 `OK 36 files`。
+以下在本轮内不可更改。任何任务需要改动 = 停下来报告，不要自己改。守卫（`.claude/hooks/guard_bash.py`）拦写入；`.contracts.lock` 记 sha256，`core/target/debug/aite contracts lock --check` 必须始终 `OK 25 files`。
 
 ### 3.0 锁定面与依赖表
 
-- 锁定：`proto/aite/v1/**`、`core/crates/contracts/**`（Cargo.toml + src + tests）、`aite/contracts/**`（Python 旧契约，RΩ 删除时一并重锁）。
+- 锁定：`proto/aite/v1/**`、`core/crates/contracts/**`（Cargo.toml + src + tests）。
+  （2026-09-12 RΩ 合入时删掉 Python 树，`aite/contracts/**` 一并从锁面摘掉并重锁：36 → 25 = 5 proto + 1 Cargo.toml + 12 源 + 7 测试。）
 - 只读但不入锁：`core/crates/proto/**`、`edge/gen/**`、`edge/internal/{aiteerr,config,server,pin}/**`、`core/Cargo.toml`、`edge/go.mod`、`edge/go.sum`、`.claude/**`、`Makefile`、`scripts/check.sh`、`.github/**`。
 - `CONTRACT_VERSION = "p0.2"`（`core/crates/contracts/src/lib.rs`）；edge 的 `server.ContractVersion` 同值，`GetStatus` 回报，core 起飞时比对。
 
@@ -224,7 +225,7 @@ proto 枚举带前缀（`SENDER_KIND_HUMAN`），零值 `*_UNSPECIFIED` 一律�
 |---|---|---|
 | A1 | `cd core && cargo build --workspace` | 退出码 0 |
 | A2 | `cd edge && go build ./...` | 退出码 0 |
-| A3 | `core/target/debug/aite contracts lock --check` | `OK 36 files`，退出码 0 |
+| A3 | `core/target/debug/aite contracts lock --check` | `OK 25 files`，退出码 0 |
 | A4 | `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --check` / `go vet ./...` / `gofmt -l .` 为空 | 全部退出码 0 |
 | A5 | `cd core && cargo test --workspace --no-run` | 退出码 0（全部测试可编译，对应旧 A5「全仓可收集」） |
 
@@ -246,7 +247,7 @@ proto 枚举带前缀（`SENDER_KIND_HUMAN`），零值 `*_UNSPECIFIED` 一律�
 | # | 命令 | 期望 |
 |---|---|---|
 | C1 | `cd core && cargo test -p aite-contracts` | 通过数不少于 R0 基线（派单里写着 N0），任何轨不得减少 |
-| C2 | `core/target/debug/aite contracts lock --check` | 始终 `OK 36 files`。任何轨让它变红 = 该轨失败 |
+| C2 | `core/target/debug/aite contracts lock --check` | 始终 `OK 25 files`。任何轨让它变红 = 该轨失败 |
 
 ### 4.4 人工验收 M（真实飞书测试群，RΩ 之后由总管跑）
 
