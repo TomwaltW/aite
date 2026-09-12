@@ -1,0 +1,41 @@
+# Docker build context 的排除表（core 与 edge 两个镜像共用，两边 context 都是仓库根）。
+#
+# ⚠️ context 必须是仓库根，而且 **proto/ 绝不能出现在这张表里**：
+# core/crates/proto/build.rs 走的是 CARGO_MANIFEST_DIR/../../../proto，只送 core/ 一个子树
+# 的话 build.rs 当场炸。排掉 proto/ 的症状是 build 红在「protoc 找不到文件」上，而
+# `aite contracts lock --check` 照样绿 —— 很容易误诊成别的毛病，所以专门写在这里。
+#
+# 不排的话 daemon 要先把整个仓库收下来才开始 build，而 core/target 一家就 6.7G（本机实测）。
+
+# --- 构建产物：context 里最大的一块 ---------------------------------------------
+# 两个 host triple 的 .o/.rlib/.fingerprint 全在这儿。镜像里的编译走 builder 阶段
+# 自己的 CARGO_TARGET_DIR，跟宿主机这份没有任何关系。
+core/target/
+edge/bin/
+
+# --- 运行期数据 ----------------------------------------------------------------
+# SQLite、证据链、artifacts、两个 unix socket。镜像里一律靠 bind mount / 命名卷提供
+# （见 docker-compose.yml），烤进去只会是一份过期的脏数据。
+data/
+
+# --- 并行开发的 worktree -------------------------------------------------------
+# 只有主仓工作区里有；每个 worktree 还各带一份自己的 core/target。
+.worktrees/
+
+# --- 本地实配 ------------------------------------------------------------------
+# 含真实取值，不入库（.gitignore:14）。镜像里只烤 config/aite.example.yaml，
+# 真配置由 compose 以 :ro 挂进来。
+config/aite.yaml
+
+# --- 元数据 / 缓存 / 系统垃圾 ---------------------------------------------------
+.git/
+.gitignore
+__pycache__/
+.venv/
+.DS_Store
+
+# --- 纯文档面 ------------------------------------------------------------------
+# 镜像不需要，而且改一行文档不该让 build 缓存失效。
+docs/
+review/
+README.md
