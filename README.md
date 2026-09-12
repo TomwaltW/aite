@@ -7,10 +7,14 @@
 本 README 只讲「怎么跑起来」；口径冲突时以 spec 为准。
 
 > **2026-09-12：Python 树（`aite/`、`tests/`、`pyproject.toml`、`scripts/*.py`）已整体删除。**
-> 它当过一整轮的移植规格，留下的账在 [`review/inventory-core.md`](review/inventory-core.md)、
+> 它当过一整轮的移植规格，代码层面的账记在
+> [`review/inventory-core.md`](review/inventory-core.md)、
 > [`review/inventory-feishu.md`](review/inventory-feishu.md)、
 > [`review/inventory-gateway-evals.md`](review/inventory-gateway-evals.md) ——
-> 那三份是它唯一的存世记录，别删。
+> 那三份是**已删代码**唯一的存世记录，别删。
+> （Python 时代那份 45KB 的规格 [`docs/dev-spec-2026-09-09.md`](docs/dev-spec-2026-09-09.md)
+> **也还在树里、也还是冻结的**：P0 的人工验收 M1–M6 那张表（§2.4）和飞书权限待核实项（§3.7）
+> 就在它里面，所以它不是残留，别当成可以清的东西。`scripts/` 现在只剩 `check.sh` 一个文件。）
 
 ## 两个进程
 
@@ -50,12 +54,25 @@ export FEISHU_APP_ID=... FEISHU_APP_SECRET=... FEISHU_BOT_OPEN_ID=...   # edge �
 export AITE_MODEL_API_KEY=...                    # core 用；变量名由 config 的 *_env 决定
 
 docker build -t aite-sandbox:p0 docker/sandbox   # 沙箱镜像
-make build                                       # 编 core + edge
+make build                                       # 编 core + edge（**不产出 edge 二进制**，见下）
+cd edge && go build -o bin/aite-edge ./cmd/aite-edge && cd ..   # edge 的二进制要自己 -o
 
 core/target/debug/aite preflight                 # 起飞前自检，七项各一行结论
-edge/bin/aite-edge --config config/aite.yaml &   # 或 cd edge && go run ./cmd/aite-edge
+edge/bin/aite-edge --config config/aite.yaml &   # 两个进程都**在仓库根**跑，见下
 core/target/debug/aite run                       # 组装并起飞
 ```
+
+> ⚠️ **两条都必须在仓库根跑，别 `cd edge`。** config 里的相对路径按契约全相对仓库根，
+> 而 edge 把 `edge.edge_socket` 原样交给 `ListenUnix`，后者会 `MkdirAll` 把目录
+> **静默建在当前 cwd 下** —— 在 `edge/` 里起，socket 就落到 `edge/data/run/`，
+> core 去连 `<仓库根>/data/run/`，**两个进程永远连不上，而且两边日志都不报错**。
+> 判据：`ls edge/data` 必须是 `No such file or directory`。
+> 完整复现与起飞日志长什么样见 [`docs/acceptance-M.md`](docs/acceptance-M.md) §0.2。
+>
+> ⚠️ **`make build` 不产出 `edge/bin/aite-edge`。** 它跑的是 `cd edge && go build ./...`，
+> 而 Go 在包列表多于一个时只做编译检查、丢弃产物（`make clean` 里那句 `rm -rf edge/bin`
+> 是个历史遗留）。要二进制就得像上面那样自己给 `-o`。`edge/bin/` 不入库。
+> 不想编二进制就在**仓库根**敲 `go run ./edge/cmd/aite-edge --config config/aite.yaml`。
 
 **密钥只走环境变量。** 配置文件里存的是变量名（`api_key_env: AITE_MODEL_API_KEY`），
 不是取值 —— 别把密钥写进 `config/aite.yaml`，也别写进代码。
@@ -81,13 +98,21 @@ docker compose up -d          # core + edge 两个 service，共享 data/run 卷
 aite run [--config PATH] [--grace SEC] [--traceback]   # 组装并起飞
 aite preflight [--offline] [--json] [--chat-id ID]     # 起飞前自检（七组）
 aite evals run evals/p0 --platform fake --model scripted
-aite evidence show <task_id> [--json] [--list] [--tail N]
+aite evidence show <task_id> [--config PATH] [--list] [--only KINDS] [--tail N] [--json]
 aite contracts lock --check
 ```
 
 `aite preflight` 的七组：配置可加载 / 环境变量齐 / 飞书凭证有效 / 机器人身份对得上 /
 模型端点通 / 沙箱可用 / 落盘目录可写。任一 FAIL → 退出 1，**一项失败不阻断后面的**；
-`--offline` 只跑 1、2、7（不碰网络也不碰 docker，CI 用这一档）。
+`--offline` 只跑 1、2、7（不碰网络也不碰 docker，适合没凭证的机器）。
+`--chat-id <测试群 chat_id>` 会顺带真调一次群历史，回答 spec §3.7(b) 那条待核实项。
+
+> ⚠️ **`--offline` 全绿不等于起得来**：它跳过第 5 组，而配置样例里 `model.base_url` /
+> `model.model` 是空的 —— 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2。
+> 真机起飞前那一遍必须不带 `--offline`。
+>
+> ℹ️ **CI 里目前没有 preflight 这一步**（`ci.yml` 十步全列在下面「CI」那一节）。
+> 要不要加是另一回事，这里只如实说现状。
 
 ## 验收
 
@@ -133,7 +158,10 @@ edge/                   Go module
   cmd/aite-edge         守护进程入口
 evals/p0/               十个验收场景（原文件不动）
 docker/sandbox/         沙箱镜像
-review/inventory-*.md   三份移植清单（Python 树删除后唯一的规格记录）
+review/inventory-*.md   三份移植清单（已删 Python 代码唯一的存世记录）
+docs/dev-spec-*.md      两份冻结规格：2026-09-09 那份带 M1–M6 与飞书权限，09-11 那份是 Rust/Go 重写
+docs/acceptance-M.md    M1–M6 人工验收剧本（真实飞书测试群）
+docs/demo-3min.md       3 分钟演示分镜
 ```
 
 ## 组装面（`core/crates/app`）

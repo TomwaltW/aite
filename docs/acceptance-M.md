@@ -5,7 +5,7 @@
 
 这是 P0 的最后一关，跟自动化测试最大的不同是：**出了问题没有断言告诉你哪一行红了**，
 只有群里一条没回的消息、一张卡在 working 的卡片。所以每条 M 都配了「在哪看」——
-把「看起来不对」变成「哪个环节不对」，靠的是日志、证据链、`docker ps` 这三个窗口。
+把「看起来不对」变成「哪个环节不对」，靠的是日志、证据链、`docker ps` 这几个窗口。
 
 > **2026-09-12（RΩ）：命令已换成 Rust + Go 两进程的口径。** 原文写的是 Python 单进程
 > （`python -m aite.app` / `scripts/preflight.py` / `scripts/evidence_show.py`），那棵树已经删了。
@@ -15,6 +15,22 @@
 >
 > **本轮多出来的一件事：现在要起两个进程。** edge 拿着飞书长连接和 Docker，
 > core 拿着路由、会话、worker。M6 的重启因此要分三种情形各验一遍（见 §6）。
+>
+> **2026-09-12（V3）：本文第一次被人照着从头核过一遍。** RΩ 那一轮是「换敲什么命令」的
+> 批量替换，没人真跑。V3 逐条跑了一遍，改掉的是**照着敲会卡住的地方**：
+>
+> - **§0.2 起飞段重写** —— 原来教人先 `cd edge` 再 `go run ./cmd/aite-edge`，
+>   照那样敲**两个进程永远连不上**，而且两边日志都不报错。
+>   现在两条命令都在仓库根跑，理由与判据都写在里面。
+> - **§0.1 / §0.3 / §7** —— preflight 的期望换成真输出；观察窗从三个变四个
+>   （`feishu.*` 全在 **edge** 那个终端，原文让你盯着 core 那个窗等两行永远不出现的日志）；
+>   §7 那张表加了「哪个进程」一列，并改掉三个**代码里根本不存在**的日志名。
+> - **「纯文本回复（不是卡片）」这句在协议层是假的** —— core 发的每一条文本到飞书都是
+>   `msg_type=interactive`。真的那一半是「没有 checklist 进度卡片」。见 §0.5。
+> - **§3.7 的两条待核实变成了两个编号步骤**：(b) 排在 M1 之前跑（§0.1），(a) 就是 M4。
+>
+> 本轮**没改任何代码**。走查里撞见的代码侧问题按轨转出去了，文中带 `<!-- 台账 -->`
+> 注释的那几行就是记账，对应的轨修掉后连注释一起删。
 
 ---
 
@@ -28,6 +44,40 @@ core/target/debug/aite preflight --offline       # 只跑不需要网络/docker 
 core/target/debug/aite preflight --json          # 机器可读
 ```
 
+四个参数：`--config PATH`（默认 `config/aite.yaml`，不存在则退到 `config/aite.example.yaml`）、
+`--offline`、`--json`、`--chat-id ID`。
+
+> ⚠️ **别敲 `aite preflight --help`，它打不出真选项** —— 被 clap 截胡，只回一句 `[ARGS]...`
+> （退出码 0）。要看手写用法得写成 `aite preflight -- --help`（走 stdout、退出码 0）。
+> `aite run` 那一侧更糟：`aite run -- --help` 走 **stderr**、**退出码 2**。
+> 都是实测。<!-- 台账 §4.4「Rust横切」；V6 ④b 正在改这条，合流后复核本段 -->
+
+`--offline` 的真输出长这样（实测原样；`config/aite.yaml` 由 `config/aite.example.yaml`
+复制而来，环境里只设了 `AITE_MODEL_API_KEY`。唯一的改动是那两行 NOTE 的正文很长，
+在这里省成一句，原文逐字抄在 §0.1.1）：
+
+```
+Aite 起飞前自检
+  配置：config/aite.yaml
+  模式：--offline（只跑 1/2/7）
+  时间：2026-09-12T16:32:01+08:00
+
+[1/7] OK   配置可加载       platform=feishu · model.provider=openai_compat · sandbox.image=aite-sandbox:p0
+[2/7] WARN 环境变量齐       3/4 个未设置：FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_BOT_OPEN_ID（已设置：AITE_MODEL_API_KEY） —— --offline 下不作判据
+           └ 怎么补：真机起飞前去掉 --offline 重跑一次，这几项必须是 OK
+[3/7] SKIP 飞书凭证有效     --offline：不碰网络
+[4/7] SKIP 飞书身份对得上   --offline：不碰网络
+       NOTE §3.7 待核实      §3.7(a) …（见 0.1.1）
+       NOTE §3.7 待核实      §3.7(b) …（见 0.1.1）
+[5/7] SKIP 模型端点通       --offline：不碰网络
+[6/7] SKIP 沙箱可用         --offline：不碰 docker
+[7/7] OK   落盘目录可写     3 个路径都落得下去（data data/evidence data/artifacts 待建，起飞时自动 mkdir）：data/aite.db · data/evidence · data/artifacts
+
+------------------------------------------------------------------------
+汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4（共 7 项，过了 7 项）
+全部没红，可以起飞。（--offline 只验了 1/2/7，真机起飞前请全跑一遍）
+```
+
 七组分别是：① 配置可加载 ② 环境变量齐 ③ 飞书凭证有效 ④ 飞书身份对得上
 ⑤ 模型端点通 ⑥ 沙箱可用 ⑦ 落盘目录可写。**任一 FAIL 就别往下走** —— M1–M6 里
 八成的「没反应」都是这七项里的某一项没配好，在这里花 60 秒比在群里瞎试便宜得多。
@@ -35,41 +85,213 @@ core/target/debug/aite preflight --json          # 机器可读
 第 ④ 组尤其要过：它拿 token 查机器人自身信息、和 `FEISHU_BOT_OPEN_ID` 的取值比对。
 **配错了应用时 M1 会完全静默**（收得到事件但认不出 @ 的是自己），没有任何报错。
 
-### 0.2 起飞（**两个进程**）
+> ⚠️ **`--offline` 全绿 ≠ core 起得来。** 实测：拿 `config/aite.example.yaml` 原样跑
+> `--offline`，上面那份输出是 `FAIL 0`，但 `aite run` 会退出码 2 ——
+> `aite 起不来：模型配置不完整：ModelConfig.base_url 是空的：填百炼 / 智谱的 OpenAI 兼容端点`。
+> 第 1 组只验「配置解析得出来」，管 `base_url` / `model` 有没有填的是**第 5 组**，而 `--offline`
+> 跳过它。所以真机起飞前那一遍**必须不带 `--offline`**。
 
-开两个终端，一个一个：
+#### 0.1.1 第 0 步：先把 §3.7(b) 的结论拿到手（排在 M1 之前，60 秒）
+
+规范 §3.7 留了两个问号，preflight 会在第 4 组之后各打一行 NOTE。**(b) 这条现在就能出结论**，
+而它决定 **M5 演不演**、以及 `docs/demo-3min.md` §5 那段加演进不进 3 分钟版 ——
+在 M5 才发现权限没批，比在这里花 60 秒贵得多。
+
+```bash
+# 不带 --chat-id：只会告诉你「问不出来」
+core/target/debug/aite preflight --offline
+#   NOTE §3.7 待核实   §3.7(b) 群历史是否要「获取群组中所有消息」敏感权限 —— 未核实。
+#   飞书没有「列出本应用已授权范围」的免权限接口，光靠凭证问不出来；
+#   带 --chat-id <测试群 chat_id> 重跑，我就直接调一次群历史给你结论（M5 靠它）。
+
+# 带上测试群的 chat_id（**不能带 --offline**，它要真调一次飞书）：
+core/target/debug/aite preflight --chat-id <测试群 chat_id>
+```
+
+带 `--chat-id` 时 preflight 会**真调一次群历史**（`GET /open-apis/im/v1/messages`，
+`container_id_type=chat&page_size=1`，只取 1 页 1 条）。两种结局的原文写死在代码里
+（`core/crates/app/src/preflight.rs:746-800`），逐字抄在这儿，你看到的就是它：
+
+- **读得到** →
+  > `§3.7(b) 实测：这套凭证**读得到**群历史（chat 返回 N 条，只取了 1 页 1 条）。也就是说当前已授予的权限足够 M5；至于是不是「获取群组中所有消息」那条在起作用，接口不回权限来源，问不出来 —— 但对起飞而言结论已经够用。`
+
+  → **M5 照跑**，`demo-3min.md` §5 那段加演可选。
+
+- **读不到** →
+  > `§3.7(b) 实测：这套凭证读**不到**群历史（code=… msg=…）。去开放平台补权限（读取群历史消息；若提示需要「获取群组中所有消息」则它就是必需的敏感权限，要走审核），补完重跑本项。M5「汇总本群本周开放事项」在此之前一定过不了。`
+
+  → **M5 先别做**，去开放平台补权限；补完重跑本项再说。`demo-3min.md` §5 那段加演砍掉
+  （`demo-3min.md` §5 的「翻车怎么救」里已有这条应对）。
+
+§3.7(a)（话题里不带 @ 的回复会不会投递）**起飞前查不了**，它就是 M4 那个实验 ——
+preflight 的那行 NOTE 自己也这么说：
+
+> `§3.7(a) 只有 @ 权限时话题内不带 @ 的回复是否投递 —— 未核实，且起飞前查不了：要真在话题里发一条不带 @ 的消息、看事件有没有投递才知道，M4 就是那个实验。当前 FEISHU_P0.supports_passive_listen=False（保守取值），M4 请带 @ 先走通。`
+
+### 0.2 起飞（**两个进程，都在仓库根跑**）
+
+> **2026-09-12（V3）改：两条命令都必须在仓库根敲。** 原文写的是先 `cd edge`、
+> 再 `go run ./cmd/aite-edge --config ../config/aite.yaml`，照那样敲
+> **两个进程永远连不上**，而且两边日志都不报错、core 还会照常起飞 ——
+> 群里每一条消息石沉大海。复现与判据见 0.2.3。
+
+#### 0.2.1 先编 edge 的二进制
+
+```bash
+cd edge && go build -o bin/aite-edge ./cmd/aite-edge && cd ..
+```
+
+> ⚠️ **`make build` 不产出这个二进制。** `Makefile:18-20` 的 build 是
+> `cd edge && go build ./...` —— Go 在**包列表多于一个**时只做编译检查、**丢弃产物**。
+> 实测：主仓 `make build` 跑过无数遍，`edge/bin/` 至今不存在（`ls edge/bin` →
+> `No such file or directory`），而 `Makefile:55` 的 clean 里还写着 `rm -rf edge/bin`。
+> 要二进制就得自己给 `-o`。（compose 里的正确写法在 `docker-compose.yml:59`。）
+> `edge/bin/` 在 `.gitignore:21`，不入库。
+
+#### 0.2.2 开两个终端，**两个的当前目录都是仓库根**
 
 ```bash
 # 终端 A —— edge（Go）：飞书长连接 + Docker 沙箱
-cd edge && go run ./cmd/aite-edge --config ../config/aite.yaml
-# 或先 `make build` 再 edge/bin/aite-edge --config config/aite.yaml
+edge/bin/aite-edge --config config/aite.yaml
 
 # 终端 B —— core（Rust）：路由 / 会话 / worker / 证据
 core/target/debug/aite run --config config/aite.yaml
 ```
 
+不想编二进制，`go run` 那条路也留着 —— 但**同样在仓库根跑**，注意 `./edge/...` 这个前缀：
+
+```bash
+go run ./edge/cmd/aite-edge --config config/aite.yaml
+```
+
+**为什么必须在仓库根**（不写理由，下一个人还会 `cd edge`）：config 里的相对路径按契约
+**全部相对仓库根** —— `edge.edge_socket` / `edge.core_socket`、`worker.system_prompt_path`、
+`storage.*`。`edge/cmd/aite-edge/main.go:72` 那个 flag 的帮助文本自己就写着「相对仓库根」。
+坑在两边**解析方式不一样**：
+
+- **core** 拿 `std::env::current_dir()` 当 repo_root（`core/crates/app/src/app.rs:137-141`），
+  再把 socket 解析成**绝对路径**（`core/crates/edge-client/src/lib.rs:96-101` 的 `resolve()`）；
+- **edge** 把配置里的裸相对路径**原样**交给 `ListenUnix`（`main.go:102`），而 `ListenUnix`
+  第一件事是 `os.MkdirAll(filepath.Dir(path), 0o755)`（`edge/internal/server/server.go:21-24`）
+  —— **不管 cwd 在哪都先把目录静默建出来，一声不吭**。
+
+所以在 `edge/` 里起 edge，socket 落到 `edge/data/run/`；core 去连 `<仓库根>/data/run/` ——
+各拿各的 socket。**这个坑 RΩ 在 compose 上已经踩过并修好了**，`docker-compose.yml` 抬头
+注释第 2 条把教训写死在文件里；compose 修了，人手起飞的 runbook 当时没跟上，本轨补。
+
 **谁先起都行**（§2.1 启动顺序无关）：两边都是懒连接 + 1→2→…→30s 退避重连。
-core 起飞时会问一次 edge 的 `GetStatus`：
+core 起飞时会问一次 edge 的 `GetStatus`（最多 5 次、每次间隔 1s，
+`core/crates/app/src/app.rs:38` 的 `EDGE_STATUS_ATTEMPTS = 5`）：
 
 - 答得上且 `contract_version` 一致 → 日志 `aite.edge_status`，接着起飞；
 - 答得上但版本不一致 → **拒绝起飞**，两边版本都印出来（两个进程要一起升）；
-- 五秒内答不上（edge 还没起）→ 记一行 `aite.edge_unreachable` 照常起飞，edge 起来后自动恢复。
+- 五秒内答不上（edge 还没起）→ 记一行 `aite.edge_unreachable` **照常起飞**，
+  edge 起来后自动恢复。
 
-core 的起飞日志有一行 `aite.up`「接了谁」，写着 platform / model 名 / sandbox 镜像 /
-sqlite 路径 / evidence 目录 / edge socket。**先把这一行抄下来**，后面每一条 M 的排障
-都从它开始 —— 尤其是 evidence 目录，`aite evidence show` 要用。
+#### 0.2.3 起对了长什么样 / 起错了长什么样
 
-- `--traceback`：起不来时打完整错误链（默认只给一行人话）。
-- `--grace SEC`：优雅退出的宽限期，默认 20。
+**起对了** —— 下面两段是**本机实测**原样粘的，跑的时候**没有飞书凭证**
+（`FEISHU_*` 三项都没设、model 填的是占位值），所以有两栏跟真机不一样，
+已在各自那一行标出来。core 这边（路径是绝对的）：
+
+```
+INFO aite_edge_client::link: edge.connecting socket=<仓库根>/data/run/aite-edge.sock
+INFO aite_edge_client::link: edge.connected socket=<仓库根>/data/run/aite-edge.sock
+INFO aite.app: aite.edge_status edge_version=0.0.1 contract_version=p0.2 edge_platform=feishu platform_connected=false sandbox_ok=true
+                                                           ↑ 真机上这里必须是 platform_connected=true
+INFO aite.app: aite.up platform=feishu model=demo-placeholder sandbox=aite-sandbox:p0 sqlite=data/aite.db evidence=data/evidence edge=<仓库根>/data/run/aite-edge.sock
+                                       ↑ 真机上是你 config 里那个真模型名
+INFO aite_edge_client::ingress: ingress.listening socket=<仓库根>/data/run/aite-core.sock
+```
+
+edge 这边（实测，原样）：
+
+```
+level=INFO msg=edge.takeoff version=0.0.1 contract_version=p0.2 platform=feishu edge_socket=data/run/aite-edge.sock core_socket=data/run/aite-core.sock image=aite-sandbox:p0
+level=INFO msg=edge.grpc_listening socket=data/run/aite-edge.sock contract_version=p0.2
+level=INFO msg=edge.sandbox_ok
+```
+
+两件要当场核的事：
+
+1. **`aite.up` 那一行「接了谁」先抄下来** —— platform / model / sandbox 镜像 / sqlite 路径 /
+   evidence 目录 / edge socket，六栏。后面每条 M 的排障都从它开始，尤其是 evidence 目录，
+   `aite evidence show` 要用。
+2. **`aite.edge_status` 里的 `platform_connected` 必须是 `true`**。它是 edge 那边飞书长连接
+   的状态；`false` = 长连接还没建上（凭证不对 / 网络不通），而 core **照样起飞、
+   看起来一切正常**。上面那份实测就是 `false` 的样子 —— 同一时刻 edge 那个终端在刷
+   `feishu.connect_failed` + `feishu.reconnecting`。
+   **这一栏是 false 就别往 M1 走**，先回 §0.1 把不带 `--offline` 的 preflight 跑绿。
+
+**起错了**（实测：edge 在 `edge/` 里起、core 在仓库根起）—— core 这边：
+
+```
+INFO  aite_edge_client::link: edge.connecting socket=<仓库根>/data/run/aite-edge.sock
+WARN  aite_edge_client::link: edge.reconnecting socket=<仓库根>/data/run/aite-edge.sock error=transport error retry_in_sec=1
+WARN  aite.app: aite.edge_unreachable contract_version 这一轮没比成；edge 起来后下一发 RPC 自动恢复 socket=<仓库根>/data/run/aite-edge.sock attempts=5 error=[grpc_unavailable] No such file or directory (os error 2)
+```
+
+而 edge 那边**一切正常**，日志里那行还写着 `edge_socket=data/run/aite-edge.sock`：
+
+```
+level=INFO msg=edge.grpc_listening socket=data/run/aite-edge.sock contract_version=p0.2
+```
+
+⚠️ **两边日志放一起看不出问题** —— core 打的是绝对路径、edge 打的是裸相对路径，
+而后者正好是前者的尾巴，肉眼会以为是同一个文件。**唯一便宜可靠的判据是看目录**：
+
+```bash
+ls edge/data          # 期望：No such file or directory
+ls data/run           # 期望：aite-edge.sock（起了 core 之后还有 aite-core.sock）
+```
+
+> `git status` **不是判据**，别用。`edge/data/` 确实没被 `.gitignore` 挡着
+> （`.gitignore` 只有根锚定的 `/data/`(:11) 和 `/edge/bin/`(:21)），但里面只有一个 unix
+> socket 时 git 什么都不显示 —— git 不跟踪 socket，只有 socket 的目录在 git 眼里是空目录。
+> 实测：`git status --short --untracked-files=all` 是空的，往里丢一个普通文件才冒出 `?? edge/data/`。
+
+`aite.edge_unreachable` 之后 core 会**照常起飞**（§2.1 启动顺序无关），所以它不报错、不退出 ——
+它会看起来一切正常，然后每一条群消息都石沉大海。这正是最难查的那一种。
+
+#### 0.2.4 停机、参数、compose
+
 - 停：Ctrl-C（SIGINT/SIGTERM 走同一条优雅退出路径）。**再按一次是硬退**（退出码 130）。
+  实测 core 侧优雅退出打这四行：
+  ```
+  WARN aite.app: aite.signal 收到，开始优雅退出（再来一次立即硬退） signal="SIGTERM"
+  INFO aite.app: aite.stopping grace=20.0 pending=0
+  INFO aite_edge_client::ingress: ingress.stopped socket=<仓库根>/data/run/aite-core.sock
+  INFO aite.app: aite.down
+  ```
+  edge 侧打这三行（**`edge.counters` 是 edge 侧计数器唯一的出口**，见 §7 末）：
+  ```
+  level=INFO msg=edge.signal signal=SIGTERM note=开始优雅退出
+  level=INFO msg=edge.counters events.sent=0 ingress.invalid=0 ingress.errors=0 ingress.reconnects=0
+  level=INFO msg=edge.down
+  ```
+- `--grace SEC`：优雅退出的宽限期，默认 20。
+- `--traceback`：**别指望它给你错误链**。文档原来写的是「起不来时打完整错误链」，
+  实际只是把同一句话用 Debug 再包一层引号（`eprintln!("{e:?}")`，
+  `core/crates/app/src/cli.rs:104-106`）。起不来时真正有用的是它默认就打的那两行：
+  一句人话 + 「用的配置是 …」。<!-- 台账 §4.4「Rust横切」；V6 ④c 正在改这条，合流后复核本行 -->
+- **compose 起（占位，等 V1）**：`docker compose up -d` 那一档正在被 V1 改成真镜像，
+  命令行与 service 形状**这里先不写死**。现在成立、改完大概还成立的三条：
+  - 看日志用 `docker compose logs -f`（**不是**这两个终端）；
+  - 两个 socket 在命名卷 `run:` 里，**宿主机上看不到** —— 上面那条 `ls data/run` 的判据不适用；
+  - 仓库是 `./:/app` bind mount，所以 `data/evidence`、`data/artifacts`
+    在宿主机上直接看得到，`aite evidence show` 照常在宿主机跑。
+  - ⚠️ 别贴 `docker compose config` 的完整输出给任何人：它会把 `${VAR}` 解析成**取值**。
 
-### 0.3 三个观察窗
+### 0.3 四个观察窗
 
-跑 M 之前把这三个窗口都开好，出了问题不用现找。
+跑 M 之前把这四个窗口都开好，出了问题不用现找。
+**日志是两个窗，不是一个** —— 这不是小事：M2 整条要看的 `feishu.*` 全在 **edge** 那边，
+按旧文档只开 core 那个窗，你会盯着一个永远不出现那两行的窗口。
 
 | 窗口 | 命令 | 看什么 |
 |---|---|---|
-| 进程日志 | `aite run` 那个终端 | 关键字见 §7 速查表 |
+| **core 日志（Rust）** | `aite run` 那个终端 | `aite.*` / `control.*` / `worker.*` / `ingress.slow_callback`、`ingress.handle_failed`。§7 上半张表 |
+| **edge 日志（Go）** | `aite-edge` 那个终端 | `feishu.*` / `edge.*` / `sandbox.*` / `ingress.reconnecting`、`ingress.reconnected`。§7 下半张表 |
 | 证据时间线 | `core/target/debug/aite evidence show --list` | 最近的任务、终态、链是否完整 |
 | 沙箱 | `docker ps --filter label=aite.task` | 有没有容器、是不是该收没收 |
 
@@ -79,15 +301,26 @@ sqlite 路径 / evidence 目录 / edge socket。**先把这一行抄下来**，�
 # 1. 找到刚才那个任务（时间倒序，第一行就是）
 core/target/debug/aite evidence show --list
 
-# 2. 看它的时间线（--config 指到真配置，花费一栏才算得出来）
-core/target/debug/aite evidence show --config config/aite.yaml <task_id>
+# 2. 看它的时间线
+core/target/debug/aite evidence show <task_id>
 ```
+
+> `--config` 的默认值就是 `config/aite.yaml`（`core/crates/evidence/src/cli.rs:1318-1320`
+> 的 `default_value`），**在仓库根跑根本不用带**。只有不在仓库根跑、或要指另一份配置时才写
+> `--config <path>` —— 单价是从它里面读的，指错了花费那一栏就是 0。
+> （`aite evidence show --help` 能打出全部七个参数：`--dir` / `--root` / `--config` /
+> `--list` / `--only` / `--tail` / `--json`，退出码 0。**别写成 `-- --help`** ——
+> 那样 `--help` 会被当成 task_id，报「找不到证据：data/evidence/--help/events.jsonl 不在」、退出码 2。）
 
 时间线末尾那行 `hash 链` 是这份证据可不可信的判据。链断了 → 退出码 1，
 并指出断在第几行、期望什么、实际什么。**链断了就别拿这份证据当验收依据**，
 先确认目录有没有被人手改过、备份脚本有没有漏拷 `payloads/`。
 
 `--list` 里任一任务链断了，整条命令也退出码 1，所以可以直接 `&&` 串在脚本里。
+
+> 输出**开头那几行里**有一行 `目录 <证据目录>`（`任务 …` / `目录 …` 两行，
+> `core/crates/evidence/src/cli.rs:976-977`）。**别数「第几行」** —— 前面可能先插一行
+> `提示：…`（`cli.rs:1279`、`1504-1508`）：配置读不到、或者单价是 0 的时候就会有。
 
 ### 0.4 卡片上没有按钮，改成一行提示
 
@@ -101,13 +334,58 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 | 本来想点的按钮 | 现在怎么做 |
 |---|---|
 | 「停止」 | **在卡片所在的那条话题里回复** `!stop <任务号>`；或在群里发 `@我 !stop <任务号>` |
-| 「证据」 | 走 `aite evidence show --list` 找任务，再 `aite evidence show <task_id>` —— 输出开头第二行 `目录 <证据目录>` 就是原来那个按钮会回帖的路径 |
+| 「证据」 | 走 `aite evidence show --list` 找任务，再 `aite evidence show <task_id>` —— 开头那几行里的 `目录 <证据目录>` 就是原来那个按钮会回帖的路径 |
 
-⚠️ **停止命令必须满足投递条件**：路由 R5 收 `!` 命令的条件是「这条消息 @ 了机器人」
-**或**「这条消息在一个已有会话的话题里」。两个都不满足（比如在群主输入框里干发一条
-`!stop #A17`）时，R6 要 thread 命中、R7 要 @，全不命中，最后落到 R8「其余丢弃」——
-只 bump 一次 `events.ignored`，**你那边零回复、零表情，看起来就像没人收到**。
-卡片是 `reply_in_thread=true` 发进任务话题的，所以「在话题里回复」这条路一定走得通。
+**卡片上那行提示的原文**（`edge/internal/feishu/cards.go:183-193`，`#A17` 处是真任务号）：
+
+> 要停这个任务：在本话题里回复 !stop #A17，或在群里发「@我 !stop #A17」。（既不 @ 我、也不在本话题里的命令会被丢弃，不会有任何回应。）
+
+**照抄它，不要转述** —— 文档里的说法和卡片上的说法不一致，用户会以为自己看错了。
+（`cards_test.go` 有一条断言钉着提示里必须出现「话题」或「@」。）
+
+⚠️ 两个限定，别搞错：
+
+- **只有「进行中」的卡片有这行提示。** 它挂在 `actions` 里含 `STOP` 这个条件上
+  （`cards.go:169` 的注释 + `:183-193` 的循环），**终态卡片（delivered / failed / cancelled）
+  没有这一行** —— 已经结束的任务没什么可停的。
+- **停止命令必须满足投递条件**：路由 R5 收 `!` 命令的条件是「这条消息 @ 了机器人」
+  **或**「这条消息在一个已有会话的话题里」。两个都不满足（比如在群主输入框里干发一条
+  `!stop #A17`）时，R6 要 thread 命中、R7 要 @，全不命中，最后落到 R8「其余丢弃」——
+  只 bump 一次 `events.ignored`，**你那边零回复、零表情，看起来就像没人收到**。
+  卡片是 `reply_in_thread=true` 发进任务话题的（`platform.go:394-396` 里 `SendCard`
+  的 `in_thread` 写死 `true`），所以「在话题里回复」这条路**一定**走得通。
+
+<!-- 台账 §4.2；V5 修掉后删本段 -->
+> ⚠️ **一条已知记账：第一步就 `final` 的短任务，交付中的那几秒 `!status` 查不到、`!stop` 会回「没有这个任务」。**
+> `deliver()` 在 W3 那一路（第一步就 `final`、从没发过卡片）把状态置成 `Answering`
+> （`core/crates/worker/src/agent.rs:643-648`），而 `Answering` 不在 `ACTIVE_TASK_STATUSES`
+> （= created / planning / working，`core/crates/contracts/src/session.rs:33`）里；
+> `!status` 和 `!stop` 都走 `list_active_tasks`。**这是已知记账（台账 §4.2），
+> 只影响第一步就 final 的短任务（M1 那一类），不是环境问题，别去查沙箱。**
+> 发过卡片的正常任务置的是 `Working`，仍在活跃集里，不受影响。
+
+### 0.5 「一条纯文本回复（不是卡片）」—— 这句话要分成两半读
+
+本文和 `docs/demo-3min.md` 原来都写着「随后线程里出现一条**纯文本**回复（不是卡片）」。
+**这句话对了一半、错了一半**，而错的那一半在协议层是硬事实：
+
+- ✅ **对的那半：没有 checklist 进度卡片。** W3 规定第一步就 `final` 的 Answering 路径
+  不走 `send_card` —— 不会出现那张带 ⬜/✅ 待办、footer 在涨的卡片。这是真的。
+- ❌ **错的那半：「不是卡片消息」/「是纯文本」。** core 发的**每一条文本**到飞书都是
+  一张卡片：`SendText` 走 `DumpsCard(BuildMarkdownCard(text))`，`msg_type` 传的是
+  `"interactive"`（`edge/internal/feishu/platform.go:379-390`）。
+
+这是**故意的、正确的实现**，理由写在 `edge/internal/feishu/cards.go:239-243`：
+`OutboundText.text` 的契约是 markdown，而飞书里唯一真能渲染 markdown 的载体就是
+卡片的 markdown 元素 —— `msg_type=text` 会把 `**粗体**`、列表、链接原样当字面量吐出来。
+错的是文档，**不是代码**。
+
+所以本文一律这么写：**「没有 checklist 卡片」**，不写「不是卡片」。
+
+> **视觉层还差一眼真机核实。** `BuildMarkdownCard` 拼出来的是一张**只有一个 markdown
+> 元素、没有 header** 的卡片（`cards.go:244-249`）。它在飞书里到底长得像个普通文本气泡，
+> 还是明显带卡片边框，只能在真飞书里看一眼。**M1 跑到的时候顺手看一下**，
+> 结论决定 `demo-3min.md` §4.2 那句要对着镜头念的旁白用哪一版（那边留了两版文案）。
 
 ---
 
@@ -123,14 +401,17 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 - 群里：**你发的那条消息**上的表情回应（不是机器人新发一条消息）。
 - `aite evidence show --list`：应该多出一个任务。
-- 日志：没有 `ingress.slow_callback` / `ingress.handle_failed` / `control.dispatch_failed`。
+- core 日志：没有 `ingress.slow_callback` / `ingress.handle_failed` / `control.dispatch_failed`。
 
 ### 期望
 
 1. **2 秒内**你那条消息上出现 👀（飞书 `EYES` 表情）。这是 R7 的 `add_reaction(ack)`，
    在建会话之后、入队之前发出，所以它先于任何回复出现。
-2. 随后线程里出现一条**纯文本**回复（不是卡片）。W3：第一步就 `final` 的
-   Answering 路径不发卡片。
+2. 随后线程里出现一条回复，**没有 checklist 卡片**（没有 ⬜/✅ 待办、没有在涨的 footer）。
+   这是 W3：第一步就 `final` 的 Answering 路径不发卡片。
+   ⚠️ 注意它**在协议层仍然是一条卡片消息**（`msg_type=interactive`，只含一个 markdown
+   元素、没有 header）—— 见 §0.5。**顺手记一下它在飞书里长什么样**，`demo-3min.md`
+   §4.2 的旁白等这个结论。
 3. `aite evidence show <task_id>` 的时间线形如：
 
    ```
@@ -147,10 +428,11 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 没表情、没回复、`--list` 也没有新任务 | 事件根本没到进程 | 开放平台「事件订阅 → 推送记录」看这条有没有推出来；没有就是权限/订阅没配（§3.7 清单）；有就看进程日志有没有连上（0.2 那行起飞日志） |
+| 没表情、没回复、`--list` 也没有新任务 | 事件根本没到进程 | 开放平台「事件订阅 → 推送记录」看这条有没有推出来；没有就是权限/订阅没配（§3.7 清单）；有就先看 **edge** 那个窗的 `feishu.*`（长连接连上了没），再看 core 起飞那行 `aite.edge_status` 的 `platform_connected` 是不是 `true`（§0.2.3） |
 | 同上，但推送记录里有 | 认不出 @ 的是自己 → R7 不命中 → R8 丢弃 | `FEISHU_BOT_OPEN_ID` 配的是不是这个应用的 open_id。跑 preflight 第 ④ 组 |
-| 有表情，没回复 | 模型这一步炸了 | 日志 `worker.model_failed`；`aite evidence show <task_id>` 看 `model_call` 那条的 `finish_reason`；跑 preflight 第 ⑤ 组 |
-| 有表情有回复，但超过 2 秒才出现表情 | 回调里被塞了重活 | 日志 `ingress.slow_callback`（>1s 就 WARNING，带 `elapsed=`） |
+| 有表情，没回复 | 模型这一步炸了 | core 日志 `worker.model_failed`；`aite evidence show <task_id>` 看 `model_call` 那条的 `finish_reason`；跑 preflight 第 ⑤ 组 |
+| 有表情有回复，但超过 2 秒才出现表情 | 回调里被塞了重活 | core 日志 `ingress.slow_callback`（>1s 就 WARN，带 `elapsed=`） |
+| 交付的那几秒 `!status` 查不到它 / `!stop` 回「没有这个任务」 | **已知记账，不是故障** | 这一路是 W3 的 Answering 状态，不在活跃集里。详见 §0.4 那段引用框。**别去查沙箱** <!-- 台账 §4.2；V5 修掉后删本行 --> |
 | 机器人自己触发了自己 | R1 没拦住 | 不该发生（`sender_kind != human` 直接丢）。真出现了记下来，这是 bug 不是环境问题 |
 
 ---
@@ -161,21 +443,32 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 ### 操作
 
-1. 关掉跑 `aite run` 那台机器的网络（拔网线 / 关 Wi-Fi），**不要停进程**。
+1. 关掉机器的网络（拔网线 / 关 Wi-Fi），**两个进程都不要停**。
 2. 断网期间在群里发**一条** `@Aite 断网期间这条`。
 3. 等 30 秒，恢复网络。
 
 ### 在哪看
 
-- 日志：`feishu.reconnecting attempt=N delay=Ns` → `feishu.reconnected after=N attempts`。
-  退避是 1s→2s→…→30s 封顶、无限重试（§3.3）。
+> ⚠️ **这一条主要看 edge 那个终端，不是 core 那个。** 飞书长连接在 edge（Go）手里，
+> `feishu.*` 全打在那边。core 那个窗在这一条里基本是安静的。
+
+- **edge 日志**（Go，logfmt 形状）：
+  ```
+  level=WARN msg=feishu.connect_failed attempt=N err="…"
+  level=WARN msg=feishu.reconnecting attempt=N delay_sec=N
+  level=INFO msg=feishu.reconnected after=N
+  ```
+  字段名是 **`delay_sec`**（不是 `delay`），成功那条是 **`after=N`**（不是 `after=N attempts`）。
+  退避是 1s→2s→…→30s 封顶、无限重试（§3.3）。连接中途掉了还会先打一条
+  `level=WARN msg=feishu.connection_lost err=…`。
 - `aite evidence show --list`：断网期间那条消息应该**只**对应**一个**任务。
 - 计数器 `events.duplicate`：平台重连后重推同一事件时 +1（R2）。
+  ⚠️ **core 侧计数器没有查看入口**（§7 末），所以这条只能靠「`--list` 里只有一个任务」反证。
 
 ### 期望
 
-1. 断网期间日志持续打 `feishu.reconnecting`，**进程不退出**。
-2. 恢复网络后出现 `feishu.reconnected`。
+1. 断网期间 edge 日志持续打 `feishu.reconnecting`，**两个进程都不退出**。
+2. 恢复网络后 edge 打出 `feishu.reconnected after=N`。
 3. 断网期间那条 @ 被处理，群里有回复。
 4. **只有一个任务**：`--list` 里对应那条消息的任务只有一条，不是两条。
    平台重推同一个 `event_id` 时 R2 靠 `seen_event` 静默丢弃。
@@ -184,10 +477,11 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 恢复网络后没有 `feishu.reconnected` | 重连循环挂了 | 看有没有 `feishu.reconnecting` 在持续打；完全没有就是读循环已经死了 —— 记下日志末尾，这是 bug |
+| 恢复网络后没有 `feishu.reconnected` | 重连循环挂了 | 看 edge 那个窗有没有 `feishu.reconnecting` 在持续打；完全没有就是读循环已经死了 —— 记下日志末尾，这是 bug |
 | 断网期间那条 @ 完全没被处理 | 平台没重推 | 飞书的补推不保证；换成「断网 10 秒」再试一次。连续两次都不补推，就是平台行为，记进结论、不算代码问题 |
 | **同一条消息出了两个任务** | R2 去重没生效 | `aite evidence show` 看这两个任务的 `event_received` 那条，`event=` 是不是同一个 `event_id`。是 → `seen_event` 没落库（查 sqlite 路径可写、`storage.sqlite_path` 配得对不对，preflight 第 ⑦ 组）；不是 → 平台推了两个不同 event_id，属于平台行为 |
 | 进程直接退了 | 未捕获异常漏出去了 | §3.3 要求进程不退出。抓日志末尾的栈，这是 bug |
+| 断网期间 core 那个窗在刷 `edge.reconnecting` | 你把 core↔edge 的 socket 也一起搞断了 | 那是**进程间**的链路，不是飞书长连接。拔网线不该影响它 —— 如果它也在重连，先看 edge 进程是不是被你一起关了 |
 
 ---
 
@@ -202,22 +496,26 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 1. 准备一个小 CSV（两列就行：`month,amount`，12 行），**别用大文件** ——
    这一步验的是链路，不是性能。
+   （想省事就用 `core/target/debug/aite evals demo-fixture csv` 生成的
+   `/tmp/aite-demo/sales.csv`，24 个月、演示也用它。）
 2. 群里发：`@Aite 把这个 CSV 画成月度趋势图`，**同一条消息带上 CSV 附件**。
 
 ### 在哪看
 
 - 群里那条线程：卡片消息**只有一条**，内容在变。
 - `docker ps --filter label=aite.task`：任务跑的时候应该看得见一个容器。
-- 跑完后：`aite evidence show --config config/aite.yaml <task_id>`。
+- 跑完后：`aite evidence show <task_id>`。
 
 ### 期望
 
 1. **卡片只有一条**。W3：第一次出现非 `final` 的 tool_call 时才 `send_card`；
    之后一律 `update_card`。「不新增消息」= 从你那条 @ 到最终文本回复之间，
-   线程里新增的消息是 **1 张卡片 + N 个产物文件 + 1 条文本**（M3 里 N=1，共 3 条），
-   卡片自始至终只有那一条、不重复出现。
+   线程里新增的消息是 **1 张 checklist 卡片 + N 个产物文件 + 1 条文本回复**
+   （M3 里 N=1，共 3 条），**checklist 卡片自始至终只有那一条、不重复出现**。
+   ⚠️ 那条「文本回复」在协议层也是一条卡片消息（只含 markdown、没有 header），
+   见 §0.5 —— 数消息条数时它算 1 条，但它不是第二张 checklist 卡片。
 2. **卡片至少更新 3 次**。怎么数：
-   - 肉眼：盯着卡片，checklist 的项从 ○ 逐个变 ✓，footer 的「已用 N 步 · ¥X.XX」在涨。
+   - 肉眼：盯着卡片，checklist 的项从 ⬜ 逐个变 ✅，footer 的「已用 N 步 · ¥X.XX」在涨。
    - 证据侧的必要条件：`aite evidence show <task_id> --only checklist_op` 至少 3 行。
      每次 `checklist_check` 都写一条 evidence（W8），而卡片更新由它驱动。
    - ⚠️ **`update_card` 本身不写 evidence，也没有日志**，所以「真的调了 3 次」
@@ -237,10 +535,12 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
    ```
 
 5. **沙箱回收**：任务结束后容器**不会立刻消失**（W7 交给 reaper）。
-   - reaper 每 **60 秒**跑一次，回收空闲超过 `config.sandbox.idle_sec`（默认 **300 秒**）的容器。
+   - reaper 每 **60 秒**跑一次（`core/crates/control/src/plane.rs:28`
+     的 `REAPER_INTERVAL_SEC = 60.0`），回收空闲超过 `config.sandbox.idle_sec`
+     （默认 **300 秒**）的容器。
    - 所以最坏情况是 **300 + 60 = 360 秒**。§2.4 写的「5 分钟后」踩在边界上：
      **建议等满 6 分钟再判**，5 分整还在的不算失败。
-   - 回收时日志打 `control.reaped`，计数器 `sandbox.reaped` +N。
+   - 回收时 core 日志打 `control.reaped`，计数器 `sandbox.reaped` +N。
 
    ```bash
    docker ps --filter label=aite.task          # 6 分钟后：空
@@ -251,46 +551,60 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 没出卡片，直接回了一段文字 | 模型一步就 `final` 了，没调工具 | 这是 W3 的 Answering 路径，**不算错**，但说明模型没去读附件。`--only tool_call` 看有没有 `download_attachment`；没有就是提示词/模型的问题 |
-| 卡片出来了，一直停在 working | 某个工具卡住 | `--only tool_call,tool_result` 看最后一条：只有 `tool_call` 没有 `tool_result` = 正卡在那一步；有 `tool_result` 且 `FAIL[timeout]` = 超时（`run_python` 用请求里的 `timeout_sec`，其余默认 60s） |
-| `tool_result → FAIL[sandbox]` | Docker 不可用 / 镜像不在 | `docker images aite-sandbox`；不在就 `docker build -t aite-sandbox:p0 docker/sandbox`。连续 2 次 sandbox 失败 → 任务直接 failed（§3.3） |
+| 没出卡片，直接回了一段文字 | 模型一步就 `final` 了，没调工具 | 这是 W3 的 Answering 路径，**不算错**，但说明模型没去读附件。`--only tool_call` 看有没有 `download_attachment`；没有就是提示词/模型的问题。（这一路交付中 `!status` 查不到它，见 §0.4 <!-- 台账 §4.2；V5 修掉后删本句 -->） |
+| 卡片出来了，一直停在 working | 某个工具卡住 | `--only tool_call,tool_result` 看最后一条：只有 `tool_call` 没有 `tool_result` = 正卡在那一步；有 `tool_result` 且 `FAIL[timeout]` = 超时（`run_python` 用请求里的 `timeout_sec` + 余量，其余工具默认 60s，`core/crates/gateway/src/gateway.rs:221-231`） |
+| `tool_result → FAIL[sandbox]` | Docker 不可用 / 镜像不在 | `docker images aite-sandbox`；不在就 `docker build -t aite-sandbox:p0 docker/sandbox`。连续 2 次 sandbox 失败 → 任务直接 failed（§3.3）。**edge** 那个窗会有 `sandbox.*` 的错 |
 | `tool_result → FAIL[upstream]`（下载附件） | adapter 下载失败 | 附件是不是过期了/太大；换个小文件重试 |
 | 回帖里有「产物 x 未找到」 | 模型给的 path 不在 /work 下或不存在 | §3.3 规定跳过该产物、任务仍 delivered。`--only artifact` 看实际写出去几个；`delivered` 那行的 `产物缺失 N 个` |
 | 卡片更新次数不够 3 次 | 模型没建足够的 checklist 项 | `--only checklist_op` 数条数。少于 3 条是模型行为，不是链路故障 —— 换个更需要分步的任务重试 |
-| 6 分钟后容器还在 | reaper 没跑 / 释放失败 | 日志 `control.reap_failed`、`control.gateway_release_failed`、`worker.gateway_release_failed`；都没有就看 reaper 那条协程是不是根本没起（回到 0.2 的起飞日志） |
-| 群里有两条卡片 | W3/W4 的合并没生效 | 这是 bug，把两条卡片的消息 id 和 `aite evidence show` 输出一起记下来 |
+| 6 分钟后容器还在 | reaper 没跑 / 释放失败 | **core** 日志找 `control.reap_failed`（ERROR）、`control.release_failed`（WARN）、`gateway.release_failed`（WARN）；**edge** 日志找 `sandbox.release_failed`（WARN）。都没有就看 reaper 那条协程是不是根本没起（回到 §0.2.3 的起飞日志） |
+| 群里有两条 checklist 卡片 | W3/W4 的合并没生效 | 这是 bug，把两条卡片的消息 id 和 `aite evidence show` 输出一起记下来 |
 
 ---
 
-## M4 · 线程里追问，命中同一会话
+## M4 · 线程里追问，命中同一会话（= §3.7(a) 的实验）
 
 > §2.4：线程里追问「再按季度画一张」（不带 @ 或带 @，取决于 3.7 的权限核实结果）
 > → 命中同一 `session_id`（日志可查），沙箱重建，第二张图回到同一线程
 
-### ⚠️ §3.7 的两条待核实项，直接决定这条怎么操作
+### 这条 M 同时是 §3.7(a) 的那个实验
 
-规范 §3.7 留了两条起飞前要核实的权限，**本文两种情况都写**，不赌一种：
+§3.7 的两条待核实项里，**(b) 在 §0.1.1 已经出结论了**；**(a) 只能在群里做实验**，
+而这条实验就是 M4 的第 1 步 —— preflight 那行 NOTE 自己就这么说的（§0.1.1 末尾）。
 
 **(a) 只有「接收 @ 消息」权限时，话题里不带 @ 的回复会不会投递给应用？**
 决定 `PlatformCapabilities.supports_passive_listen` 的运行时取值
 （契约默认 `FEISHU_P0.supports_passive_listen = False`，拿到「获取群组中所有消息」
 后由 adapter 在运行时改成 `True`）。
 
-**(b)「获取会话历史消息」API 是否要求「获取群组中所有消息」这个敏感权限？**
-这条主要影响 M5（群历史），但和 (a) 是同一个权限包，往往一起批下来 ——
-所以 (b) 批了通常 (a) 也就成立了。
-
-**这两条都不影响路由逻辑**：R6 在 R7 之前求值，且**不要求 `mentioned`** ——
+**(a) 与路由逻辑无关**：R6 在 R7 之前求值，且**不要求 `mentioned`** ——
 只要事件到得了进程、`anchor.thread_id` 命中 `find_session_by_thread`，
 带不带 @ 都续接同一个会话。差别**只在投递**。
 
-### 操作
+### 操作（五步，顺序别换 —— 这个顺序本身就是实验）
 
-分两步做，顺序别换 —— 这个顺序本身就是对 §3.7(a) 的核实：
+**前置**：M3 的任务必须已经彻底 `delivered`。没交付完就追问，R6 会把它当成 steer
+并进上一个任务，不新建 —— 这一条就没了。
 
-1. **先试不带 @**：在 M3 那条话题（卡片所在的线程）里回复 `再按季度画一张`，**不 @**。
-   等 30 秒。
-2. **30 秒内没反应，再补一条带 @ 的**：`@Aite 再按季度画一张`，还是发在同一条话题里。
+1. **在 M3 那条话题（卡片所在的线程）里回复** `再按季度画一张`，**不 @**。
+2. **等 30 秒**，盯三个地方：群里有没有 👀、`aite evidence show --list` 有没有新任务、
+   core 日志有没有动静。
+3. **30 秒内有反应** → 走「情况 A」，跳到第 5 步。
+   **30 秒内没反应** → 走「情况 B」，先做第 4 步再做第 5 步。
+4. **判「没投递」还是「投递了被进程丢了」**（这一步是 (a) 结论的唯一判据，别跳）：
+   1. 打开飞书开放平台 → 你这个自建应用 → **「事件订阅」→「推送记录 / 调试」**。
+   2. 按时间找第 1 步那条消息（`im.message.receive_v1`）。
+   3. **推送记录里没有这条** = 平台压根没投递 → **§3.7(a) 结论 =「不投递」**，
+      权限问题，代码没错。
+   4. **推送记录里有这条** = 投递了但进程丢了它 → R6 没命中，**这是 bug**：
+      **停下来**，把这条消息的 `event_id` / `message_id` / `root_id`、
+      M3 那个任务的 `task_created` 一行、core 日志同一时刻的片段一起记下来。
+   5. ⚠️ **进程侧帮不上忙，不要指望在日志里找答案。** 被 R8 丢弃的事件只 bump 一次
+      `events.ignored`（`core/crates/control/src/plane.rs:377-378`），**INFO 级没有任何日志**，
+      而 core 侧计数器没有对外查看入口（§7 末、§8 第 3 条）。所以只有开放平台那份推送记录
+      能分开这两种情况。
+5. **补一条带 @ 的**：`@Aite 再按季度画一张`，还是发在同一条话题里。
+   （情况 A 下这一步是为了确认带 @ 也照样走 R6；情况 B 下这是唯一能往下走的路。）
 
 ### 在哪看
 
@@ -315,35 +629,35 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 2. 新任务的 `session_id` 与 M3 相同，`task_no` 比 M3 的**大**
    （租户内原子递增，中间有别的任务就会跳号，不一定正好 +1）。
 3. 第二张图回到**同一条话题**里。
-4. 结论：§3.7(a) = **不带 @ 也投递**，`supports_passive_listen` 该置 True。
+4. 结论：§3.7(a) = **不带 @ 也投递**。
 
 **情况 B —— 不带 @ 没反应、带 @ 才有**（`supports_passive_listen` 为 False）：
 
-1. 第 1 步 30 秒无任何动静：没表情、没回复、`--list` 没有新任务。
-2. 第 2 步（带 @）触发任务，**同样走 R6**（thread_id 命中优先于 mentioned），
+1. 第 1 步 30 秒无任何动静：没表情、没回复、`--list` 没有新任务，
+   且第 4 步在开放平台推送记录里**也没有**这条。
+2. 第 5 步（带 @）触发任务，**同样走 R6**（thread_id 命中优先于 mentioned），
    所以 `session_id` 仍与 M3 相同、`task_no` 比 M3 的大。
 3. 第二张图回到同一条话题里。
-4. 结论：§3.7(a) = **不带 @ 不投递**，`supports_passive_listen` 保持 False，
-   并且要在飞书群的使用说明里写清「话题里追问也要 @」。
+4. 结论：§3.7(a) = **不带 @ 不投递**。
 
 **两种情况共同的判据**（这条 M 真正验的是它，与 (a) 的结论无关）：
 `session_id` 相同 + 第二张图回到同一线程 + 沙箱重建。
 
-### 怎么判「情况 B」是没投递、还是投递了被丢弃
+### 两条结论分别该怎么继续
 
-这两者对操作的结论一样（都得 @），但对代码的结论完全不同，别混：
+| §3.7(a) 的结论 | 对 M4 / M6 的影响 | 对演示的影响 | 代码要不要改 |
+|---|---|---|---|
+| **不带 @ 也投递** | M4 第 1 步就成；M6 的追问可以不带 @ | 第三幕可以不带 @，但 `demo-3min.md` §4.4 建议**仍然带 @** —— 理由是别在镜头前赌 | `FEISHU_P0.supports_passive_listen` 该置 `True`。**这是一条要转出去的代码改动**（不属于本剧本），记进结论交总管路由 |
+| **不带 @ 不投递** | M4 / M6 全程带 @；飞书群的使用说明要写清「**话题里追问也要 @**」 | 第三幕照现在的台词演，无改动 | 保持 `False`，无改动 |
 
-1. 去飞书开放平台 →「事件订阅 → 推送记录 / 调试」，查第 1 步那条消息。
-   - **推送记录里没有** = 平台压根没投递 → §3.7(a) 结论为「不投递」，权限问题，代码没错。
-   - **推送记录里有** = 投递了但进程丢了它 → R6 没命中，**这是 bug**。
-2. ⚠️ 进程侧目前**帮不上忙**：被 R8 丢弃的事件在 INFO 级别不留任何日志，
-   `events.ignored` 计数器也没有对外的查看入口。所以只能靠开放平台的推送记录判。见 §8。
+**这两条结论只写进本文和 `docs/demo-3min.md`，不回写 `docs/dev-spec-2026-09-09.md`** ——
+§3.7 原文自己就写着「结果写在 dispatch 里，不改本文」。
 
 ### 不对时查哪
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 带 @ 也没反应 | 不是话题里的回复，是新消息 | 飞书里「回复」和「在群里另发一条」不是一回事。确认发的是**对卡片那条消息的回复**（线程内） |
+| 带 @ 也没反应 | 不是话题里的回复，是新消息 | 飞书里「回复」和「在群里另发一条」不是一回事。确认发的是**对卡片那条消息的回复**（线程内）。⚠️ 这里说的是**飞书自己的「回复」入口**（长按消息 / 悬浮菜单里那个），不是卡片上的按钮 —— 卡片上一个按钮都没有（§0.4） |
 | 有反应，但 `session_id` 变了 | `anchor.thread_id` 没命中 | `--only task_created,event_received` 看新任务的 `msg=`；R7 会把这条消息自己变成新话题 root。多半是回复挂错了父消息 |
 | 有反应，但图回到了群里而不是线程 | `reply_to` 没带话题 root | W5 要求 `reply_to = 话题 root`。这是 bug |
 | 第一步就有反应，但回了「未知命令」 | 文本以 `!` 开头了 | R5 先于 R6 判定。别用 `!` 开头（可用命令：`!status` `!stop <任务号>` `!restart` `!new`） |
@@ -355,8 +669,14 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 > §2.4：@Aite 汇总本群本周开放事项 → 回复引用到 ≥3 条真实群消息
 
-这条依赖 §3.7(b) 的权限结论。**先在群里制造素材**：至少 5–6 条不同人发的、
-带明确待办口吻的消息（「X 那个还没弄完」「Y 下周之前给我」之类），否则模型没得引。
+**前置：§0.1.1 那一步必须先出「读得到」的结论。** 读不到就先去开放平台补权限，
+在那之前这条 M 一定过不了 —— 别拿它当链路故障查。
+
+**先在群里制造素材**：至少 5–6 条不同人发的、带明确待办口吻的消息
+（「X 那个还没弄完」「Y 下周之前给我」之类），否则模型没得引。
+省事的办法是 `core/target/debug/aite evals demo-fixture history` ——
+它在 `/tmp/aite-demo/history.txt` 里给了 8 条现成的（其中 2 条是故意的干扰项），
+按文件里的说明发进群，**一条都不要 @Aite**。
 
 ### 操作
 
@@ -372,7 +692,10 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 1. 时间线里有 `tool_call read_group_history(...)` 且对应的 `tool_result → ok`。
 2. 回复正文里能对上 **≥3 条**真实群消息。
-   - W1 给模型的群历史格式是 `[message_id] 姓名: 文本`，且**只保留 `sender_kind == human`**。
+   - W1 给模型的群历史格式是 `[message_id] 姓名: 文本`，且**只保留 `sender_kind == "human"`**
+     （`core/crates/worker/src/context.rs:70-82`）。
+   - 提示词要求它引用时带上 `[message_id]`（`core/crates/worker/prompts/platform.md:54`），
+     所以回复里会夹着一串 `[om_xxxx]`。**它们在飞书里不可点**，是给你逐条核对用的。
    - 逐条核：回复里提到的每件事，都能在群里找到那条原始消息。
      **模型编出来的算不通过** —— 这条 M 验的就是「它真的读到了群历史」。
 3. 群历史窗口是 `config.feishu.history_window`（默认 50 条）。
@@ -381,9 +704,9 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| `tool_result → FAIL[denied]` 或 4xx | §3.7(b)：缺「获取群组中所有消息」敏感权限 | 开放平台看这个权限的审批状态。**这就是 §3.7(b) 的答案：需要敏感权限** |
+| `tool_result → FAIL[denied]` 或 4xx | §3.7(b)：缺「获取群组中所有消息」敏感权限 | 回 §0.1.1 带 `--chat-id` 重跑一次 preflight，它会直接给你那句结论；再去开放平台看这个权限的审批状态 |
 | `read_group_history` 返回了，但内容是空的 | 群里没有符合条件的消息 | 拉历史只留 human；机器人自己发的不算。先在群里补几条真人消息 |
-| 日志 `worker.read_history_failed` | 拉历史抛异常了 | 看栈。W1 里拉历史失败是软失败（继续跑，只是上下文里没有群历史），所以任务仍会 delivered —— **别被「有回复」骗了**，一定要核 `tool_result` |
+| core 日志 `worker.read_history_failed` | 拉历史抛异常了 | 看栈。W1 里拉历史失败是软失败（继续跑，只是上下文里没有群历史），所以任务仍会 delivered —— **别被「有回复」骗了**，一定要核 `tool_result` |
 | 回复里的事项在群里找不到 | 模型编的 | 不是链路故障。`--only tool_call,tool_result` 确认历史真的拉到了；拉到了还编，是提示词/模型的问题（W9 明确要求「不得声称做了没做的事」） |
 | 压根没调 `read_group_history` | 模型没想到要用 | 换个更明确的说法重试（「读一下最近的群消息，汇总…」）。仍不调 = 工具目录/提示词问题 |
 
@@ -400,19 +723,19 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 
 1. 记下 M3/M4 那条话题。
 2. **停掉要重启的那个**（Ctrl-C，或 `kill <pid>`；SIGTERM 走同一条优雅退出路径）。
-3. **确认它真的没了**：`ps aux | grep "aite run"` / `ps aux | grep aite-edge`。
-4. 重新起飞（命令见 §0.2）。
+3. **确认它真的没了**：`pgrep -fl 'aite run'` / `pgrep -fl aite-edge`。
+4. 重新起飞（命令见 §0.2.2，**注意仍然在仓库根**）。
 5. 在**同一条旧话题**里追问：`@Aite 刚才那张图换成柱状的`（按 M4 的结论决定带不带 @）。
 
 | 这一遍重启谁 | 另一边应该发生什么 | 额外要看的 |
 |---|---|---|
-| **只重启 edge** | core 一直活着，会话与任务号都在内存 + 库里。core 日志出现 `edge.reconnecting` → `edge.reconnected` | 重连之后追问照常办；断开期间群里发的消息由飞书重推，**只处理一次**（去重在 core） |
-| **只重启 core** | edge 一直活着，长连接没断。edge 日志出现 `ingress.reconnecting` → `ingress.reconnected`（**第一次连上不算重连**，计数从 0 起） | 这一遍才是「会话从 SQLite 里读回来」的正题，下面的期望 1–3 说的就是它 |
+| **只重启 edge** | core 一直活着，会话与任务号都在内存 + 库里。**core 日志**出现 `edge.reconnecting` → `edge.connected`（⚠️ core 侧**没有**「重连成功」那个专用名字：首次连上和重连成功打的都是 `edge.connected`。`core/crates/edge-client/src/link.rs:9` 的注释写明全部只有三个名字 —— `edge.connecting` / `edge.connected` / `edge.reconnecting`。见 §7） | 重连之后追问照常办；断开期间群里发的消息由飞书重推，**只处理一次**（去重在 core） |
+| **只重启 core** | edge 一直活着，长连接没断。**edge 日志**出现 `ingress.reconnecting` → `ingress.reconnected socket=… reconnects=N`（**第一次连上打的是 `ingress.connected`，不算重连**，计数从 0 起） | 这一遍才是「会话从 SQLite 里读回来」的正题，下面的期望 1–3 说的就是它 |
 | **两个都重启** | 两边都从零开始，先起谁都行 | 上面两行的判据合起来都要成立 |
 
 ### 在哪看
 
-- 重启后的起飞日志：`sqlite 路径`那一段要和重启前**是同一个文件**。
+- 重启后的起飞日志：`aite.up` 里 `sqlite=` 那一段要和重启前**是同一个文件**。
 - `aite evidence show --list`：新任务的 `session_id` 要和旧任务相同。
 
 ### 期望
@@ -433,7 +756,8 @@ core/target/debug/aite evidence show --config config/aite.yaml <task_id>
 - core 日志：`aite.orphans n=1` → 逐个收场；
 - 库里那个任务落 `failed`，`result_summary` 是「进程重启前该任务仍在执行，已终止。请重新发起。」；
 - **群里那条话题多一条回帖**：`任务 #A3：进程重启前该任务仍在执行，已终止。请重新发起。`；
-- **那张停在「进行中」的卡片被原地改成 failed**（不新发卡片）；
+- **那张停在「进行中」的卡片被原地改成 failed**（不新发卡片）——
+  这是 core 主动 `update_card`，与「卡片上没有按钮」无关，✅ 正常；
 - 证据链补一条 `failed`（`by=startup_recovery`）并 finalize。
 
 ```bash
@@ -451,8 +775,8 @@ core/target/debug/aite evidence show <被杀掉的task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 重启后追问变成了新会话（`session_id` 不同） | SQLite 换文件了 | 比对重启前后起飞日志里的 sqlite 路径；相对路径 + 换了工作目录最常见 |
-| 重启后追问完全没反应 | 进程没真起来 / 没连上 | 起飞日志那一行；`aite preflight` 第 ③ 组 |
+| 重启后追问变成了新会话（`session_id` 不同） | SQLite 换文件了 | 比对重启前后 `aite.up` 里的 `sqlite=`；**相对路径 + 换了工作目录最常见** —— 也就是 §0.2 那个坑的另一个形态，确认你重启时的 cwd 还是仓库根 |
+| 重启后追问完全没反应 | 进程没真起来 / 没连上 | 起飞日志那几行（§0.2.3）；`aite preflight` 第 ③ 组。先确认 `aite.edge_status` 出现了而不是 `aite.edge_unreachable` |
 | `task_no` 从 `#A1` 重来 | `next_task_no` 的计数表没落库 | 编号存在 SQLite 的 `task_counters` 表里，重启该接得上。回退到 `#A1` = sqlite 换文件了（同上一行），或计数没提交 —— 贴 `--list` 输出 |
 | 重启前那个跑到一半的任务，重启后自己接着跑了 | 不该发生 | P0 没有任务**恢复**（只有**收场**）。它应该被起飞时收成 `failed` 并在群里回一句，而不是接着跑。真自己跑起来了，记下来 |
 | 硬杀之后重启，群里没有那句「已终止」 | 收残局这一步没走到 | core 日志找 `aite.orphans` / `aite.recover_failed` / `aite.orphan_notice_failed`。一个孤儿收不掉不该连累别人，也不该让进程起不来 —— 进程起来了但没回帖，看这三个日志名哪个出现了 |
@@ -462,35 +786,89 @@ core/target/debug/aite evidence show <被杀掉的task_id>
 
 ## 7. 日志关键字速查
 
-进程日志里出现这些就有故事，按 logger 名分组：
+**先看这一栏：「哪个进程」。** 两个进程两个终端两套日志格式 ——
+core 是 Rust 的 tracing（`INFO aite.app: aite.up platform=…`），
+edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
+拿着 core 的关键字去 edge 那个窗里找，或者反过来，是这一节最容易犯的错。
+
+### core（Rust，`aite run` 那个终端）
 
 | 关键字 | 级别 | 说明 |
 |---|---|---|
-| `feishu.reconnecting attempt=N delay=Ns` | WARNING | 长连接在退避重连（1s→2s→…→30s 封顶） |
-| `feishu.reconnected after=N attempts` | INFO | 重连成功。M2 要看的就是它 |
-| `ingress.slow_callback event=… elapsed=…s` | WARNING | 回调超过 1s，违反 §3.3 第一行 |
-| `ingress.handle_failed event=… kind=…` | ERROR | 路由里抛异常，已吞掉不让长连接挂掉 |
+| `aite.up` | INFO | 起飞成功，六栏「接了谁」。§0.2.3 |
+| `aite.edge_status` | INFO | 问到了 edge；`platform_connected` 要是 `true` |
+| `aite.edge_unreachable` | WARN | 5×1s 都没问到 edge，版本门禁这一轮没生效但照常起飞 —— **§0.2 那个坑的第一现场** |
+| `aite.orphans n=N` | WARN | 起飞时发现上一条命没跑完的任务，逐个收场。M6 要看的 |
+| `aite.recover_failed` / `aite.orphan_notice_failed` | ERROR | 残局没查出来 / 收场的回帖没发出去（都不阻断起飞） |
+| `aite.signal` / `aite.stopping` / `aite.down` | WARN / INFO / INFO | 优雅退出三连 |
+| `ingress.slow_callback event=… elapsed=…` | WARN | 回调超过 1s，违反 §3.3 第一行 |
+| `ingress.handle_failed event=… kind=… error=…` | ERROR | 路由里抛异常，已吞掉不让链路挂掉。⚠️ **这个名字两边都有**，edge 也打一条同名的 |
+| `ingress.listening` / `ingress.stopped` | INFO | core 侧 `aite-core.sock` 的起停 |
+| `edge.connecting` | INFO | 开始拨 edge 的 socket |
+| `edge.connected` | INFO | 拨通了。**首次连上和重连成功用的是同一个名字** |
+| `edge.reconnecting socket=… error=… retry_in_sec=N` | WARN | 拨不通，退避重拨（1→2→…→30s 封顶） |
 | `control.dispatch_failed` | ERROR | 派发任务失败 |
-| `control.no_worker` | — | 没接 worker（组装漏了，回到 0.2） |
+| `control.no_worker` | WARN | 没接 worker（组装漏了，回到 §0.2） |
 | `control.reaped` | INFO | reaper 收了容器。M3 第 5 条要看的 |
 | `control.reap_failed` | ERROR | 回收失败，容器会留着 |
-| `control.gateway_release_failed` / `worker.gateway_release_failed` | ERROR | 沙箱没还回去 |
+| `control.release_failed` | WARN | 取消任务时沙箱没还回去 |
+| `gateway.release_failed` | WARN | 网关那一侧沙箱没还回去 |
+| `preflight.release_failed` | WARN | 只在 `aite preflight` 第 6 组里出现 |
 | `worker.model_failed` | ERROR | 模型调用炸了（已重试 2 次，2s/5s） |
 | `worker.read_history_failed` | ERROR | 拉群历史失败（软失败，任务继续）。M5 要看的 |
 | `worker.artifact_failed` | ERROR | 取产物失败 |
 | `worker.fail_notice_failed` | ERROR | 连「任务失败」的回帖都没发出去 |
 | `worker.unhandled` | ERROR | 未捕获异常，任务 failed 但进程活着 |
 
-计数器（`ControlPlane.counters` / `Ingress.counters`，**目前没有对外查看入口**，见 §8）：
-`events.handled` / `events.duplicate` / `events.nonhuman` / `events.ignored` /
-`events.steer` / `events.edited` / `events.deleted` / `sandbox.reaped` / `ingress.errors` / `ingress.slow`。
+### edge（Go，`aite-edge` 那个终端）
+
+| 关键字 | 级别 | 说明 |
+|---|---|---|
+| `edge.takeoff` / `edge.grpc_listening` / `edge.sandbox_ok` | INFO | 起飞三连。§0.2.3 |
+| `edge.signal` / `edge.shutting_down` / `edge.counters` / `edge.down` | INFO | 优雅退出四连 |
+| `feishu.connect_failed attempt=N err=…` | WARN | 建连失败（凭证错、网络不通都走这条） |
+| `feishu.reconnecting attempt=N delay_sec=N` | WARN | 长连接在退避重连（1s→2s→…→30s 封顶）。字段名是 **`delay_sec`** |
+| `feishu.reconnected after=N` | INFO | 重连成功。M2 要看的就是它。字段是 **`after`**，没有 `attempts` 这个词 |
+| `feishu.connection_lost err=…` | WARN | 连着的长连接掉了（接着会打 reconnecting） |
+| `ingress.connected socket=…` | INFO | 首次连上 core 的 `aite-core.sock`（**不计入重连**） |
+| `ingress.reconnecting socket=… base_delay=… max_delay=…` | WARN | 到 core 的 gRPC 掉了，退避重拨 |
+| `ingress.reconnected socket=… reconnects=N` | INFO | 重新连上 core。M6「只重启 core」那一遍要看的 |
+| `ingress.invalid event=… kind=… err=…` | WARN | core 说这条事件非法，**不重推** |
+| `ingress.handle_failed event=… kind=… err=…` | ERROR | 调 core 的 `HandleEvent` 失败，让平台重推。⚠️ **同名的一条在 core 那边也有** |
+| `sandbox.acquired sandbox=… task=… image=…` | INFO | **容器起来了** —— M3 里容器在「下载附件」那一步就出现，看的就是它 |
+| `sandbox.released sandbox=…` | INFO | 单个容器还回去了（任务收尾时） |
+| `sandbox.reaped count=N idle_sec=N` | INFO | reaper 这一轮收了 N 个。⚠️ **这是 edge 侧的那一行**，core 侧那行叫 `control.reaped` |
+| `sandbox.release_failed sandbox=… err=…` | WARN | 容器没删掉。M3「6 分钟后容器还在」要一起看 |
+| `sandbox.ready_failed sandbox=… task=… err=…` | WARN | 容器起来了但没就绪 |
+| `sandbox.exec_timeout sandbox=… timeout_sec=N` | **INFO** | 代码跑超时了 —— 级别是 INFO，**在一堆 INFO 里不显眼，别指望它跳出来** |
+
+### 计数器：core 侧基本没有出口，edge 侧只在退出时给一次
+
+- **core 侧**（`ControlPlane` / `Ingress`）：`events.handled` / `events.duplicate` /
+  `events.nonhuman` / `events.ignored` / `events.steer` / `events.edited` /
+  `events.deleted` / `events.dropped` / `sandbox.reaped` / `ingress.errors` / `ingress.slow`。
+  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1193`）全仓没有
+  任何非测试调用方，`!status` 只回活跃任务列表（`plane.rs:458-481`）。见 §8 第 3 条。
+  - 唯一的例外：`events.dropped` 不为 0 时，`!status` 的回复末尾会多一句
+    「⚠ 本进程启动以来有 N 条事件没接住…」（`plane.rs:557-566`）。
+    **只有这一个计数器漏了出来，`events.ignored` 没有。**
+- **edge 侧**：进程**退出时**打一行（实测）
+  `level=INFO msg=edge.counters events.sent=0 ingress.invalid=0 ingress.errors=0 ingress.reconnects=0`
+  （`edge/cmd/aite-edge/main.go:196-199`）。想看就得停一次 edge —— 跑 M 的过程中拿不到。
+
+### `!status` / `!stop` 的两条使用口径
+
+- `!stop` 在**只有一个活跃任务**时可以省略任务号（`plane.rs:568-583`）；
+  给了任务号的话 `#A17` / `a17` / ` #a17 ` 都收（`normalize_task_no` 去空格 + 补 `#` + 转大写）。
+- 两条命令都要满足 R5 的投递条件（@ 机器人，或在已有会话的话题里），见 §0.4。
+- 交付中的短任务查不到，见 §0.4 那段引用框。<!-- 台账 §4.2；V5 修掉后删本行 -->
 
 ---
 
 ## 8. 跑这份剧本时发现的观测缺口
 
 写剧本时发现有几件真机排障需要的事，现在**查不到**。这里只记录，
-`aite/` 的修改不属于本轨（T10 只读消费证据目录），留给下一轮：
+代码改动不属于本轨，留给下一轮：
 
 1. **`created_at` 不进 hash 链。** `hash = chain_hash(prev_hash, payload_hash)`，
    而 `payload_hash` 只覆盖 payload —— 改掉 `events.jsonl` 里所有时间戳，
@@ -498,11 +876,17 @@ core/target/debug/aite evidence show <被杀掉的task_id>
 2. **卡片的发送与更新不写 evidence，也没有日志。** M3 明确要求「卡片至少更新 3 次
    且不新增消息」，但 `send_card` / `update_card` 在证据里没有任何痕迹，
    只能靠肉眼数。建议加 `card_sent` / `card_updated` 两类事件（或复用 `checklist_op`）。
-3. **被丢弃的事件不留痕。** R1/R2/R8 丢弃事件时只加内存计数器，INFO 级别没有日志，
-   计数器也没有查看入口。M4 判「没投递 vs 投递了被丢」因此只能去开放平台看推送记录。
+3. **被丢弃的事件不留痕。** R1/R2/R8 丢弃事件时只加内存计数器，INFO 级别没有日志。
+   **core 侧计数器没有查看入口**（`counters()` 全仓零调用方；只有 `events.dropped`
+   经 `!status` 尾巴漏出来一点），所以 M4 判「没投递 vs 投递了被丢」只能去开放平台
+   看推送记录（M4 第 4 步）。
+   ⚠️ **edge 侧这一条已经不成立了**：退出时会打一行 `edge.counters`
+   （`events.sent` / `ingress.invalid` / `ingress.errors` / `ingress.reconnects`），
+   见 §7 末。缺的只是「跑着的时候查不到」。
 4. **卡片上一个按钮都没有（RΩ 起）。** 契约 R3 的 `stop` / `evidence` 两个动作都还在，
    但 lark-oapi-go v3.12.0 收不到卡片回传帧，渲染出来的按钮点了一定没反应，
    所以现在一个都不渲染，改成卡片末尾一行文字提示（见 §0.4）。
+   渲染那条路（`buildActions`，`cards.go:151-166`）没删，SDK 放开钩子后改回去即可。
    「停止」有等价的命令路径（`!stop`，注意投递条件）；「看证据」只能走 CLI。
 5. **`checklist_op` 的 check/fail 只记 `id` 和 `state`，不带那一项的文本。**
    `aite evidence show` 已经通过回放前面的 `add` 事件把文本补了回来，
