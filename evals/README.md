@@ -89,6 +89,31 @@ core/target/debug/aite evals run evals/p0 --platform fake --model live \
 上限一起乘 `LIVE_TIMEOUT_SCALE`（见 `core/crates/evals/src/cli.rs`），会在 stderr 说一句。
 自己调用 `--timeout-scale K` 覆盖。**场景文件一个字都不改。**
 
+### 五份实测报告：哪一轮、结论是什么、哪条被后来更正了
+
+`evals/live-report-*.md` 是历次 `--model live` 的现场记录。**按时间正序读，后一份会更正前一份**
+—— 下面只给指针和一句话结论，数和证据在各自的报告里。
+
+| 报告 | 哪一轮 / 基线 | 一句话结论 |
+|---|---|---|
+| [`live-report-2026-09-10.md`](live-report-2026-09-10.md) | T17 · `0d6939c` · Python 版 | 出牌**严格守协议**（133 次调用、0 个协议外的名字、0 条参数违规），**但一次都没用过 checklist**；另有一种出牌方式没有任何兜底接得住 —— 工具成功返回但内容为空 → 原地重复同一调用，实测连发 33 次逐字节相同的 `run_python`，烧满 `max_steps` 才停 |
+| [`live-report-2026-09-10-t19.md`](live-report-2026-09-10-t19.md) | T19 · `6ee30d4` · Python 版 | **改一句提示词，`checklist_*` 从 0 次变 31 次**（覆盖 6 个场景，前后各两遍一致）；`04_csv_to_chart` 顺带从「两遍都撞 `max_steps` failed」变成「两遍都 delivered」，步数 40 → 13/14，成本降约 15% |
+| [`live-report-2026-09-10-t23.md`](live-report-2026-09-10-t23.md) | T23 段 B + T20 段 ③ · `0960272` · Python 版 | **M3 主干第一次真的走通**：真模型 × 真沙箱，`04_csv_to_chart` 三遍全 `delivered`、每遍 7 步 |
+| [`live-report-2026-09-12-romega.md`](live-report-2026-09-12-romega.md) | RΩ · `d8bf391` · **Rust + Go 第一次** | 端到端跑通：7 步走到 `final(artifacts)`，真容器里 matplotlib 画出 40139 字节 PNG，`send_file` 回话题，任务 `delivered`，容器收干净 |
+| [`live-report-2026-09-12-v4.md`](live-report-2026-09-12-v4.md) | V4 · `8d6ffd3` · **十场景 × 两档 × 两遍** | **换语言之后模型出牌形状逐格没变**（20 格「第一步出的牌」里 19 格与 T19 §3 相同）；checklist **稳定用**（40 格里 39 格一致）；**真沙箱把叉变成勾** —— `04` 在 docker 档 `checklist_check` 1 → 5 次、`checklist_fail` 4 → 0 次，卡片内容 12 步里变 6 次（fake 档只有 3 次） |
+
+**被更正的一条**（读 RΩ 那份时务必先看这条）：
+
+> RΩ §4 那张对照表里写着「**与 Python 版结论相反**」（Python 版一次没用 checklist，
+> Rust 版两跑都用了）。**V4 §5.1 查出来这不是翻转，是比错了基线** ——
+> RΩ 引的是 T17 的数，而 T17 的基线 `0d6939c` 上 `platform.md` 还是 **2246 字节**
+> （T19 改提示词之前那版）；Rust 用的这份与 Python 删除前最后一版**逐字节相同**
+> （3878 字节，sha256 同为 `0d2ecfe8…`）。Python 侧的**最终态**本来就是「用 checklist」。
+> **更正只写在 V4 那份里，RΩ 那份已合入的报告一个字没动**，所以单读 RΩ 会读到错的结论。
+
+**读这些报告的两条共同规矩**：`passed k/n` **不是判据**（见上一节），要看的是
+`--protocol-report`；报告里写「推测」的就是没测到，别当结论用。
+
 ## 3. `--sandbox docker`：真沙箱那一档
 
 ```bash

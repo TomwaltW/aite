@@ -31,6 +31,23 @@
 >
 > 本轮**没改任何代码**。走查里撞见的代码侧问题按轨转出去了，文中带 `<!-- 台账 -->`
 > 注释的那几行就是记账，对应的轨修掉后连注释一起删。
+>
+> **2026-09-12（W1）：V1–V6 六轨合进 main 之后，本文被合并造出的失真校过一遍。**
+> V3 那一轮写的时候 V1 和 V5 还没并进来，所以有几段「各自都对、合起来自相矛盾」。改的是：
+>
+> - **§0.4 / §M1 排障表 / §7 —— `!status` 与 `!stop` 拆成两半。** V5 只修了 `!status`
+>   那一半（控制面的 `running` 并进 `status_tasks`），`!stop` 和卡片 stop 按钮走的
+>   `resolve_stop_target` / `resolve_task` **原地没动**。现在这两条命令对「什么算活跃」
+>   意见不一致，比改之前更费解 —— 原来「已知记账，别去查沙箱」那一行按半边重写了。
+> - **§0.1 的 `--help`、§0.2.4 的 `--traceback` / `--grace`** —— V6 ④a/④b/④c 的实际结果，
+>   四个 `--help` 写法逐个实测。
+> - **§0.2.5 新增：compose 起飞。** 原来是「占位，等 V1」，V1 已合入，本轮真起了一遍核的。
+>   **其中一条结论变了**：仓库不再 `./:/app` bind mount。
+> - **行号引用逐个当场核过**。合并后漂了一大片（V2 给 `preflight.rs` 加了 849 行、
+>   V5 给 `plane.rs` 加了 144 行），凡写成 `文件:行号` 的都重新 `sed -n` 看过。
+>
+> **`<!-- 台账 -->` 的约定改了一条**：V5 那种「只修一半」的情形下，注释不删，改成
+> **只指仍未修的那一半**并写明归哪轨。整段删掉会把 V5 修对的那一半一起删了。
 
 ---
 
@@ -47,10 +64,21 @@ core/target/debug/aite preflight --json          # 机器可读
 四个参数：`--config PATH`（默认 `config/aite.yaml`，不存在则退到 `config/aite.example.yaml`）、
 `--offline`、`--json`、`--chat-id ID`。
 
-> ⚠️ **别敲 `aite preflight --help`，它打不出真选项** —— 被 clap 截胡，只回一句 `[ARGS]...`
-> （退出码 0）。要看手写用法得写成 `aite preflight -- --help`（走 stdout、退出码 0）。
-> `aite run` 那一侧更糟：`aite run -- --help` 走 **stderr**、**退出码 2**。
-> 都是实测。<!-- 台账 §4.4「Rust横切」；V6 ④b 正在改这条，合流后复核本段 -->
+> ⚠️ **要看真选项，两个子命令都得写成 `-- --help`（多一个 `--`）。** 不加那个 `--`
+> 就被 clap 截胡，打出来的是一句不含任何真实选项的 `[ARGS]...`。四个写法实测如下：
+>
+> | 写法 | 打出什么 | 走哪 | 退出码 |
+> |---|---|---|---|
+> | `aite preflight -- --help` | ✅ 手写用法，四个参数全在 | stdout | 0 |
+> | `aite run -- --help` | ✅ 手写用法，三个参数全在 | stdout | 0 |
+> | `aite preflight --help` | ❌ 被 clap 截胡，只回 `[ARGS]...` | stdout | 0 |
+> | `aite run --help` | ❌ 同上 | stdout | 0 |
+>
+> **不带 `--` 的那两个仍然是坏的**，而且退出码是 0 —— 脚本里判不出来，只能靠人眼
+> 看有没有真选项。根治要动 `core/crates/app/src/main.rs` 的 clap 声明
+> （`#[arg(trailing_var_arg = true, allow_hyphen_values = true)]` 把 `--help` 吞了），
+> 归口 R0，至今没人接。<!-- 台账：不带 `--` 的两个写法仍未修，归 R0 / W3 -->
+> （`aite run -- --help` 原先走 **stderr + 退出码 2**，V6 ④b 已改成 stdout + 0，与 preflight 同口径。）
 
 `--offline` 的真输出长这样（实测原样；`config/aite.yaml` 由 `config/aite.example.yaml`
 复制而来，环境里只设了 `AITE_MODEL_API_KEY`。唯一的改动是那两行 NOTE 的正文很长，
@@ -110,7 +138,7 @@ core/target/debug/aite preflight --chat-id <测试群 chat_id>
 
 带 `--chat-id` 时 preflight 会**真调一次群历史**（`GET /open-apis/im/v1/messages`，
 `container_id_type=chat&page_size=1`，只取 1 页 1 条）。两种结局的原文写死在代码里
-（`core/crates/app/src/preflight.rs:746-800`），逐字抄在这儿，你看到的就是它：
+（`core/crates/app/src/preflight.rs:801-854` 的 `probe_history_scope`），逐字抄在这儿，你看到的就是它：
 
 - **读得到** →
   > `§3.7(b) 实测：这套凭证**读得到**群历史（chat 返回 N 条，只取了 1 页 1 条）。也就是说当前已授予的权限足够 M5；至于是不是「获取群组中所有消息」那条在起作用，接口不回权限来源，问不出来 —— 但对起飞而言结论已经够用。`
@@ -141,11 +169,13 @@ preflight 的那行 NOTE 自己也这么说：
 cd edge && go build -o bin/aite-edge ./cmd/aite-edge && cd ..
 ```
 
-> ⚠️ **`make build` 不产出这个二进制。** `Makefile:18-20` 的 build 是
+> ⚠️ **`make build` 不产出这个二进制。** `Makefile:24-26` 的 build 是
 > `cd edge && go build ./...` —— Go 在**包列表多于一个**时只做编译检查、**丢弃产物**。
 > 实测：主仓 `make build` 跑过无数遍，`edge/bin/` 至今不存在（`ls edge/bin` →
-> `No such file or directory`），而 `Makefile:55` 的 clean 里还写着 `rm -rf edge/bin`。
-> 要二进制就得自己给 `-o`。（compose 里的正确写法在 `docker-compose.yml:59`。）
+> `No such file or directory`），而 `Makefile:88` 的 clean 里还写着 `rm -rf edge/bin`。
+> 要二进制就得自己给 `-o`。（镜像里的正确写法在 `docker/edge/Dockerfile:21`：
+> `cd edge && go build -o /out/aite-edge ./cmd/aite-edge`。V1 改成真镜像之后
+> compose 不再在容器里现编，所以那条写法已经不在 `docker-compose.yml` 里了。）
 > `edge/bin/` 在 `.gitignore:21`，不入库。
 
 #### 0.2.2 开两个终端，**两个的当前目录都是仓库根**
@@ -169,8 +199,8 @@ go run ./edge/cmd/aite-edge --config config/aite.yaml
 `storage.*`。`edge/cmd/aite-edge/main.go:72` 那个 flag 的帮助文本自己就写着「相对仓库根」。
 坑在两边**解析方式不一样**：
 
-- **core** 拿 `std::env::current_dir()` 当 repo_root（`core/crates/app/src/app.rs:137-141`），
-  再把 socket 解析成**绝对路径**（`core/crates/edge-client/src/lib.rs:96-101` 的 `resolve()`）；
+- **core** 拿 `std::env::current_dir()` 当 repo_root（`core/crates/app/src/app.rs:142-146`），
+  再把 socket 解析成**绝对路径**（`core/crates/edge-client/src/lib.rs:109-116` 的 `resolve()`）；
 - **edge** 把配置里的裸相对路径**原样**交给 `ListenUnix`（`main.go:102`），而 `ListenUnix`
   第一件事是 `os.MkdirAll(filepath.Dir(path), 0o755)`（`edge/internal/server/server.go:21-24`）
   —— **不管 cwd 在哪都先把目录静默建出来，一声不吭**。
@@ -181,7 +211,7 @@ go run ./edge/cmd/aite-edge --config config/aite.yaml
 
 **谁先起都行**（§2.1 启动顺序无关）：两边都是懒连接 + 1→2→…→30s 退避重连。
 core 起飞时会问一次 edge 的 `GetStatus`（最多 5 次、每次间隔 1s，
-`core/crates/app/src/app.rs:38` 的 `EDGE_STATUS_ATTEMPTS = 5`）：
+`core/crates/app/src/app.rs:43` 的 `EDGE_STATUS_ATTEMPTS = 5`）：
 
 - 答得上且 `contract_version` 一致 → 日志 `aite.edge_status`，接着起飞；
 - 答得上但版本不一致 → **拒绝起飞**，两边版本都印出来（两个进程要一起升）；
@@ -269,18 +299,85 @@ ls data/run           # 期望：aite-edge.sock（起了 core 之后还有 aite-
   level=INFO msg=edge.counters events.sent=0 ingress.invalid=0 ingress.errors=0 ingress.reconnects=0
   level=INFO msg=edge.down
   ```
-- `--grace SEC`：优雅退出的宽限期，默认 20。
-- `--traceback`：**别指望它给你错误链**。文档原来写的是「起不来时打完整错误链」，
-  实际只是把同一句话用 Debug 再包一层引号（`eprintln!("{e:?}")`，
-  `core/crates/app/src/cli.rs:104-106`）。起不来时真正有用的是它默认就打的那两行：
-  一句人话 + 「用的配置是 …」。<!-- 台账 §4.4「Rust横切」；V6 ④c 正在改这条，合流后复核本行 -->
-- **compose 起（占位，等 V1）**：`docker compose up -d` 那一档正在被 V1 改成真镜像，
-  命令行与 service 形状**这里先不写死**。现在成立、改完大概还成立的三条：
-  - 看日志用 `docker compose logs -f`（**不是**这两个终端）；
-  - 两个 socket 在命名卷 `run:` 里，**宿主机上看不到** —— 上面那条 `ls data/run` 的判据不适用；
-  - 仓库是 `./:/app` bind mount，所以 `data/evidence`、`data/artifacts`
-    在宿主机上直接看得到，`aite evidence show` 照常在宿主机跑。
-  - ⚠️ 别贴 `docker compose config` 的完整输出给任何人：它会把 `${VAR}` 解析成**取值**。
+- `--grace SEC`：优雅退出的宽限期，**0–86400 秒**，默认 20（对齐 compose 的
+  `stop_grace_period`）。出界的值在门口就被挡：实测 `--grace 100000` 回一行
+  `--grace 要是 0 到 86400 之间的有限秒数，收到 "100000"`、退出码 2。
+- `--traceback`：**别指望它给你错误链**，它只是把同一句话用 Debug 再包一层引号
+  （`eprintln!("{e:?}")`，`core/crates/app/src/cli.rs:161-163`）。`StartupError` 是
+  `#[error("{0}")]` 的 newtype、没有 `source()`，所以那一行就是把人话套进 `StartupError("…")`。
+  起不来时真正有用的是它默认就打的那两行：一句人话 + 「用的配置是 …」。
+  （`--help` 里原先承诺的「完整错误链」名不副实，V6 ④c 已改成说实话 ——
+  现在写的是「起不来时在人话后面多打一行错误值的 Debug 形」。）
+- **compose 起**：见下面 §0.2.5，它是一套独立的形态，判据与手起飞不一样。
+
+#### 0.2.5 compose 起飞（V1 起是真镜像，不再挂仓库现编）
+
+```bash
+make compose-up        # = compose-build（建三个镜像）+ docker compose up -d + compose-ps
+make compose-ps        # 看谁就绪，STATUS 一栏带 healthy / Restarting
+make compose-logs      # = docker compose logs -f --tail=200 core edge
+make compose-down      # 停（要连命名卷一起收自己加 -v，先确认没别人在用 project aite）
+```
+
+**先建镜像这一步不能跳。** V1 把 compose 从「把仓库挂进去、在容器里现编」换成了两个
+多阶段真镜像（`docker/core/Dockerfile`、`docker/edge/Dockerfile`，运行层是
+debian:trixie-slim + 一个二进制）—— 镜像不在就起不来。`make compose-build` 走的是
+`docker compose --profile images build`，**连 `aite-sandbox:p0` 一起建**（它在 `images`
+profile 里，`docker compose up` 和 `config --services` 都看不见它）。
+
+**没有飞书凭证的机器要给 edge 换一份配置。** 两个 service 默认吃同一份 `config/aite.yaml`
+（真机验收就是这个形态），但 `platform` 这个字段对两边含义相反：core 配 `fake` 直接拒绝起飞，
+edge 配 `feishu` + 假凭证则 `platform.Start` 返错 → 进程退出 → 撞上 `restart: unless-stopped`
+就是崩溃循环。所以本机冒烟要另给 edge 一份 `platform: fake` 的配置：
+
+```bash
+sed -e 's#^platform: feishu.*#platform: fake#' config/aite.yaml > config/aite.ci-edge.yaml
+AITE_EDGE_CONFIG=config/aite.ci-edge.yaml docker compose up -d
+```
+
+> `.gitignore` 只挡了 `config/aite.yaml` 一个文件（`:14`），**`aite.ci-edge.yaml` 会冒在
+> `git status` 里** —— 它是冒烟用的临时件，用完删掉。CI 那边同样是现造两份
+> （`.github/workflows/ci.yml:97-104`），checkout 里本来就没有配置。
+
+**healthcheck 两边判据不一样**（`docker-compose.yml:88-102` / `:131-149`）：
+
+- **edge** 探标准 gRPC health（`grpc-health-probe`，探针二进制烤在镜像里），
+  与三个业务服务同一个 socket；
+- **core 没有** gRPC health service，判据是 `nc -U -z` **真 connect** ingress socket ——
+  `ingress.listening` 是起飞最后一步，connect 得上就等于前面每步都过了。
+  **刻意不用 `test -S`**：SIGKILL / panic / OOM 那条路不走 `ingress.stop()`，socket 文件
+  留在命名卷里，`test -S` 返回 0 是**假绿**。
+
+**日志轮转**：两个 service 都配了 `max-size: 10m` / `max-file: 5`。默认 json-file 驱动无上限，
+配上 `restart: unless-stopped`，崩溃循环时日志涨得很快。
+
+**下面四条是 2026-09-12（W1）在本机真起了一遍 compose 核过的，不是推断：**
+
+| 判据 | 结论 |
+|---|---|
+| 看日志 | `docker compose logs -f`（**不是**手起飞那两个终端）。要 grep 或往回执里贴，再接一层剥 ANSI：`docker compose logs --no-color core \| perl -pe 's/\e\[[0-9;]*m//g'` —— `--no-color` 只关 compose 自己那个 `core-1 \|` 前缀，管不到应用吐的字节 |
+| 两个 socket | 都在命名卷 `run:` 里。**实测**：容器内 `/app/data/run/` 有 `aite-core.sock` + `aite-edge.sock`，宿主机 `data/run/` 是**空目录**（命名卷比 `./data` 那层 bind mount 更深，盖住了它）。**§0.2.3 那条 `ls data/run` 的判据在 compose 下不适用** |
+| 仓库还挂不挂 | **不挂了。** 挂载表只有两条 bind：`./config → /app/config`（ro）与 `./data → /app/data`（rw），外加 `run:` 命名卷。容器里 `/app` 只有 `config` / `core` / `data` / `evals` 四项，**没有 `README.md`、没有 `docs/`** —— `core/crates`（取 `platform.md`）和 `evals`（取场景 yaml）是镜像 build 时 `COPY` 进去的，**冻在镜像里**，改宿主机的仓库不会改到容器里跑的那份 |
+| `aite evidence show` 还在不在宿主机跑得了 | **照跑，结论没变，但理由换了** —— 靠的是 `./data:/app/data` 这条 bind mount，不是原来那条 `./:/app`。实测：容器写的 `data/aite.db` / `data/evidence` / `data/artifacts` 在宿主机上直接看得见，宿主机 `core/target/debug/aite evidence show --list` 读得到 |
+
+⚠️ **`docker compose exec` 不过 ENTRYPOINT。** 镜像的 `ENTRYPOINT` 是 `aite`，但那只对
+`run` 生效：`docker compose run --rm core preflight --offline` 能跑，而
+`docker compose exec core evidence show --list` 报 `executable file not found in $PATH` ——
+`exec` 那条路要自己把 `aite` 写出来：`docker compose exec core aite evidence show --list`。
+
+⚠️ 别贴 `docker compose config` 的完整输出给任何人：它会把 `${VAR}` 解析成**取值**。
+要校验语法走 `make compose-config`，它已经是 `env -u FEISHU_APP_ID …` 清掉四个密钥变量
+之后再跑 `config -q` 的口径（`Makefile:56-60`，与 `.github/workflows/ci.yml` 同源）；
+要给人看服务名用 `docker compose config --services`。
+
+**§0.3 那四个观察窗在 compose 形态下分别是：**
+
+| 窗口 | 手起飞 | compose |
+|---|---|---|
+| core 日志 | `aite run` 那个终端 | `docker compose logs -f core`（或 `make compose-logs` 一次跟两个） |
+| edge 日志 | `aite-edge` 那个终端 | `docker compose logs -f edge` |
+| 证据时间线 | `aite evidence show --list` | **在宿主机上照敲原命令**（`./data` 是 bind mount）。要在容器里看则是 `docker compose exec core aite evidence show --list` |
+| 沙箱 | `docker ps --filter label=aite.task` | **一模一样，在宿主机敲**。沙箱是 edge 用宿主机 daemon 起的**兄弟容器**，不在 compose project 里 —— 所以 `docker compose ps` 里**看不到它们**，别去那儿找 |
 
 ### 0.3 四个观察窗
 
@@ -305,7 +402,7 @@ core/target/debug/aite evidence show --list
 core/target/debug/aite evidence show <task_id>
 ```
 
-> `--config` 的默认值就是 `config/aite.yaml`（`core/crates/evidence/src/cli.rs:1318-1320`
+> `--config` 的默认值就是 `config/aite.yaml`（`core/crates/evidence/src/cli.rs:1320-1322`
 > 的 `default_value`），**在仓库根跑根本不用带**。只有不在仓库根跑、或要指另一份配置时才写
 > `--config <path>` —— 单价是从它里面读的，指错了花费那一栏就是 0。
 > （`aite evidence show --help` 能打出全部七个参数：`--dir` / `--root` / `--config` /
@@ -320,7 +417,8 @@ core/target/debug/aite evidence show <task_id>
 
 > 输出**开头那几行里**有一行 `目录 <证据目录>`（`任务 …` / `目录 …` 两行，
 > `core/crates/evidence/src/cli.rs:976-977`）。**别数「第几行」** —— 前面可能先插一行
-> `提示：…`（`cli.rs:1279`、`1504-1508`）：配置读不到、或者单价是 0 的时候就会有。
+> `提示：…`（`cli.rs:1279` / `:1284` 走 `show <task_id>` 那条，`cli.rs:1399` 走 `--list` 那条）：
+> 配置读不到、或者单价是 0 的时候就会有。
 
 ### 0.4 卡片上没有按钮，改成一行提示
 
@@ -355,14 +453,27 @@ core/target/debug/aite evidence show <task_id>
   卡片是 `reply_in_thread=true` 发进任务话题的（`platform.go:394-396` 里 `SendCard`
   的 `in_thread` 写死 `true`），所以「在话题里回复」这条路**一定**走得通。
 
-<!-- 台账 §4.2；V5 修掉后删本段 -->
-> ⚠️ **一条已知记账：第一步就 `final` 的短任务，交付中的那几秒 `!status` 查不到、`!stop` 会回「没有这个任务」。**
-> `deliver()` 在 W3 那一路（第一步就 `final`、从没发过卡片）把状态置成 `Answering`
-> （`core/crates/worker/src/agent.rs:643-648`），而 `Answering` 不在 `ACTIVE_TASK_STATUSES`
-> （= created / planning / working，`core/crates/contracts/src/session.rs:33`）里；
-> `!status` 和 `!stop` 都走 `list_active_tasks`。**这是已知记账（台账 §4.2），
-> 只影响第一步就 final 的短任务（M1 那一类），不是环境问题，别去查沙箱。**
-> 发过卡片的正常任务置的是 `Working`，仍在活跃集里，不受影响。
+<!-- 台账：`!stop` 那一半仍未修，归 W2；`!status` 那一半 V5 已修，别再当记账 -->
+> ⚠️ **第一步就 `final` 的短任务，交付中的那几秒 `!status` 和 `!stop` 会给你两个互相矛盾的答复：
+> 它在 `!status` 的列表里，`!stop` 却回「没有这个任务」。**
+>
+> 机理还是原来那条：`deliver()` 在 W3 那一路（第一步就 `final`、从没发过卡片）把状态置成
+> `Answering`（`core/crates/worker/src/agent.rs:643-648`），而 `Answering` **不在**
+> `ACTIVE_TASK_STATUSES`（= created / planning / working，
+> `core/crates/contracts/src/session.rs:33`）里，所以 `list_active_tasks` 空掉。
+> 变的是有几条命令还在只查它：
+>
+> | 走哪条路 | 查的是什么 | 交付中的短任务 |
+> |---|---|---|
+> | `!status` | `status_tasks`：`list_active_tasks` **+ 控制面自己的 `running`**（过滤终态 + 用 `get_session` 过滤到本群），`plane.rs:480-513` | **列得出来**（V5 补的） |
+> | `!stop <任务号>` | `resolve_stop_target`：只有 `list_active_tasks`，`plane.rs:646-661` | 回「没有这个任务」 |
+> | 卡片 stop 按钮那条路 | `resolve_task`：只有 `list_active_tasks`，`plane.rs:663-678` | 同上（P0 不渲染按钮，见本节开头） |
+>
+> **排障时要认得出这个形状**：用户看见任务明明在列表里，伸手去停却被告知不存在。
+> 这比改之前（两条都查不到、口径一致）**更费解**，别把它读成「`!status` 也坏了」——
+> `!status` 现在是对的，坏的是 `!stop` 跟不上。**不是环境问题，别去查沙箱。**
+>
+> 发过卡片的正常任务置的是 `Working`，仍在活跃集里，两条命令都正常，不受影响。
 
 ### 0.5 「一条纯文本回复（不是卡片）」—— 这句话要分成两半读
 
@@ -432,7 +543,8 @@ core/target/debug/aite evidence show <task_id>
 | 同上，但推送记录里有 | 认不出 @ 的是自己 → R7 不命中 → R8 丢弃 | `FEISHU_BOT_OPEN_ID` 配的是不是这个应用的 open_id。跑 preflight 第 ④ 组 |
 | 有表情，没回复 | 模型这一步炸了 | core 日志 `worker.model_failed`；`aite evidence show <task_id>` 看 `model_call` 那条的 `finish_reason`；跑 preflight 第 ⑤ 组 |
 | 有表情有回复，但超过 2 秒才出现表情 | 回调里被塞了重活 | core 日志 `ingress.slow_callback`（>1s 就 WARN，带 `elapsed=`） |
-| 交付的那几秒 `!status` 查不到它 / `!stop` 回「没有这个任务」 | **已知记账，不是故障** | 这一路是 W3 的 Answering 状态，不在活跃集里。详见 §0.4 那段引用框。**别去查沙箱** <!-- 台账 §4.2；V5 修掉后删本行 --> |
+| 交付的那几秒 `!stop` 回「没有这个任务」，而 `!status` 里明明列着它 | **`!stop` 的已知记账，不是故障** | 这一路是 W3 的 Answering 状态，`!stop` 走的 `resolve_stop_target` 只查活跃集、跟不上 `!status`。详见 §0.4 那段引用框。**别去查沙箱** <!-- 台账：`!stop` 这一半仍未修，归 W2 --> |
+| 交付的那几秒 `!status` 也查不到它 | **这是真故障，不是记账** | V5 之后 `status_tasks` 把控制面的 `running` 并了进来，交付中的短任务**应该**列得出来（§0.4）。列不出来说明并的那一半没生效：core 日志看这个任务的 `task_created` 在不在、`aite evidence show <task_id>` 看它是不是已经落了终态（终态会被 `status_tasks` 主动滤掉，那是对的）。两者都不是 → 记下 `!status` 的原文与 `--list` 输出，这是 bug |
 | 机器人自己触发了自己 | R1 没拦住 | 不该发生（`sender_kind != human` 直接丢）。真出现了记下来，这是 bug 不是环境问题 |
 
 ---
@@ -551,8 +663,8 @@ core/target/debug/aite evidence show <task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 没出卡片，直接回了一段文字 | 模型一步就 `final` 了，没调工具 | 这是 W3 的 Answering 路径，**不算错**，但说明模型没去读附件。`--only tool_call` 看有没有 `download_attachment`；没有就是提示词/模型的问题。（这一路交付中 `!status` 查不到它，见 §0.4 <!-- 台账 §4.2；V5 修掉后删本句 -->） |
-| 卡片出来了，一直停在 working | 某个工具卡住 | `--only tool_call,tool_result` 看最后一条：只有 `tool_call` 没有 `tool_result` = 正卡在那一步；有 `tool_result` 且 `FAIL[timeout]` = 超时（`run_python` 用请求里的 `timeout_sec` + 余量，其余工具默认 60s，`core/crates/gateway/src/gateway.rs:221-231`） |
+| 没出卡片，直接回了一段文字 | 模型一步就 `final` 了，没调工具 | 这是 W3 的 Answering 路径，**不算错**，但说明模型没去读附件。`--only tool_call` 看有没有 `download_attachment`；没有就是提示词/模型的问题。（这一路交付中 `!status` 列得出它、`!stop` 却停不掉，见 §0.4 <!-- 台账：`!stop` 那一半仍未修，归 W2 -->） |
+| 卡片出来了，一直停在 working | 某个工具卡住 | `--only tool_call,tool_result` 看最后一条：只有 `tool_call` 没有 `tool_result` = 正卡在那一步；有 `tool_result` 且 `FAIL[timeout]` = 超时（`run_python` 用请求里的 `timeout_sec` + 余量，其余工具默认 60s，`core/crates/gateway/src/gateway.rs:238-248` 的 `budget()`） |
 | `tool_result → FAIL[sandbox]` | Docker 不可用 / 镜像不在 | `docker images aite-sandbox`；不在就 `docker build -t aite-sandbox:p0 docker/sandbox`。连续 2 次 sandbox 失败 → 任务直接 failed（§3.3）。**edge** 那个窗会有 `sandbox.*` 的错 |
 | `tool_result → FAIL[upstream]`（下载附件） | adapter 下载失败 | 附件是不是过期了/太大；换个小文件重试 |
 | 回帖里有「产物 x 未找到」 | 模型给的 path 不在 /work 下或不存在 | §3.3 规定跳过该产物、任务仍 delivered。`--only artifact` 看实际写出去几个；`delivered` 那行的 `产物缺失 N 个` |
@@ -847,10 +959,12 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 - **core 侧**（`ControlPlane` / `Ingress`）：`events.handled` / `events.duplicate` /
   `events.nonhuman` / `events.ignored` / `events.steer` / `events.edited` /
   `events.deleted` / `events.dropped` / `sandbox.reaped` / `ingress.errors` / `ingress.slow`。
-  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1193`）全仓没有
-  任何非测试调用方，`!status` 只回活跃任务列表（`plane.rs:458-481`）。见 §8 第 3 条。
+  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1305`）全仓没有
+  任何非测试调用方，`!status` 只回任务列表、一个计数器都不回（`cmd_status`，
+  `plane.rs:536-559`；它列的是什么见 §0.4）。见 §8 第 3 条。
   - 唯一的例外：`events.dropped` 不为 0 时，`!status` 的回复末尾会多一句
-    「⚠ 本进程启动以来有 N 条事件没接住…」（`plane.rs:557-566`）。
+    「⚠ 本进程启动以来有 N 条事件没接住…」（`cmd_status` 里的两处 `dropped_note()` 调用，
+    `plane.rs:539` 与 `:556`；函数体在 `plane.rs:635-644`）。
     **只有这一个计数器漏了出来，`events.ignored` 没有。**
 - **edge 侧**：进程**退出时**打一行（实测）
   `level=INFO msg=edge.counters events.sent=0 ingress.invalid=0 ingress.errors=0 ingress.reconnects=0`
@@ -858,10 +972,12 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 
 ### `!status` / `!stop` 的两条使用口径
 
-- `!stop` 在**只有一个活跃任务**时可以省略任务号（`plane.rs:568-583`）；
+- `!stop` 在**只有一个活跃任务**时可以省略任务号（`plane.rs:646-661`）；
   给了任务号的话 `#A17` / `a17` / ` #a17 ` 都收（`normalize_task_no` 去空格 + 补 `#` + 转大写）。
 - 两条命令都要满足 R5 的投递条件（@ 机器人，或在已有会话的话题里），见 §0.4。
-- 交付中的短任务查不到，见 §0.4 那段引用框。<!-- 台账 §4.2；V5 修掉后删本行 -->
+- **两条命令对「什么算活跃」意见不一致**：`!status` 走 `status_tasks`（活跃集 **+ 控制面
+  `running`**），`!stop` 走 `resolve_stop_target`（只有活跃集）。交付中的短任务因此
+  **列得出来、停不掉**，见 §0.4 那段引用框。<!-- 台账：`!stop` 那一半仍未修，归 W2 -->
 
 ---
 
@@ -888,6 +1004,8 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
    所以现在一个都不渲染，改成卡片末尾一行文字提示（见 §0.4）。
    渲染那条路（`buildActions`，`cards.go:151-166`）没删，SDK 放开钩子后改回去即可。
    「停止」有等价的命令路径（`!stop`，注意投递条件）；「看证据」只能走 CLI。
+   ⚠️ 但 `!stop` 与卡片 stop 按钮走的是**同一条** `resolve_task` / `resolve_stop_target`，
+   两者都只查活跃集 —— 所以交付中的短任务（Answering）两条路都停不掉，见 §0.4。
 5. **`checklist_op` 的 check/fail 只记 `id` 和 `state`，不带那一项的文本。**
    `aite evidence show` 已经通过回放前面的 `add` 事件把文本补了回来，
    但这意味着**单看一条 `checklist_op` 是读不懂的**，任何别的消费方都得自己回放。
