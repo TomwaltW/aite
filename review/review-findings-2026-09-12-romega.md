@@ -149,7 +149,7 @@ RΩ 按派单 §⑦ 取了「不渲染死按钮、改成一行文字提示」。
 |---|---|
 | `docker-compose.yml` | `cargo build` 写进仓库里的 `core/target`（本机已 13G 且是 darwin 产物），linux/darwin 共用一个 target 会互相全量重编。应给 core 加 `CARGO_TARGET_DIR` 指到命名卷 |
 | `docker-compose.yml` | `GOPATH=/go` 是容器层，`down` 之后再 `up` 会把全部 Go 依赖重下一遍（实测约 1 分钟）。加一个 `gomod:/go/pkg/mod` 卷就好 |
-| `core/crates/control/**` | `TaskStatus::Answering` 不在 `ACTIVE_TASK_STATUSES`（=created/planning/working）里，而 `deliver()` 第一件事就是把状态改成 Answering —— **`!status` 可能查不到「正在交付中」的任务**，`list_active_tasks` 空掉的那一刻任务后面还有 send_text + evidence + close_card + 最后一笔 update_task 没做完 |
+| `core/crates/control/**` | `TaskStatus::Answering` 不在 `ACTIVE_TASK_STATUSES`（=created/planning/working）里。`deliver()`（`agent.rs:643-648`）在 `answering == true` 时把状态置成 `Answering` —— 那是 W3 那条路（**第一步就 `final`、没发过卡片**的短任务）；`answering == false` 时置成 `Working`，仍在活跃集里。所以口子只开在 W3 这一路：`list_active_tasks` 空掉的那一刻，任务后面还有 send_text + evidence + 最后一笔 update_task 没做完，**`!status` 这段时间查不到它**。（2026-09-12 复核收窄：原先记成「每次交付都这样」是写宽了。）|
 | `core/crates/app/src/preflight.rs` | Redactor 还有两个口子：① `check_config` 失败时 run_checks 直接返回，`redactor.add()` 一次都没执行，而 detail 里会回显 serde_yaml 的出错标量；② `redactor.add` 硬编码那 4 个变量，而 `env_var_names` 是泛化扫 `*_env` —— 契约加第 5 个 `*_env` 的那天脱敏会静默漏掉它 |
 
 ### 4.3 销账（有依据地不做）
@@ -216,6 +216,12 @@ $ docker compose config -q ; echo $?
 $ core/target/debug/aite preflight --offline
 汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4（共 7 项，过了 7 项）   退出码 0
 ```
+
+> **合并后在 main 上复验时的一条未复现现象**：第一次全量 `cargo test` 出了
+> `717 passed / 1 failed`，紧接着连跑六遍都是 `718 / 0`。当时机器上正有六个 agent 在抢 CPU。
+> **失败的测试名没留下** —— 因为 `check.sh` 把 cargo 的输出 grep 成只剩计数行。
+> 已经改掉（失败名现在会打出来），但这一次的现场找不回来了。
+> 下一批谁再撞到 `failed=1`，请把 `error: test failed, to rerun pass ...` 那行贴进回执。
 
 ---
 

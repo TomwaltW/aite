@@ -31,7 +31,10 @@ run "A4c go vet"                   bash -c 'cd edge && go vet ./...'
 run "A4d gofmt"                    bash -c 'cd edge && test -z "$(gofmt -l .)"'
 run "A5 cargo test --no-run（全部测试可编译）" bash -c 'cd core && cargo test --workspace --no-run'
 run "C1 契约测试"                   bash -c 'cd core && cargo test -p aite-contracts 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"contracts passed=\" p \" failed=\" f; exit (f>0)}"'
-run "B 全量 cargo test"             bash -c 'cd core && cargo test --workspace --no-fail-fast 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p \" failed=\" f; exit (f>0)}"'
+# 计数之外还要把**失败的测试名**打出来 —— 只报 "failed=1" 的话，红了还得自己再跑一遍
+# 全量才知道是哪条（2026-09-12 就这么丢过一次现场：main 上 717/1，名字没留下，
+# 之后连跑六遍复现不出来）。失败名在前、计数在后，因为 run() 只 tail 最后 8 行。
+run "B 全量 cargo test"             bash -c 'cd core && o=$(cargo test --workspace --no-fail-fast 2>&1); printf "%s\n" "$o" | grep -E "^error: test failed" | sort -u | head -n 5; printf "%s\n" "$o" | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p \" failed=\" f; exit (f>0)}"'
 # -race 不是可选项：Go 侧的并发面（长连接重连、令牌桶、容器记账表、gRPC 并发读
 # capabilities）都不是单线程的，而竞态在普通 go test 下完全隐形 —— 合流审核那次
 # 就是靠它抓出 fakeFeishu 的读取侧没持锁（TestTransportErrorIsRetryable 现行）。
