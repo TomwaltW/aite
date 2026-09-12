@@ -186,3 +186,68 @@ V3 写这几段时，V5 还没并进来。V5 ③ 已经把「交付中的短任�
 主仓里的 Python 构建残渣仍在：`.venv/`（202M）、`aite.egg-info/`、`.pytest_cache/`、
 `.ruff_cache/`，外加根目录一份与 `docs/dev-spec-2026-09-09.md` **逐字节相同**的冗余副本
 （sha1 `8386a711c128`，45792 字节）。2026-09-12 总管明确保留，不是漏了。
+
+---
+
+## 五、W1 回执 —— 2026-09-12
+
+基线 `59043aa`。**没改任何代码**，改动面只有四份文档
+（`docs/acceptance-M.md` / `README.md` / `evals/README.md` / 本文追加这一节）。
+
+`scripts/check.sh` 收尾与开场自检**逐字相同**：`OK 25 files` · `contracts passed=25 failed=0` ·
+`cargo passed=793 failed=0` · go 六包全 `ok` · `passed 10/10` · 全部通过 · 退出码 0。
+
+### 销掉的（本文 §三那四条）
+
+| 账 | 怎么销的 |
+|---|---|
+| §3.1 五处 `!status` / `!stop` | **拆成两半写**，不是删。`acceptance-M.md` §0.4 换成一张三行表（`status_tasks` / `resolve_stop_target` / `resolve_task` 各查什么），M1 排障表那一行**裂成两行**：`!stop` 停不掉仍是记账、`!status` 查不到**现在是真故障**；§7 两处同口径 |
+| §3.2 README 的 CI 章节 | 照 `ci.yml` 重写成两个并行 job，`compose-smoke` 六步逐条写开；`README.md:114` 那句「CI 里目前没有 preflight」改成「在 `compose-smoke` 里、`ci.yml:115-118`、跑在真镜像里」 |
+| §3.3 README 的容器段 | 补 `make compose-*` 五个 target、先建镜像（含 `aite-sandbox:p0`）、两边不同口径的 healthcheck、日志轮转 |
+| §3.4 V4 报告没入口 | `evals/README.md` §2 加了五份报告的索引表，外加「RΩ §4 那条被 V4 §5.1 更正」的单独一段 |
+
+### `acceptance-M.md` §0.2.5 新增：compose 起飞（真起了一遍核的）
+
+**一条结论翻了**：原文写「仓库是 `./:/app` bind mount」——**现在不是了**。挂载表只有
+`./config:ro` 与 `./data:rw` 两条 bind，容器里 `/app` 没有 `README.md` / `docs/`，
+`core/crates` 与 `evals` 是镜像 `COPY` 进去的、**冻在镜像里**。
+但下游结论仍成立：`data/evidence` 经 `./data` 这条 bind 在宿主机看得见，
+`aite evidence show` 照常在宿主机跑 —— **理由换了，结论没换**。
+
+另两条实证成立：`docker compose logs -f` 照旧；两个 socket 在命名卷 `run:` 里，
+宿主机 `data/run/` 是空目录（命名卷比 `./data` 更深，盖住了它）。
+顺带一条新坑：**`docker compose exec` 不过 ENTRYPOINT**，
+要写成 `docker compose exec core aite evidence show --list`（`run --rm` 那条路才过）。
+
+### 行号引用：11 处漂了，已逐个 `sed -n` 核过改掉
+
+`preflight.rs:746-800`→`801-854`、`app.rs:137-141`→`142-146`、`app.rs:38`→`43`、
+`edge-client/src/lib.rs:96-101`→`109-116`、`cli.rs:104-106`→`161-163`、
+`evidence/src/cli.rs:1318-1320`→`1320-1322`、`evidence/src/cli.rs:1504-1508`→`1399`、
+`gateway.rs:221-231`→`238-248`、`plane.rs:1193`→`1305`、`plane.rs:458-481`→`536-559`、
+`plane.rs:557-566`→`539`/`556`+`635-644`、`plane.rs:568-583`→`646-661`、
+`Makefile:18-20`→`24-26`、`Makefile:55`→`88`、`docker-compose.yml:59`→`docker/edge/Dockerfile:21`。
+核过没漂的：`session.rs:33`、`plane.rs:28`、`plane.rs:377-378`、`link.rs:9`、
+`agent.rs:643-648`、`context.rs:70-82`、`platform.md:54`、`cards.go` 四处、
+`platform.go` 两处、`server.go:21-24`、`main.go` 三处、`.gitignore` 三处、
+`evidence/src/cli.rs:976-977`、`cli.rs:1279`。
+`demo-3min.md` 与 `evals/README.md` 里**一个 `文件:行号` 都没有**，不用核。
+
+### 记账转出去的（撞见但没伸手改）
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/control/src/plane.rs:646-661`（`resolve_stop_target`）、`:663-678`（`resolve_task`） | 只查 `list_active_tasks`，跟不上 V5 改过的 `status_tasks`。**`!status` 列得出来、`!stop` 停不掉**，两条命令对「什么算活跃」意见不一致，且零测试钉着 | **W2**（本文 §4.1 末段已立） |
+| `core/crates/app/src/main.rs` 的 clap 声明 | `#[arg(trailing_var_arg = true, allow_hyphen_values = true)]` 把 `--help` 吞了：`aite run --help` / `aite preflight --help` 都打不出真选项，**而且退出码是 0**，脚本里判不出来。V6 ④b 只修了 `-- --help` 那个写法 | **R0 / W3**（本文 §4.2 已立） |
+| `.github/workflows/ci.yml:112` 的注释 | 引的是「README.md:90 写着…CI 用这一档」。那句话在 V3 改写时挪了位置、「CI 用这一档」的字样也掉了。W1 已在 `README.md:136` 把语义补回来，但 ci.yml 里那个**行号**仍是漂的 —— ci.yml 是 W1 的只读面 | 顺手改（W2/W3 或总管） |
+| `docker/core/Dockerfile`、`docker/edge/Dockerfile` | 两个 Dockerfile 都**没有 `USER`**，容器以 root 跑。macOS 的 Docker Desktop 把 uid 映射回宿主用户，所以 `./data` 里的文件宿主机读写正常（W1 实测 owner 是当前用户）；**Linux 上不是这样** —— `data/evidence` 会是 root 拥有，宿主机那条 `aite evidence show` 可能读不了。**只在 macOS 上验过，Linux 未验证** | 待定 |
+
+### 顺带留下的一份现场：又一次 `cargo` 假红
+
+收尾第一遍 `check.sh` 报 `cargo passed=791 failed=2`，失败名是
+`-p aite --test graceful_shutdown` 与 `-p aite --test startup_recovery`。
+**单独跑这两个 target：7 passed / 9 passed，全绿**；紧接着重跑全量回到 `793 failed=0`。
+与 RΩ 台账第五节那次 `717/1` 同形态（本轨没改代码，改的全是 `.md`）。
+排除过一个混淆项：当时 `config/aite.yaml` 因 compose 实证而存在（平时不存在），
+但单跑复现时它仍在、照样全绿，**不是它**。
+`graceful_shutdown` 本身有本文 §4.1 记着的计时区间量错（`:237,249`），是天然的抖动源。

@@ -78,14 +78,43 @@ core/target/debug/aite run                       # 组装并起飞
 不是取值 —— 别把密钥写进 `config/aite.yaml`，也别写进代码。
 `aite preflight` 的任何输出都不会出现取值（只报变量在不在）。
 
-容器方式：
+容器方式（**两个多阶段真镜像，不是把仓库挂进去现编**）：
 
 ```bash
-docker compose up -d          # core + edge 两个 service，共享 data/run 卷
+make compose-up      # = 先建三个镜像（core / edge / 沙箱），再 docker compose up -d，再 ps
+make compose-ps      # 看谁就绪：STATUS 一栏带 healthy / Restarting
+make compose-logs    # = docker compose logs -f --tail=200 core edge
+make compose-down    # 停（要连命名卷一起收自己加 -v）
+make compose-config  # 只校验编排能不能解析，不打印取值
 ```
 
+> ⚠️ **镜像不在就起不来，别直接 `docker compose up -d`。** 运行层是
+> `debian:trixie-slim` + 一个二进制，编译全在 builder 阶段
+> （`docker/core/Dockerfile`、`docker/edge/Dockerfile`），仓库树一个字节都不碰。
+> `make compose-up` 依赖 `compose-build`，走的是 `docker compose --profile images build`
+> —— **连 `aite-sandbox:p0` 一起建**（它在 `images` profile 里，`docker compose up` 和
+> `config --services` 都看不见它）。edge 只 `ImageInspect`、**不 pull**，镜像不在就报
+> 「沙箱镜像不存在」。
+
+两个 service 有 healthcheck，但**判据不一样**，别照抄：
+
+- **edge** 探标准 gRPC health（`grpc-health-probe`，探针二进制烤在镜像里），
+  与三个业务服务共用同一个 unix socket。
+- **core 没有** gRPC health service，判据是 `nc -U -z` **真 connect** ingress socket。
+  **不能用 `test -S`**：SIGKILL / panic / OOM 不走 `ingress.stop()`，socket 文件会留在
+  命名卷里，`test -S` 返回 0 是**假绿**。
+- 两个 healthcheck **都不许**被拿去当启动顺序用（刻意不写 `depends_on`）——
+  启动顺序无关是设计，它们只是让人在 `docker compose ps` 里看得见谁就绪。
+
+两个 service 都配了日志轮转 `max-size 10m` / `max-file 5`：默认 json-file 驱动无上限，
+配上 `restart: unless-stopped`，崩溃循环时日志涨得很快。
+
 > ⚠️ `docker compose config` 会把 `${VAR}` **解析成取值**再打出来，它的完整输出是带密钥的。
-> 要贴给别人用 `docker compose config --services`。
+> 要贴给别人用 `docker compose config --services`；要校验语法用 `make compose-config`，
+> 它已经是 `env -u` 清掉四个密钥变量之后再跑 `config -q` 的口径（与 CI 同源）。
+
+容器形态与手起飞的差别（socket 在命名卷里看不见、`docker compose exec` 不过 ENTRYPOINT、
+四个观察窗各是什么命令）见 [`docs/acceptance-M.md`](docs/acceptance-M.md) §0.2.5。
 
 停机：`SIGTERM` 走优雅退出（停投递 → 等在跑的任务善终，宽限 20s → 还沙箱 → 关库），
 退出码 0；**再来一次**信号立刻硬退，退出码 130。
@@ -104,15 +133,18 @@ aite contracts lock --check
 
 `aite preflight` 的七组：配置可加载 / 环境变量齐 / 飞书凭证有效 / 机器人身份对得上 /
 模型端点通 / 沙箱可用 / 落盘目录可写。任一 FAIL → 退出 1，**一项失败不阻断后面的**；
-`--offline` 只跑 1、2、7（不碰网络也不碰 docker，适合没凭证的机器）。
+`--offline` 只跑 1、2、7（不碰网络也不碰 docker，适合没凭证的机器；**CI 用的就是这一档**）。
 `--chat-id <测试群 chat_id>` 会顺带真调一次群历史，回答 spec §3.7(b) 那条待核实项。
 
 > ⚠️ **`--offline` 全绿不等于起得来**：它跳过第 5 组，而配置样例里 `model.base_url` /
 > `model.model` 是空的 —— 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2。
 > 真机起飞前那一遍必须不带 `--offline`。
 >
-> ℹ️ **CI 里目前没有 preflight 这一步**（`ci.yml` 十步全列在下面「CI」那一节）。
-> 要不要加是另一回事，这里只如实说现状。
+> ℹ️ **CI 里跑的是 `--offline` 这一档，而且只在 `compose-smoke` 那个 job 里**
+> （`.github/workflows/ci.yml:115-118`，命令是 `docker compose run --rm core preflight --offline`
+> —— 在真镜像里跑，不是在 runner 上）。`checks` 那个 job 从 A1 到 B8 **没有 preflight**。
+> 原因是 `config/aite.yaml` 不入库，CI 得自己造一份，而造配置那一步本来就只有
+> `compose-smoke` 需要。
 
 ## 验收
 
@@ -212,9 +244,39 @@ stdout 是「一份 JSON 摘要 + 最后一行 `passed k/10`」；全过退出 0
 
 ## CI
 
-`.github/workflows/ci.yml`，一步一条判据：A1 编译 → A2 编译 → A3 契约锁 →
+`.github/workflows/ci.yml`，**两个并行 job**，各拿一份时间预算。
+
+**`checks`**（timeout 30 分钟）—— 一步一条判据：A1 编译 → A2 编译 → A3 契约锁 →
 A4 lint → A5 测试可编译 → C1 契约测试 → B 全量测试 → B go test `-race` →
-**B8 评测（硬门禁，要 `passed 10/10`）** → compose 双 service 可解析。
+**B8 评测（硬门禁，要 `passed 10/10`）**。
+
+**`compose-smoke`**（timeout 25 分钟）—— 真把两个容器起起来，六步：
+
+1. **双 service 可解析** —— `env -u` 清掉四个密钥变量再 `docker compose config --services`，
+   断言正好是 `core edge`（沙箱那个 service 在 `images` profile 里，这里看不见它）。
+   这一步很便宜，留着是为了在花 6 分钟 build 之前先抓到 YAML 写坏。
+2. **造 CI 用的两份配置** —— `config/aite.yaml` 不入库，checkout 里根本没有。两份而不是
+   一份：core 与 edge 读的是**同一个 `platform` 字段**，含义却相反 —— core 配 `fake` 直接
+   拒绝起飞（所以 core 必须 `feishu`，且要把 example 里空着的 `base_url` / `model` 填上），
+   edge 配 `feishu` + 假凭证会崩溃循环（所以 edge 必须 `fake`）。
+3. **两个镜像真编出来** —— `docker compose build`。这一步就是「rust 镜像里没 protoc」那条
+   blocker 的门禁：protoc 缺了 `build.rs` 当场炸。沙箱镜像刻意不建（起飞与冒烟都不需要它）。
+4. **`preflight --offline`** —— `docker compose run --rm core preflight --offline`，
+   在真镜像里跑（镜像的 `ENTRYPOINT` 就是 `aite`，命令里不用再写一遍）。
+5. **起飞冒烟：两个 socket 真连上** —— `up -d` 之后轮询两边 healthcheck 转 `healthy`
+   （上限 40 × 3s），然后逐条断言：两个 socket 都在共享卷 `/app/data/run` 里、
+   两个进程 cwd 都是 `/app`、运行层里**压根没有工具链**（`cargo` / `protoc` / `go` 都不在）、
+   core 侧四行起飞日志（`edge.connected` / `aite.edge_status` / `ingress.listening` / `aite.up`，
+   先剥 ANSI 再 grep —— `--no-color` 只关 compose 自己的行前缀，管不到应用吐的字节）、
+   两个容器的 `RestartCount` 都是 0。
+6. **收干净** —— `always()` 跑 `down -v`，并断言 `label=aite.task` 的容器数是 0。
+   （另有一条 `failure()` 才跑的步骤，把两边日志、`ps -a`、退出码与 `RestartCount`
+   都打出来 —— 它不是判据，是红了之后不用重跑就能看现场。）
+
+> 第 5 步为什么值得单列：到 RΩ 合并前 compose 的门禁只有第 1 步那条纯解析，
+> 而那次真 `up` 一撞就是四条 blocker（登录 shell 洗掉 PATH、rust 镜像里没 protoc、
+> cwd 不是仓库根、socket 落到非共享卷），**纯解析一条都抓不到** ——
+> 实测把 compose 退回坏的那一份，第 1 步退出码照样 0。
 
 ## 已知边界
 
