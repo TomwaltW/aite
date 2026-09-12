@@ -1,3 +1,7 @@
+# 守卫 hook（.claude/hooks/guard_bash.py）是 python3 脚本，跑一次就生成一个 __pycache__。
+# Python 树虽然 2026-09-12 删了，这一条不能跟着删。
+__pycache__/
+
 # 并行开发的 worktree（挂在主仓工作区里，不入库）。
 # 必须 ignore：否则主仓根上跑的任何全树命令（cargo fmt --check、gofmt -l .、
 # grep 类自检）都会连各轨的代码一起扫。
