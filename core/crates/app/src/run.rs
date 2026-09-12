@@ -5,12 +5,30 @@
 //! ```text
 //! platform.stop()                     先闭嘴，不再收新事件
 //! plane.join() 限时 grace             在跑 / 排队的任务收尾
-//!   超时 -> 先抄 worker.in_flight     取消之后就再也问不出它们是谁了
-//! runner.abort()                      取消 run_forever 那条 task
+//! runner.abort() + await              取消 run_forever 那条 task，等它真的停下
+//!   超时过 -> 抄 worker.in_flight     此刻表里正好是「被硬取消的那批」
 //! cancel_task(notify=false) x stranded 给硬取消的任务善终
 //! sandbox.close_all()
 //! store.close()
 //! ```
+//!
+//! **「抄」与「取消」的先后是 RΩ 审核之后调过的**（原文是「先抄再取消 —— 取消之后就
+//! 再也问不出它们是谁了」）。那句话是从 Python 直译来的，而 Python 的前提在 Rust 上不成立：
+//!
+//! - Python 是单事件循环，`_shutdown` 里从抄 `in_flight` 到 `runner.cancel()` 之间
+//!   没有 await，窗口精确为零；Rust 这边 `run_forever` 在另一条 tokio task 上、runtime
+//!   是 `new_multi_thread`，抄完到 abort 生效之间两条线**真并行**。窗口窄，但两头都真：
+//!   派发循环可能刚 pop 出一个新任务（它不在快照里，于是没人给它善终），
+//!   在飞的那个也可能刚好自己跑完（快照成了过期的，`cancel_task` 会把一条已经
+//!   `delivered` 的任务改写成 `cancelled`、卡片翻成「已取消」）。
+//! - 而原文担心的「取消之后问不出来」在 Rust 上**不会发生**：`AgentWorker::run` 把条目
+//!   从 `in_flight` 摘掉只在正常返回那一句（没有 Drop guard 兜着），被 `abort()` 丢掉的
+//!   future 会把条目**留在表里**。
+//!
+//! 所以抄在 `h.await` 之后：那一刻 `run_forever` 已经彻底结束，`in_flight` 不再变化，
+//! 读到的正好是「真正被硬取消的那批」—— 等价于原序列，外加把上面两个窗口一起关掉。
+//! 控制面侧还有一道独立的防线（`cancel_task` 落刀前按 id 重读一次，终态就不动），
+//! 两条都在，是因为 `cancel_task` 是冻结契约上的公开方法，别的调用方也可能递过期快照。
 //!
 //! `store.init()` 也在「try」里面：它一成功就有一条 SQLite 连接挂着，此后任何一处失败
 //! 都必须走到收尾里的 `store.close()`。起飞阶段的收残局正落在这个窗口里。
@@ -175,14 +193,28 @@ async fn shutdown(app: &AiteApp, runner: Option<JoinHandle<()>>, grace: f64) {
         tracing::warn!(target: "aite.app", error = %e, "aite.platform_stop_failed");
     }
 
-    let mut stranded: Vec<(Task, Session)> = Vec::new();
-    if runner.as_ref().is_some_and(|h| !h.is_finished())
+    let timed_out = runner.as_ref().is_some_and(|h| !h.is_finished())
         && tokio::time::timeout(Duration::from_secs_f64(grace.max(0.0)), app.plane.join())
             .await
-            .is_err()
-    {
-        // 超时这一支：先把在飞的任务抄下来，取消之后就再也问不出它们是谁了。
-        stranded = app.worker.in_flight();
+            .is_err();
+
+    if let Some(h) = runner {
+        h.abort();
+        let _ = h.await;
+    }
+
+    // 抄在 abort **之后**（理由见模块头那一段）：`h.await` 返回意味着 `run_forever` 那条
+    // task 已经彻底结束，`in_flight` 从此不再变化 —— 这一眼看到的正好是「真正被硬取消的
+    // 那批」。跑完的已经把自己摘掉了，abort 前刚 pop 出来的还留着，两头都不漏。
+    let stranded: Vec<(Task, Session)> = if timed_out {
+        app.worker.in_flight()
+    } else {
+        Vec::new()
+    };
+    if timed_out {
+        // 跟着挪到这里：`running` 报的是**真正被硬取消的**数量，比「超时那一刻在飞的」
+        // 准（后者可能含一个正在正常收尾、根本不用取消的）。abort + await 是毫秒级，
+        // 排障时机上没差别。
         tracing::warn!(
             target: "aite.app",
             grace,
@@ -190,11 +222,6 @@ async fn shutdown(app: &AiteApp, runner: Option<JoinHandle<()>>, grace: f64) {
             pending = app.plane.pending(),
             "aite.shutdown_timeout 宽限期内没收完，强行取消"
         );
-    }
-
-    if let Some(h) = runner {
-        h.abort();
-        let _ = h.await;
     }
 
     // 被硬取消的任务自己没机会收场（worker 的 cancel 分支只在每步开头查标志位）。

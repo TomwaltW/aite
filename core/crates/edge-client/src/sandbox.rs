@@ -26,7 +26,7 @@ impl SandboxPort for EdgeSandbox {
     async fn acquire(&self, task_id: &str, spec: &SandboxSpec) -> Result<String, SandboxError> {
         let reply = self
             .link
-            .sandbox_client()
+            .sandbox_client()?
             .acquire(pb::AcquireRequest {
                 task_id: task_id.to_string(),
                 spec: Some(pb::SandboxSpec::from(spec.clone())),
@@ -40,7 +40,7 @@ impl SandboxPort for EdgeSandbox {
     async fn exec(&self, sandbox_id: &str, req: &ExecRequest) -> Result<ExecResult, SandboxError> {
         let reply = self
             .link
-            .sandbox_client()
+            .sandbox_client()?
             .exec(pb::ExecCallRequest {
                 sandbox_id: sandbox_id.to_string(),
                 req: Some(pb::ExecRequest::from(req.clone())),
@@ -58,7 +58,7 @@ impl SandboxPort for EdgeSandbox {
         data: &[u8],
     ) -> Result<(), SandboxError> {
         self.link
-            .sandbox_client()
+            .sandbox_client()?
             .put_file(pb::PutFileRequest {
                 sandbox_id: sandbox_id.to_string(),
                 path: path.to_string(),
@@ -73,7 +73,7 @@ impl SandboxPort for EdgeSandbox {
     async fn get_file(&self, sandbox_id: &str, path: &str) -> Result<Vec<u8>, SandboxError> {
         let reply = self
             .link
-            .sandbox_client()
+            .sandbox_client()?
             .get_file(pb::GetFileRequest {
                 sandbox_id: sandbox_id.to_string(),
                 path: path.to_string(),
@@ -87,7 +87,7 @@ impl SandboxPort for EdgeSandbox {
     async fn list_files(&self, sandbox_id: &str) -> Result<Vec<String>, SandboxError> {
         let reply = self
             .link
-            .sandbox_client()
+            .sandbox_client()?
             .list_files(pb::ListFilesRequest {
                 sandbox_id: sandbox_id.to_string(),
             })
@@ -99,7 +99,7 @@ impl SandboxPort for EdgeSandbox {
 
     async fn touch(&self, sandbox_id: &str) -> Result<(), SandboxError> {
         self.link
-            .sandbox_client()
+            .sandbox_client()?
             .touch(pb::TouchRequest {
                 sandbox_id: sandbox_id.to_string(),
             })
@@ -111,7 +111,7 @@ impl SandboxPort for EdgeSandbox {
 
     async fn release(&self, sandbox_id: &str) -> Result<(), SandboxError> {
         self.link
-            .sandbox_client()
+            .sandbox_client()?
             .release(pb::ReleaseRequest {
                 sandbox_id: sandbox_id.to_string(),
             })
@@ -124,7 +124,7 @@ impl SandboxPort for EdgeSandbox {
     async fn reap_idle(&self, idle_sec: u32) -> Result<Vec<String>, SandboxError> {
         let reply = self
             .link
-            .sandbox_client()
+            .sandbox_client()?
             .reap_idle(pb::ReapIdleRequest {
                 idle_sec: idle_sec as i32,
             })

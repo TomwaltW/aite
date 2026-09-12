@@ -35,6 +35,14 @@ async fn client(edge: &FakeEdge) -> EdgeClient {
         .expect("懒连接不该失败")
 }
 
+/// 假 edge 收到的调用，去掉契约闸门那几发 `GetStatus`。
+fn method_calls(edge: &FakeEdge) -> Vec<String> {
+    edge.calls()
+        .into_iter()
+        .filter(|m| m != "GetStatus")
+        .collect()
+}
+
 fn card() -> ChecklistCard {
     ChecklistCard {
         task_id: "task-1".into(),
@@ -122,8 +130,11 @@ async fn platform_round_trip_covers_every_method() {
         .expect("download_file");
     assert_eq!(blob, vec![7u8; 4]);
 
+    // 过滤掉 `GetStatus`：第一发通了的 RPC 会顺手补比一次 `contract_version`
+    // （`gate.rs` 的契约闸门 —— 起飞之后唯一的复查点）。那是基础设施的一发，
+    // 不属于「每个 PlatformPort 方法各往返一遍」这条断言要管的事。
     assert_eq!(
-        edge.calls(),
+        method_calls(&edge),
         vec![
             "SendText",
             "SendCard",
@@ -189,8 +200,9 @@ async fn sandbox_round_trip_covers_every_method() {
     // close_all 是本地 no-op：沙箱记账在 edge，不该多打一次 RPC
     sandbox.close_all().await.expect("close_all");
 
+    // 同上：`GetStatus` 是契约闸门的补比，不算 SandboxPort 的往返。
     assert_eq!(
-        edge.calls(),
+        method_calls(&edge),
         vec![
             "Acquire",
             "Exec",

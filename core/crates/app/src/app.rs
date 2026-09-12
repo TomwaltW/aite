@@ -35,6 +35,11 @@ pub const DEFAULT_CONFIG_PATH: &str = "config/aite.yaml";
 /// 不等就拒绝起飞」。只拨一次的话 `docker compose up` 下 core 多半比 edge 快，版本门禁
 /// 就成了摆设；无限等又违反前一条。折中：最多 5 次 × 1s —— 答上来就严格比对，
 /// 始终答不上来就记一行 `aite.edge_unreachable` 照常起飞（懒连接会自己恢复）。
+///
+/// **这里只管「起飞这一次」。** 起飞之后的复查归 `aite-edge-client` 的契约闸门
+/// （那个 crate 的 `gate.rs`）：后台探针每重新连上一次就比一次，比出不一致就闸断
+/// platform / sandbox 两条链路、对上了自己解开。没有它的话「4s 内没拨通就放行」
+/// 等于此后整个进程生命周期都不再比对 —— 而 M6 的「只重启 edge」那一遍走的正是这条路。
 const EDGE_STATUS_ATTEMPTS: u32 = 5;
 
 /// 起飞前就能看出来的问题。消息本身就是给人看的那句话，`cli` 直接原样打出去。
@@ -326,14 +331,16 @@ async fn check_contract_version(edge: &Arc<EdgeClient>) -> Result<(), StartupErr
             }
         }
     }
-    // §2.1「启动顺序无关」：edge 还没起不是起飞失败。懒连接会自己恢复，
-    // 代价是这一轮的版本门禁没生效 —— 所以要在日志里说出来，别让人以为比过了。
+    // §2.1「启动顺序无关」：edge 还没起不是起飞失败。**起飞这一轮**的版本门禁确实没生效，
+    // 所以要在日志里说出来，别让人以为比过了 —— 但这不再是个缺口：edge 一起来，
+    // edge-client 的后台探针拨通那一下就会补比一次（`gate.rs` 的契约闸门），
+    // 不一致就把链路闸断并说明怎么恢复。
     tracing::warn!(
         target: "aite.app",
         socket = %edge.edge_socket().display(),
         attempts = EDGE_STATUS_ATTEMPTS,
         error = %last.unwrap_or_default(),
-        "aite.edge_unreachable contract_version 这一轮没比成；edge 起来后下一发 RPC 自动恢复"
+        "aite.edge_unreachable contract_version 起飞这一轮没比成；edge 起来后探针会补比一次"
     );
     Ok(())
 }

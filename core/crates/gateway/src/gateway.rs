@@ -75,6 +75,23 @@ impl Inner {
             .cloned()
     }
 
+    /// 容器在 edge 那边已经没了时，把记账里那一条摘掉 —— 下一次 `acquire_sandbox`
+    /// 就会老老实实建个新的，而不是把死 id 再复用出来。
+    ///
+    /// 真会走到这里的是 W7 的 reaper：它按 `sandbox.idle_sec`（默认 300s）收空闲容器，
+    /// 而 `touch` 只在沙箱 RPC 时发生 —— 模型在两次工具调用之间想上五分钟，中间一次都不刷。
+    /// edge 那边 `ReapIdle` 把收走的 id 交回控制面，但控制面只拿它计数（`plane.rs` 的
+    /// `reaper_loop`），**Gateway 这张表没有人通知**。所以只能由用到它的那一侧自愈。
+    ///
+    /// 只动记账，不发 `release`：那个 id 在 edge 那边已经不存在，再 release 一次
+    /// 换回来的还是一条 NotFound。
+    pub(crate) fn forget_sandbox(&self, task_id: &str) -> Option<String> {
+        self.sandbox_ids
+            .lock()
+            .expect("sandbox_ids 锁")
+            .remove(task_id)
+    }
+
     /// 一个 task 一个沙箱，有就复用。
     pub(crate) async fn acquire_sandbox(&self, task_id: &str) -> Result<String, ToolFailure> {
         if let Some(existing) = self.current_sandbox_id(task_id) {

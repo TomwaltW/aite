@@ -130,6 +130,35 @@ impl ToolEnv {
     pub fn current_sandbox_id(&self) -> Option<String> {
         self.inner.current_sandbox_id(&self.task_id)
     }
+
+    /// 把记账里那个已经不存在的容器摘掉（见 `Inner::forget_sandbox`）。
+    pub fn forget_sandbox(&self) -> Option<String> {
+        self.inner.forget_sandbox(&self.task_id)
+    }
+}
+
+/// 沙箱被 reaper 收走之后重建了一个，这句话要让**模型**看见。
+///
+/// 放进 `tracing` 是不够的：模型手上还留着「我刚才把中间结果写进了 /work/x.csv」这个
+/// 记忆，新容器的 /work 是空的。不明说的话它下一步会去读一个不存在的文件，然后按
+/// 「文件读不到」去猜原因 —— 那比直接报错更糟。所以这句话排在工具正文的最前面。
+pub(crate) const SANDBOX_REBUILT_NOTE: &str = "【沙箱已重建】原来的容器因为长时间没有动作被回收了，这一次是在一个全新的容器里跑的：\
+     之前写进 /work 的文件都不在了，需要哪个就重新生成一遍。";
+
+/// `list_files` 那一路：容器没了就等于 /work 空了，这里**不**重建（模块头那条
+/// 「列目录不该为它起一个容器」照样成立）。
+pub(crate) const SANDBOX_REAPED_NOTE: &str = "【沙箱已回收】原来的容器因为长时间没有动作被回收了，之前写进 /work 的文件都不在了。\
+     下一次 run_python 会起一个全新的空容器。";
+
+/// 「容器没了」之后摘掉记账、重建一个，返回新的 sandbox_id。
+///
+/// **只给重试那一次用。** 重试之后再撞 NotFound 就照常收成 `code=sandbox`，不然
+/// §3.3 的「连续 2 次沙箱失败 → task failed」那道闸会被这里的无限重建架空。
+pub(crate) async fn rebuild_sandbox(env: &ToolEnv) -> Result<String, ToolFailure> {
+    env.forget_sandbox();
+    env.acquire_sandbox()
+        .await
+        .map_err(|e| ToolFailure::sandbox(format!("沙箱没了，重建也没成：{e}")))
 }
 
 macro_rules! tool_entry {

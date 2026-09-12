@@ -642,6 +642,11 @@ struct StoreState {
     sessions: HashMap<String, Session>,
     tasks: HashMap<String, Task>,
     turns: HashMap<String, Vec<Turn>>,
+    /// 每一次 `update_task` 落的状态，按顺序。
+    ///
+    /// 只看最终态的话，状态机中间那几格谁都钉不住 —— `deliver()` 的 Answering 就是
+    /// 这么长期没人管的（全仓一条断言都没有）。
+    status_writes: Vec<(String, TaskStatus)>,
 }
 
 #[derive(Default)]
@@ -702,6 +707,18 @@ impl FakeSessionStore {
     /// worker 调了几次 update_task（每步末尾一次 + 几个关键节点）。
     pub fn saved_status(&self, task_id: &str) -> Option<TaskStatus> {
         self.task(task_id).map(|t| t.status)
+    }
+
+    /// 这个任务被 `update_task` 落过的状态，按先后顺序（含中间态）。
+    pub fn status_writes(&self, task_id: &str) -> Vec<TaskStatus> {
+        self.state
+            .lock()
+            .expect("store")
+            .status_writes
+            .iter()
+            .filter(|(id, _)| id == task_id)
+            .map(|(_, status)| *status)
+            .collect()
     }
 }
 
@@ -771,6 +788,11 @@ impl SessionStore for FakeSessionStore {
 
     async fn update_task(&self, t: &Task) -> Result<(), StoreError> {
         self.put_task(t);
+        self.state
+            .lock()
+            .expect("store")
+            .status_writes
+            .push((t.id.clone(), t.status));
         Ok(())
     }
 

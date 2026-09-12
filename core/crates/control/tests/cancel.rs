@@ -216,3 +216,117 @@ async fn cancelling_a_running_task_writes_nothing() {
     let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
     assert_eq!(saved.status, TaskStatus::Cancelled);
 }
+
+// --------------------------------------------------------------------------
+// 过期快照那一支（审核记账 4.1 第 2 行，方向乙）
+// --------------------------------------------------------------------------
+
+/// 拿一份**过期快照**来取消：库里那条已经收场了，就一个字都不许改。
+///
+/// 真会撞上的是收尾那一支。`app` 的 `shutdown()` 在宽限期超时时先抄一份
+/// `worker.in_flight()`，抄到 `runner.abort()` 生效之间，那个任务完全可能已经在另一条
+/// task 上把自己跑完了（落 delivered、写 delivered 证据、finalize、收卡片、回写 in_flight）。
+/// 手上那份快照此后就是过期的 —— 它停在 `deliver()` 开头那次 `save()` 写的 working 上。
+///
+/// 没有这道防线的话，四件事一起发生：库里 delivered 被改写成 cancelled、
+/// 卡片从「已交付」翻成「已取消」、链上多一条 cancelled 证据、manifest 再 finalize 一遍
+/// （幂等判据读的是**快照里**的 evidence_root_hash，那一份还是空的）。
+/// 而用户手上的答复和文件早就收到了。
+#[tokio::test]
+async fn a_stale_snapshot_never_rewrites_a_task_that_already_finished() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().text("跑个数").build())
+        .await
+        .expect("建任务");
+    let mut task = active_tasks(&h.store, CHAT).await.remove(0);
+    task.card_id = Some("om_card_1".into());
+    // `deliver()` 开头那次 save 落的就是 working（answering 那一路落 answering）
+    task.status = TaskStatus::Working;
+    h.store.update_task(&task).await.expect("回写");
+
+    // ① 收尾抄下来的那一份：还停在 working，root_hash 是空的
+    let stale = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(stale.status, TaskStatus::Working);
+    assert!(stale.evidence_root_hash.is_none());
+
+    // ② 抄完之后 worker 自己跑完了：落 delivered + finalize
+    let mut done = stale.clone();
+    done.status = TaskStatus::Delivered;
+    done.result_summary = "答复和文件都发出去了".into();
+    done.evidence_root_hash = Some("worker 自己 finalize 过了".into());
+    h.store.update_task(&done).await.expect("回写 delivered");
+
+    // ③ 收尾拿着过期快照来取消
+    let out = plane.cancel_task(stale.clone(), None, None, false).await;
+
+    // 返回的是库里那份，不是被改写过的快照
+    assert_eq!(
+        out.status,
+        TaskStatus::Delivered,
+        "取消不许改写一条已经收场的任务"
+    );
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(
+        saved.status,
+        TaskStatus::Delivered,
+        "库里那条必须还是 delivered"
+    );
+    assert_eq!(saved.result_summary, "答复和文件都发出去了");
+    assert_eq!(
+        saved.evidence_root_hash.as_deref(),
+        Some("worker 自己 finalize 过了")
+    );
+    // 证据链上不许多一条 cancelled
+    assert!(
+        h.evidence
+            .events(&task.id)
+            .iter()
+            .all(|e| e.kind != EvidenceKind::Cancelled),
+        "已经交付的任务不该再写一条 cancelled 证据"
+    );
+    // manifest 不许有第二遍（幂等判据不能读过期快照）
+    assert!(
+        h.evidence.manifest(&task.id).is_none(),
+        "worker 已经 finalize 过了，不该在这里再算一遍"
+    );
+    // 用户看到的卡片不许从「已交付」翻成「已取消」
+    assert!(
+        h.platform.card_updates().is_empty(),
+        "不该动卡片：{:?}",
+        h.platform.card_updates()
+    );
+    // 沙箱也不用再还一次（worker 的 finish() 已经还过）
+    assert!(h.gateway.released().is_empty());
+    assert!(h.sandbox.released().is_empty());
+}
+
+/// 同一条路上的对照组：库里**还没**收场时，取消照常走完四件事。
+///
+/// 防线只该拦终态，不该把「宽限期真的没收完、必须硬取消」那条正路也一起挡了。
+#[tokio::test]
+async fn a_snapshot_of_a_still_running_task_is_cancelled_as_usual() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().text("跑个数").build())
+        .await
+        .expect("建任务");
+    let mut task = active_tasks(&h.store, CHAT).await.remove(0);
+    task.card_id = Some("om_card_1".into());
+    h.store.update_task(&task).await.expect("回写");
+    let task = h.store.get_task(&task.id).await.expect("读").expect("有");
+
+    let out = plane.cancel_task(task.clone(), None, None, false).await;
+
+    assert_eq!(out.status, TaskStatus::Cancelled);
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(saved.status, TaskStatus::Cancelled);
+    assert_eq!(
+        h.evidence.kinds(&task.id).last(),
+        Some(&EvidenceKind::Cancelled)
+    );
+    assert!(h.evidence.manifest(&task.id).is_some());
+    assert_eq!(h.platform.card_updates().len(), 1);
+}
