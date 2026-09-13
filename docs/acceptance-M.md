@@ -37,8 +37,16 @@
 >
 > - **§0.4 / §M1 排障表 / §7 —— `!status` 与 `!stop` 拆成两半。** V5 只修了 `!status`
 >   那一半（控制面的 `running` 并进 `status_tasks`），`!stop` 和卡片 stop 按钮走的
->   `resolve_stop_target` / `resolve_task` **原地没动**。现在这两条命令对「什么算活跃」
+>   `resolve_stop_target` / `resolve_task` **原地没动**。当时这两条命令对「什么算活跃」
 >   意见不一致，比改之前更费解 —— 原来「已知记账，别去查沙箱」那一行按半边重写了。
+>   **（这条已被 W2 收口，见下。）**
+>
+> **2026-09-12（W2）：`!stop` 跟上了 `!status`，上面那条记账销了。**
+> `resolve_stop_target` / `resolve_task` 改走同一个 `status_tasks`，
+> 并把「交付中（`Answering`）停不了」写成**明面上的约定**：找得到、回一句
+> 「任务 #A17 正在把答复发给你，停不了了。」，不再回「没有这个任务」。
+> 改的是 §0.4 那段引用框、§M1 排障表那两行、§7 末「两条使用口径」，外加 §M3 排障表
+> 和 §8 第 4 条里同一句话的两处复述；`plane.rs` / `app.rs` 的行号引用跟着重核了一遍。
 > - **§0.1 的 `--help`、§0.2.4 的 `--traceback` / `--grace`** —— V6 ④a/④b/④c 的实际结果，
 >   四个 `--help` 写法逐个实测。
 > - **§0.2.5 新增：compose 起飞。** 原来是「占位，等 V1」，V1 已合入，本轮真起了一遍核的。
@@ -199,7 +207,7 @@ go run ./edge/cmd/aite-edge --config config/aite.yaml
 `storage.*`。`edge/cmd/aite-edge/main.go:72` 那个 flag 的帮助文本自己就写着「相对仓库根」。
 坑在两边**解析方式不一样**：
 
-- **core** 拿 `std::env::current_dir()` 当 repo_root（`core/crates/app/src/app.rs:142-146`），
+- **core** 拿 `std::env::current_dir()` 当 repo_root（`core/crates/app/src/app.rs:175-179`），
   再把 socket 解析成**绝对路径**（`core/crates/edge-client/src/lib.rs:109-116` 的 `resolve()`）；
 - **edge** 把配置里的裸相对路径**原样**交给 `ListenUnix`（`main.go:102`），而 `ListenUnix`
   第一件事是 `os.MkdirAll(filepath.Dir(path), 0o755)`（`edge/internal/server/server.go:21-24`）
@@ -453,27 +461,32 @@ core/target/debug/aite evidence show <task_id>
   卡片是 `reply_in_thread=true` 发进任务话题的（`platform.go:394-396` 里 `SendCard`
   的 `in_thread` 写死 `true`），所以「在话题里回复」这条路**一定**走得通。
 
-<!-- 台账：`!stop` 那一半仍未修，归 W2；`!status` 那一半 V5 已修，别再当记账 -->
-> ⚠️ **第一步就 `final` 的短任务，交付中的那几秒 `!status` 和 `!stop` 会给你两个互相矛盾的答复：
-> 它在 `!status` 的列表里，`!stop` 却回「没有这个任务」。**
+> ⚠️ **第一步就 `final` 的短任务，交付中的那几秒停不掉 —— 但 `!stop` 会明说，
+> 不会告诉你「没有这个任务」。**
 >
 > 机理还是原来那条：`deliver()` 在 W3 那一路（第一步就 `final`、从没发过卡片）把状态置成
-> `Answering`（`core/crates/worker/src/agent.rs:643-648`），而 `Answering` **不在**
+> `Answering`（`core/crates/worker/src/agent.rs:645`），而 `Answering` **不在**
 > `ACTIVE_TASK_STATUSES`（= created / planning / working，
 > `core/crates/contracts/src/session.rs:33`）里，所以 `list_active_tasks` 空掉。
-> 变的是有几条命令还在只查它：
+> 三条命令现在查的是**同一份**列表：
 >
 > | 走哪条路 | 查的是什么 | 交付中的短任务 |
 > |---|---|---|
-> | `!status` | `status_tasks`：`list_active_tasks` **+ 控制面自己的 `running`**（过滤终态 + 用 `get_session` 过滤到本群），`plane.rs:480-513` | **列得出来**（V5 补的） |
-> | `!stop <任务号>` | `resolve_stop_target`：只有 `list_active_tasks`，`plane.rs:646-661` | 回「没有这个任务」 |
-> | 卡片 stop 按钮那条路 | `resolve_task`：只有 `list_active_tasks`，`plane.rs:663-678` | 同上（P0 不渲染按钮，见本节开头） |
+> | `!status` | `status_tasks`：`list_active_tasks` **+ 控制面自己的 `running`**（过滤终态 + 用 `get_session` 过滤到本群），`plane.rs:531-563` | **列得出来**（V5 补的） |
+> | `!stop <任务号>` | `resolve_stop_target`：同一个 `status_tasks`，`plane.rs:713-728` | 找得到，回「任务 #A17 正在把答复发给你，停不了了。」 |
+> | 卡片 stop 按钮那条路 | `resolve_task`：同一个 `status_tasks`，`plane.rs:730-747` | 同上（P0 不渲染按钮，见本节开头） |
 >
-> **排障时要认得出这个形状**：用户看见任务明明在列表里，伸手去停却被告知不存在。
-> 这比改之前（两条都查不到、口径一致）**更费解**，别把它读成「`!status` 也坏了」——
-> `!status` 现在是对的，坏的是 `!stop` 跟不上。**不是环境问题，别去查沙箱。**
+> **「交付中停不了」是刻意写下的约定，不是查不到**（W2 收的口）。理由在 worker：
+> 取消标志位只在每一步的**开头**被看一眼（`agent.rs:117` 是全仓唯一一处），
+> 而 `deliver()` 是最后一步之后的一段直路 —— 发文件 → 发答复 → 写 delivered 证据 →
+> 收卡片 → `finish()`，**中间一个取消点都没有**。真去「停」它只会造出假话：
+> 答复照发，`Cancelled` 随后被 `finish()` 的 `Delivered` 盖掉，回帖却说停了。
 >
-> 发过卡片的正常任务置的是 `Working`，仍在活跃集里，两条命令都正常，不受影响。
+> **排障时要认得出这个形状**：任务在 `!status` 的列表里，`!stop` 回的是「正在把答复发给你」。
+> 这是对的。**不是环境问题，别去查沙箱**；再等一两秒它就落 `delivered` 了。
+> 回「没有这个任务」才不对 —— 那说明两条命令的口径又岔开了。
+>
+> 发过卡片的正常任务置的是 `Working`，仍在活跃集里，`!stop` 照常停得掉，不受影响。
 
 ### 0.5 「一条纯文本回复（不是卡片）」—— 这句话要分成两半读
 
@@ -543,7 +556,8 @@ core/target/debug/aite evidence show <task_id>
 | 同上，但推送记录里有 | 认不出 @ 的是自己 → R7 不命中 → R8 丢弃 | `FEISHU_BOT_OPEN_ID` 配的是不是这个应用的 open_id。跑 preflight 第 ④ 组 |
 | 有表情，没回复 | 模型这一步炸了 | core 日志 `worker.model_failed`；`aite evidence show <task_id>` 看 `model_call` 那条的 `finish_reason`；跑 preflight 第 ⑤ 组 |
 | 有表情有回复，但超过 2 秒才出现表情 | 回调里被塞了重活 | core 日志 `ingress.slow_callback`（>1s 就 WARN，带 `elapsed=`） |
-| 交付的那几秒 `!stop` 回「没有这个任务」，而 `!status` 里明明列着它 | **`!stop` 的已知记账，不是故障** | 这一路是 W3 的 Answering 状态，`!stop` 走的 `resolve_stop_target` 只查活跃集、跟不上 `!status`。详见 §0.4 那段引用框。**别去查沙箱** <!-- 台账：`!stop` 这一半仍未修，归 W2 --> |
+| 交付的那几秒 `!stop` 回「任务 #A17 正在把答复发给你，停不了了。」 | **刻意的约定，不是故障** | 这一路是 W3 的 Answering 状态，`deliver()` 里没有取消点（`agent.rs:117` 是全仓唯一一处取消检查），所以它真停不掉，只能等它落 `delivered`。详见 §0.4 那段引用框。**别去查沙箱** |
+| 交付的那几秒 `!stop` 回「**没有这个任务**」 | **这是真故障，不是记账** | W2 之后 `!stop` / 卡片按钮与 `!status` 查的是同一份 `status_tasks`，列得出来的任务不许被这一句说成不存在。真撞上了：`aite evidence show <task_id>` 看它是不是已经落了终态（终态会被 `status_tasks` 主动滤掉，那时回「没有这个任务」是对的）；不是终态就记下 `!status` 与 `!stop` 的原文，这是 bug |
 | 交付的那几秒 `!status` 也查不到它 | **这是真故障，不是记账** | V5 之后 `status_tasks` 把控制面的 `running` 并了进来，交付中的短任务**应该**列得出来（§0.4）。列不出来说明并的那一半没生效：core 日志看这个任务的 `task_created` 在不在、`aite evidence show <task_id>` 看它是不是已经落了终态（终态会被 `status_tasks` 主动滤掉，那是对的）。两者都不是 → 记下 `!status` 的原文与 `--list` 输出，这是 bug |
 | 机器人自己触发了自己 | R1 没拦住 | 不该发生（`sender_kind != human` 直接丢）。真出现了记下来，这是 bug 不是环境问题 |
 
@@ -663,7 +677,7 @@ core/target/debug/aite evidence show <task_id>
 
 | 症状 | 最可能的原因 | 具体动作 |
 |---|---|---|
-| 没出卡片，直接回了一段文字 | 模型一步就 `final` 了，没调工具 | 这是 W3 的 Answering 路径，**不算错**，但说明模型没去读附件。`--only tool_call` 看有没有 `download_attachment`；没有就是提示词/模型的问题。（这一路交付中 `!status` 列得出它、`!stop` 却停不掉，见 §0.4 <!-- 台账：`!stop` 那一半仍未修，归 W2 -->） |
+| 没出卡片，直接回了一段文字 | 模型一步就 `final` 了，没调工具 | 这是 W3 的 Answering 路径，**不算错**，但说明模型没去读附件。`--only tool_call` 看有没有 `download_attachment`；没有就是提示词/模型的问题。（这一路交付中 `!status` 列得出它、`!stop` 会明说停不掉，见 §0.4） |
 | 卡片出来了，一直停在 working | 某个工具卡住 | `--only tool_call,tool_result` 看最后一条：只有 `tool_call` 没有 `tool_result` = 正卡在那一步；有 `tool_result` 且 `FAIL[timeout]` = 超时（`run_python` 用请求里的 `timeout_sec` + 余量，其余工具默认 60s，`core/crates/gateway/src/gateway.rs:238-248` 的 `budget()`） |
 | `tool_result → FAIL[sandbox]` | Docker 不可用 / 镜像不在 | `docker images aite-sandbox`；不在就 `docker build -t aite-sandbox:p0 docker/sandbox`。连续 2 次 sandbox 失败 → 任务直接 failed（§3.3）。**edge** 那个窗会有 `sandbox.*` 的错 |
 | `tool_result → FAIL[upstream]`（下载附件） | adapter 下载失败 | 附件是不是过期了/太大；换个小文件重试 |
@@ -712,7 +726,7 @@ core/target/debug/aite evidence show <task_id>
       **停下来**，把这条消息的 `event_id` / `message_id` / `root_id`、
       M3 那个任务的 `task_created` 一行、core 日志同一时刻的片段一起记下来。
    5. ⚠️ **进程侧帮不上忙，不要指望在日志里找答案。** 被 R8 丢弃的事件只 bump 一次
-      `events.ignored`（`core/crates/control/src/plane.rs:377-378`），**INFO 级没有任何日志**，
+      `events.ignored`（`core/crates/control/src/plane.rs:424-425`），**INFO 级没有任何日志**，
       而 core 侧计数器没有对外查看入口（§7 末、§8 第 3 条）。所以只有开放平台那份推送记录
       能分开这两种情况。
 5. **补一条带 @ 的**：`@Aite 再按季度画一张`，还是发在同一条话题里。
@@ -959,12 +973,12 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 - **core 侧**（`ControlPlane` / `Ingress`）：`events.handled` / `events.duplicate` /
   `events.nonhuman` / `events.ignored` / `events.steer` / `events.edited` /
   `events.deleted` / `events.dropped` / `sandbox.reaped` / `ingress.errors` / `ingress.slow`。
-  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1305`）全仓没有
+  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1374`）全仓没有
   任何非测试调用方，`!status` 只回任务列表、一个计数器都不回（`cmd_status`，
-  `plane.rs:536-559`；它列的是什么见 §0.4）。见 §8 第 3 条。
+  `plane.rs:587-610`；它列的是什么见 §0.4）。见 §8 第 3 条。
   - 唯一的例外：`events.dropped` 不为 0 时，`!status` 的回复末尾会多一句
     「⚠ 本进程启动以来有 N 条事件没接住…」（`cmd_status` 里的两处 `dropped_note()` 调用，
-    `plane.rs:539` 与 `:556`；函数体在 `plane.rs:635-644`）。
+    `plane.rs:590` 与 `:607`；函数体在 `plane.rs:692-701`）。
     **只有这一个计数器漏了出来，`events.ignored` 没有。**
 - **edge 侧**：进程**退出时**打一行（实测）
   `level=INFO msg=edge.counters events.sent=0 ingress.invalid=0 ingress.errors=0 ingress.reconnects=0`
@@ -972,12 +986,14 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 
 ### `!status` / `!stop` 的两条使用口径
 
-- `!stop` 在**只有一个活跃任务**时可以省略任务号（`plane.rs:646-661`）；
-  给了任务号的话 `#A17` / `a17` / ` #a17 ` 都收（`normalize_task_no` 去空格 + 补 `#` + 转大写）。
+- `!stop` 在**本群只有一个任务**时可以省略任务号（`plane.rs:713-728`）；「只有一个」按
+  `!status` 列出来的那份算。给了任务号的话 `#A17` / `a17` / ` #a17 ` 都收
+  （`normalize_task_no` 去空格 + 补 `#` + 转大写）。
 - 两条命令都要满足 R5 的投递条件（@ 机器人，或在已有会话的话题里），见 §0.4。
-- **两条命令对「什么算活跃」意见不一致**：`!status` 走 `status_tasks`（活跃集 **+ 控制面
-  `running`**），`!stop` 走 `resolve_stop_target`（只有活跃集）。交付中的短任务因此
-  **列得出来、停不掉**，见 §0.4 那段引用框。<!-- 台账：`!stop` 那一半仍未修，归 W2 -->
+- **两条命令查的是同一份列表**（W2 收的口）：`!status`、`!stop`、卡片 stop 按钮都走
+  `status_tasks`（活跃集 **+ 控制面 `running`**，过滤终态 + 过滤到本群）。
+  交付中的短任务因此**列得出来，也认得出来** —— 只是停不掉，`!stop` 会明说
+  「正在把答复发给你，停不了了」，而不是「没有这个任务」。为什么停不掉见 §0.4 那段引用框。
 
 ---
 
@@ -1004,8 +1020,8 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
    所以现在一个都不渲染，改成卡片末尾一行文字提示（见 §0.4）。
    渲染那条路（`buildActions`，`cards.go:151-166`）没删，SDK 放开钩子后改回去即可。
    「停止」有等价的命令路径（`!stop`，注意投递条件）；「看证据」只能走 CLI。
-   ⚠️ 但 `!stop` 与卡片 stop 按钮走的是**同一条** `resolve_task` / `resolve_stop_target`，
-   两者都只查活跃集 —— 所以交付中的短任务（Answering）两条路都停不掉，见 §0.4。
+   ⚠️ 但 `!stop` 与卡片 stop 按钮走的是**同一份**列表（`status_tasks`，W2 起）——
+   两条路对交付中的短任务（Answering）给的是同一句「正在把答复发给你，停不了了」，见 §0.4。
 5. **`checklist_op` 的 check/fail 只记 `id` 和 `state`，不带那一项的文本。**
    `aite evidence show` 已经通过回放前面的 `add` 事件把文本补了回来，
    但这意味着**单看一条 `checklist_op` 是读不懂的**，任何别的消费方都得自己回放。

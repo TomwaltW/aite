@@ -10,7 +10,7 @@ use support::{
     within,
 };
 
-use aite_control::{InProcessControlPlane, UNKNOWN_COMMAND_TEXT};
+use aite_control::{InProcessControlPlane, UNKNOWN_COMMAND_TEXT, stop_while_delivering_text};
 
 async fn cmd(plane: &Arc<InProcessControlPlane>, text: &str, message_id: &str) {
     plane
@@ -399,4 +399,173 @@ async fn unknown_command() {
     assert!(UNKNOWN_COMMAND_TEXT.contains("!status"));
     assert!(UNKNOWN_COMMAND_TEXT.contains("!restart"));
     assert_eq!(plane.counter("commands!oops"), 1);
+}
+
+// ---- `!stop` 与 `!status` 的口径一致 ---------------------------------------
+
+/// 把一个任务推到「worker 手上、状态已落 `Answering`」这个确定的形状。
+///
+/// 与 `status_still_lists_a_task_that_is_answering` 同一套造法：worker 停在
+/// `WaitForCancel` 上，所以它一直挂在控制面的 `running` 里；状态则手工写成 `Answering`，
+/// 也就是 `deliver()` 在「第一步就 final、没发过卡片」那一路落的那个值。
+async fn a_task_stuck_in_answering() -> (
+    Harness,
+    Arc<InProcessControlPlane>,
+    RunningPlane,
+    aite_contracts::Task,
+) {
+    let h = Harness::new();
+    let worker = ScriptedWorker::new(
+        h.store.clone(),
+        h.platform.clone(),
+        vec![WorkerAction::WaitForCancel],
+    );
+    let plane = h.plane_builder().worker(worker.clone()).build();
+    plane
+        .handle_event(
+            ev().id("e1")
+                .text("算一下上周退款")
+                .message_id(ROOT)
+                .build(),
+        )
+        .await
+        .expect("建任务");
+    let task = active_tasks(&h.store, CHAT).await.remove(0);
+
+    let running = RunningPlane::start(plane.clone());
+    within("等 worker 接手", async {
+        while worker.calls().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert_eq!(plane.state().running, vec![task.id.clone()]);
+
+    let mut answering = h.store.get_task(&task.id).await.expect("读").expect("有");
+    answering.status = TaskStatus::Answering;
+    h.store.update_task(&answering).await.expect("回写");
+    assert!(
+        active_tasks(&h.store, CHAT).await.is_empty(),
+        "前提：库的活跃口径这时确实看不见它"
+    );
+
+    (h, plane, running, answering)
+}
+
+/// V5 留下的半截：`!status` 列得出来、`!stop` 却回「没有这个任务」。
+///
+/// 现在两条命令查的是同一份列表（`status_tasks`），`!stop` 找得到它，
+/// 并且回一句说得通的话 —— 交付中停不了，而不是「不存在」。
+#[tokio::test]
+async fn stop_on_an_answering_task_says_it_is_delivering() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+
+    cmd(&plane, &format!("!stop {}", task.task_no), "om_9").await;
+
+    let body = h.platform.last_text().expect("该回帖").text;
+    assert_eq!(body, stop_while_delivering_text(&task.task_no));
+    assert_ne!(body, "没有这个任务", "它明明在 !status 的列表里");
+
+    // 而且**一个字都没改**：不许把一条正在交付的任务写成 cancelled
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(
+        saved.status,
+        TaskStatus::Answering,
+        "交付中的任务不该被改写 —— worker 马上会用 finish() 落 Delivered"
+    );
+    assert!(h.sandbox.released().is_empty(), "也不该顺手把沙箱还了");
+}
+
+/// 同一个任务，`!status` 和 `!stop` 的答复必须对得上。
+///
+/// 这是 V5 之后那个「更费解」的形状的正面判据：用户先问一句看见它，
+/// 再伸手去停 —— 不许被告知它不存在。
+#[tokio::test]
+async fn status_and_stop_agree_on_the_same_task() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+
+    cmd(&plane, "!status", "om_8").await;
+    let listed = h.platform.last_text().expect("该回帖").text;
+    assert!(listed.contains(&task.task_no), "!status 该列出它：{listed}");
+
+    cmd(&plane, &format!("!stop {}", task.task_no), "om_9").await;
+    let stopped = h.platform.last_text().expect("该回帖").text;
+    assert!(
+        stopped.contains(&task.task_no),
+        "!stop 得认得出 !status 刚列出来的那个任务号：{stopped}"
+    );
+    assert_ne!(
+        stopped, "没有这个任务",
+        "两条命令对同一个任务给出互相矛盾的答复 —— 这正是本轨要收掉的那个形状"
+    );
+}
+
+/// 省略任务号那条路也按同一份列表算：本群只有这一个任务，`!stop` 就该认得出它。
+#[tokio::test]
+async fn stop_without_a_task_no_uses_the_same_list_as_status() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+
+    cmd(&plane, "!stop", "om_9").await;
+
+    assert_eq!(
+        h.platform.last_text().expect("该回帖").text,
+        stop_while_delivering_text(&task.task_no)
+    );
+}
+
+/// 卡片 stop 按钮走的是另一条解析路（`resolve_task`），同样要跟上。
+///
+/// P0 现在一个按钮都不渲染（lark SDK 收不到回传帧），但这条路的代码还在、契约 R3 也还在，
+/// 所以它跟 `!stop` 不许再有两套口径。
+#[tokio::test]
+async fn card_stop_on_an_answering_task_says_it_is_delivering() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+
+    plane
+        .handle_event(
+            ev().id("ev-card")
+                .kind(aite_contracts::EventKind::CardAction)
+                .text("")
+                .message_id("om_9")
+                .card_action(support::card_action(
+                    "om_card_1",
+                    aite_contracts::CardActionKind::Stop,
+                    Some(&task.id),
+                ))
+                .build(),
+        )
+        .await
+        .expect("卡片停止");
+
+    assert_eq!(
+        h.platform.last_text().expect("该回帖").text,
+        stop_while_delivering_text(&task.task_no)
+    );
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(saved.status, TaskStatus::Answering);
+}
+
+/// 反向的那一半没被弄丢：还在活跃口径里的任务照样停得掉。
+#[tokio::test]
+async fn stop_still_cancels_a_task_that_is_really_stoppable() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("跑个长活").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let task = active_tasks(&h.store, CHAT).await.remove(0);
+
+    cmd(&plane, &format!("!stop {}", task.task_no), "om_9").await;
+
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(saved.status, TaskStatus::Cancelled);
+    assert!(
+        h.platform
+            .last_text()
+            .expect("该回帖")
+            .text
+            .contains("已停止"),
+        "可停的任务还是走原来那条路"
+    );
 }

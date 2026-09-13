@@ -251,3 +251,110 @@ V3 写这几段时，V5 还没并进来。V5 ③ 已经把「交付中的短任�
 排除过一个混淆项：当时 `config/aite.yaml` 因 compose 实证而存在（平时不存在），
 但单跑复现时它仍在、照样全绿，**不是它**。
 `graceful_shutdown` 本身有本文 §4.1 记着的计时区间量错（`:237,249`），是天然的抖动源。
+
+---
+
+## 六、W2 回执 —— 2026-09-12
+
+基线 `0ac0b58`（= `abd93da` 的代码面 + 一个只加派单文件的 commit）。
+
+开场自检与收尾 `scripts/check.sh` 的五行关键值：
+
+```
+契约锁 ............ OK 25 files                 （开场 / 收尾一致）
+C1 契约测试 ....... contracts passed=25 failed=0（开场 / 收尾一致）
+B 全量 cargo ...... 开场 793 failed=0 → 收尾 806 failed=0
+B go test（-race）. 六个包全 ok                  （开场 / 收尾一致）
+B8 评测 ........... passed 10/10                （开场 / 收尾一致）
+全部通过，退出码 0
+```
+
+**开场自检没撞到假红**（一次跑过，793/0）。守卫实测有效：Read `.claude/hooks/guard_bash.py`
+被拦下。
+
+### ①–⑦ 逐条
+
+| | 病在哪 | 改法 / 为什么选这条 | 钉它的测试 | 改坏产品代码验过 |
+|---|---|---|---|---|
+| ① | `run.rs:197` `Duration::from_secs_f64(grace.max(0.0))`：`max(0.0)` 只挡住负数，`NaN.max(0.0)` 侥幸是 `0.0`，**上溢一个字没拦**；panic 点在 `shutdown()` 中段，`sandbox.close_all()` / `store.close()` 整段被跳过 | 新增私有 `grace_duration(f64) -> Duration`，走 `Duration::try_from_secs_f64`：造得出来就照用，造不出来（NaN / 负数 / 上溢）**退到 `DEFAULT_SHUTDOWN_GRACE_SEC` 并 warn 一行 `aite.grace_invalid`**。**没有**选「`ServeOptions` 改带校验的构造函数」那条：`shutdown_grace_sec` 是 `pub` 字段，收窄它必然要改 `cli.rs:137`，而 `cli.rs` 归 W3、本轨只读 —— 越界的代价大于收益。也**刻意没有**复刻 `cli.rs` 那个 86400 上界：那是命令行的人机约定，这一层只负责「不许 panic、不许跳过收尾」 | `graceful_shutdown.rs` 新增 4 条（NaN / INFINITY / 1e300 / 负数各一条），断的是**收尾跑完了**：`platform.stop()` 走到、`close_all()` 恰好一次、`store.close()` 之后库查不动、`run_app` 正常返回 | ✅ 把那句换回 `from_secs_f64(grace.max(0.0))` → INFINITY / 1e300 两条红。**NaN 与负数两条在旧代码上本来就绿**（旧实现碰巧不炸），它们钉的是「四个取值都不许炸、收尾都得走完」这条面，不是回归判据 —— 如实记 |
+| ② | `app.rs:129` 注释「只组装：不连网…唯一副作用是建那三个目录」是假的 | 注释改成说实话，逐条写清：落盘（三个 mkdir **+ SqliteSessionStore::open 会建一个空库文件**）、读盘（system prompt）、连 edge 的两件事。**顺带纠了台账一个说法**：`EdgeClient::connect` 是**懒连接、不发一个字节**（`link.rs` 的 `connect_lazy()` + spawn 探针），只会因「socket 路径拼不成合法地址」失败；真花时间的是 `check_contract_version` 的 5 发 `GetStatus` + 4 次 `sleep(1s)` ≈ 最坏 4s。**没有**动代码去让 `build_app` 真不连网 —— 那会改 C-TΩ-1 的形状，不是本轨能单方面定的 | `build_app_contract.rs` 新增 2 条，钉的是**分界**：三个口子全注入 → `edge.is_none()` **且**没付那 4s；少注入一个（沙箱）→ `edge.is_some()` **且**确实付了 ≥4s。判据用行为（4s）而不是 `is_none()`，因为后者太软 | ✅ `need_edge` 改成恒真 → 「不连」那条红；`EDGE_STATUS_ATTEMPTS` 改 1 → 「真去连」那条红 |
+| ③ | `app.rs:78` 注释说 `edge` 是给「`!status` 的健康行与收尾时的连接态日志」留的，**两处都不存在** | 全仓 grep 核过：产品代码里只有两处读它 —— `run.rs` 的 `log_takeoff`（起飞那行 `aite.up` 的 socket 路径）和本文件 `Debug`。注释按实际用途重写，并写明**它不是生命线**：`platform()` / `sandbox()` 各攥着同一根 `Link` 的 `Arc`、重连探针又自己攥着一个，所以契约闸门（`gate.rs`）跟这个字段在不在无关 | 无新增测试（纯注释；每句都当场 grep 核过） | 不适用 |
+| ④ | `crash_recovery.rs:53,125` 裸 `list_active_tasks(...)[0]`，列表空时报 `index out of bounds` —— 越界 panic 冒充断言失败 | `common/mod.rs` 加 `first_active_task(store, chat_id, what)`：带死线轮询，超时时打出「在等什么」+ 两种成因怎么分辨（没建出来 / 已落 `Answering`/终态退场）。两处换掉；**顺带**把 `graceful_shutdown.rs` 里同形状的两处也换了（同一文件、同一类隐患） | 助手本身即断言 | ✅ 把一处的 chat 换成不存在的群 → 报的是新那句人话，不再是 `index out of bounds` |
+| ⑤ | `reconnect_replay.rs:168` `if self.inner.call_count() > 0` **恒为 false**（闸门期间 `inner.chat` 还没被调到），守卫从没生效 | **选「让守卫真生效」**。先把机理查实了再动手：把「`notified()` 之后才通知」那个窗口人为撑开 → **测试照样绿**，因为 tokio 的 `Notify::notified()` 建 future 时就记下了 `notify_waiters` 次数，这一半它自己兜住了；把「**测试还没进这个函数、worker 已经到闸门**」那个窗口撑到 200ms → **必现**，panic 逐字落在 `expect("5s 内 worker 没走到第一次 chat")` 上，与台账 `792/1` 那次同一个点。所以补的是标志位 `gate_reached`：`chat()` 在 `notify_waiters()` **之前**置真，`wait_gate_reached` 先建 `notified` 再查位，两个方向都不漏 | 新增 `wait_gate_reached_survives_a_notification_that_came_first`：先把模型驱到闸门、**之后**才问；顺带断言此刻 `inner.call_count() == 0`（旧判据恒为 false 的根） | ✅ 把 `self.gate_reached()` 换回 `self.inner.call_count() > 0` → 这条红（1s 超时） |
+| ⑥ | `graceful_shutdown.rs:237,249` 计时起点在建场之前，`elapsed < 3.0` 量的是「建场 + 收尾」，含两个各 5s 预算的 `wait_until` | 起点挪到 `run.shutdown_within(...)` 正前方，只量收尾。阈值复核后收到 **1.0s**（新增常量 `SHUTDOWN_CEILING_SEC`）：实测纯收尾在 0.1–0.4ms 量级，1s 是十倍余量，比原来那个「含建场的 3s」既更严也更稳 | 原用例 `grace_timeout_cancels_the_stuck_task_and_still_returns` | 见下「⑥ 的十遍」 |
+| ⑦ | `!status` 走 `status_tasks`、`!stop` / 卡片按钮走 `list_active_tasks`，交付中的短任务**列得出来、却被告知不存在** | **选 (b)：写成刻意的约定。** 先把 (a) 算完账：worker 的取消标志位只在每步**开头**被看一眼（`agent.rs:117` 是全仓唯一一处），而 `deliver()` 是最后一步之后的一段直路（发文件 → 发答复 → 写 delivered 证据 → 收卡片 → `finish()`），**中间一个取消点都没有**。所以 (a) 只会造出假话：答复照发、`cancel_task` 写的 `Cancelled` 随后被 `finish()` 的 `Delivered` 盖掉、回帖却说「已停止」。V5 那道「落刀前按 id 重读、终态不改写」**兜不住** —— `Answering` 不是终态。于是：`resolve_stop_target` / `resolve_task` 改走**同一个 `status_tasks`**，结果用新枚举 `StopTarget{Stoppable, Delivering, NotFound}` 分流，`Delivering` 回新文案 `stop_while_delivering_text`。**`ACTIVE_TASK_STATUSES` 一个字没动**（双重冻结）。省略任务号那条规则的「只有一个」现在按 `!status` 那份列表算 | `commands.rs` 新增 5 条：`!stop <任务号>` 撞 Answering 回新文案且**库里状态一个字没改**、`!status` 与 `!stop` 对同一任务答复一致、省略任务号那条路同口径、卡片按钮同口径、可停的任务照样停得掉；`wording.rs` 新增 1 条逐字钉文案 | ✅ `resolve_stop_target` 换回 `list_active_tasks` → 3 条红；`resolve_task` 换回 → 卡片那条红 |
+
+### 测试数
+
+`793 → 806`（+13）。
+
+| 文件 | 变化 | 多在哪 |
+|---|---|---|
+| `app/tests/build_app_contract.rs` | 6 → 8 | ② 的两条分界 |
+| `app/tests/graceful_shutdown.rs` | 7 → 11 | ① 的四个非法取值各一条 |
+| `app/tests/reconnect_replay.rs` | 10 → 11 | ⑤ 的「通知早于等待」 |
+| `control/tests/commands.rs` | 12 → 17 | ⑦ 的五条 |
+| `control/tests/wording.rs` | 9 → 10 | ⑦ 的文案逐字 |
+
+### ⑥ 的十遍
+
+```
+run 01..10: test result: ok. 11 passed; 0 failed; ... finished in 0.14–0.16s
+```
+十遍全绿（连跑，逐遍单独 `cargo test -p aite --test graceful_shutdown`）。
+
+### 三个假红 target 的收尾状态
+
+| target | 结果 |
+|---|---|
+| `reconnect_replay` | 连跑 **20/20 绿**；负载下（同时跑 `cargo test --workspace`）另跑 6 遍也全绿 |
+| `graceful_shutdown` | 连跑 **10/10 绿**；负载下 6 遍全绿 |
+| `startup_recovery` | **没改**（不在本轨可写面），抖动源定位了两个，见下 |
+
+**`reconnect_replay` 其实有两个病根，⑤ 只是其一。** 修完 ⑤ 之后连跑 20 遍仍红 2 遍，
+失败的是另一条：`a_root_and_its_thread_followup_replayed_together`（`:749` 的
+`events.ignored == 0`）。**把本文件换回基线原版单独跑 12 遍，同样红 1 遍 —— 与本轨改动无关，
+是基线就有的。** 病在断言本身：`together=true` 那一支两条事件各自 `tokio::spawn`，
+追问完全可能在 root 的会话落库之前进 `handle_event`，于是按 R8 被丢 ——
+这正是紧挨着的 `a_followup_replayed_before_its_root_is_dropped` 逐字写下的**当前边界**。
+原来那一支照抄了顺序那一支的断言，等于在断一条产品并不保证的性质。
+改成：顺序那一支照旧严格；并发那一支钉**真正成立的**那条 ——
+结局只许是「并进同一份 transcript（ignored=0）」或「按 R8 被丢并记一笔（ignored=1）」，
+**「既没进 transcript 也没被记成丢弃」这种静悄悄没了的第三种形状一个都不许有**。
+（改坏验过：把期望文案改一个字 → 两支都红。）
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/app/tests/startup_recovery.rs:259` | 与 ④ 同形状的裸 `[0]`：`emit` 之后直接取 `list_active_tasks(CHAT)[0]`，而那条脚本是单步 `final`（走 Answering 路径，落 `Answering` 就退出活跃口径）。**这是 `startup_recovery` 假红的一个已定位病根** —— 在这一行前面插一句 `settle().await` 把窗口撑开，**必现** `index out of bounds: the len is 0 but the index is 0`。修法现成：换成 `first_active_task`（W2 已加在 `tests/common/mod.rs` 里）。本轨可写面不含此文件，没伸手 | 下一轮（app 测试面） |
+| 同上，`orphans_are_closed_before_the_platform_starts` | `startup_recovery` 的**第二个**抖动源，与上一条不同：`run.shutdown()` 的 10s 预算在重负载下被瞬时饿死撞穿（报「10s 内 run_app 没有返回」）。**只在人为堆的重负载下出现**：同一二进制 6 路并发跑 72 遍红 3 遍；顺序跑 20 遍 0 红；`check.sh` 的常规条件下没见过。收尾本身实测只要 0.1–0.4ms，所以不是「真挂死」 | 待定（先记账，别急着调大预算把真挂死一起咽掉） |
+| `core/crates/app/tests/evidence_on_disk.rs:64`、`sqlite_cross_process.rs:38,73` | 同一类裸 `[0]`（`emit` 之后无守卫直接取下标），同样会在任务跑得快时报越界 panic 而不是人话。`evidence_on_disk.rs:264` 有 `wait_until` 兜着，不在此列 | 下一轮（app 测试面） |
+| `core/crates/app/src/cli.rs:19-30` | 那段注释现在是假的：「**这是把炸弹挡在门口，不是拆弹 —— 拆弹归 V5**」。W2 已经拆了（`run.rs` 的 `grace_duration`），注释要改成「门口校验 + 里面兜底，两道都在」。`cli.rs` 归 W3，本轨只读 | **W3 / 总管** |
+| `core/crates/edge-client/src/lib.rs:76`、`:91` | 与 ③ 同一条病：两处注释都说 `contract_state()` / `status()` 是给「`!status` 的健康行」用的，而**那条健康行全仓不存在**（`contract_state()` 在产品代码里零调用方）。`edge-client` 不在本轨可写面 | 下一轮 |
+| `core/crates/control/src/plane.rs` 的 `cmd_restart` | 归档会话时用 `list_active_tasks` 取要停的任务，同样漏掉 `Answering`。按 ⑦ 的结论这不是缺陷（交付中本来就停不掉），但口径与 `!stop` 已经分家，值得记一笔 | 下一轮 |
+| `!stop` 省略任务号 + 本群有多个任务 | 回的是「没有这个任务」，而列表里明明有好几个 —— 这条**改前就存在**，W2 只是把「有几个」的口径换成了 `status_tasks`。真要修得新加一句「请带上任务号」 | 下一轮 |
+
+### 没做的 / 拿不准的
+
+1. **越了两处白名单，都是加测试，逐条说明：**
+   - `core/crates/app/tests/build_app_contract.rs` —— ② 要求「补一条测试钉住注入路确实不连网」，
+     而这条测试的天然归宿就是这个文件（它的模块头写的正是「硬约束 1：`build_app` 只组装，
+     不产生副作用」，也就是 ② 要改的那句谎话的同源）。派单的可写表没列它。
+     另一条路是新建 `build_app_edge_boundary.rs` —— 同样不在表里，还要把 C-TΩ-1 的断言劈成两半。
+     选了前者，只**追加**两条并把那条已失真的文档注释改准；与 W3 的面零重叠。
+   - `core/crates/control/src/lib.rs` —— 只加了一行 `pub use`，把 ⑦ 的新文案导出给
+     `wording.rs` 逐字钉。不加这行 ⑦ 的文案就没法按 §3.3「固定文案逐字不变」的规矩钉住。
+2. **`docs/acceptance-M.md` 动了 6 处，比派单点名的三处多。** 三处是点名的
+   （§0.4 引用框、§M1 排障表那两行、§7 末「两条使用口径」）。多出来的三处是：
+   §M3 排障表和 §8 第 4 条里**同一句话的两处复述**（不改就留着两条 `<!-- 台账：仍未修，归 W2 -->`
+   和已经不成立的「两者都只查活跃集」），以及 §0 抬头改动说明里 W1 那条**现在时的断言**
+   （「现在这两条命令对『什么算活跃』意见不一致」）—— 补了一条 W2 的条目。
+   另外 `plane.rs` / `app.rs` 的行号引用因本轨改动漂了 6 处，逐个 `sed -n` 核过改掉。
+3. **`ServeOptions` 没有收窄成带校验的构造函数。** 理由见 ① 那一栏（要改 `cli.rs`，归 W3）。
+   真要彻底堵住 `pub` 字段这个口子，得由拿得到 `cli.rs` 的那一轨来做。
+4. **`startup_recovery` 的两个抖动源都只记账、没修** —— 文件不在可写面。第一个（`:259` 裸 `[0]`）
+   是**已复现的确定病根**，修法现成；第二个（10s 预算被饿死）只在人为重负载下出现，
+   建议先别调大预算。
+5. **⑤ 的两条出路里选了第一条**，第二条（证明竞态不可能发生并删掉）已被实证否掉 ——
+   撑开窗口之后它是必现的。

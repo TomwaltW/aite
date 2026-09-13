@@ -366,3 +366,15 @@ async fn counters_snapshot_carries_the_composed_keys() {
         "没碰过的 key 不该出现在快照里：{snapshot:?}"
     );
 }
+
+/// `!stop` 撞上交付中的任务时那句话，逐字钉住。
+///
+/// 它是 W2 新加的一句（V5 留下那半截的收口）：`!status` 列得出来的任务，
+/// `!stop` 不许再回「没有这个任务」。M 剧本的排障表引的就是这句原话。
+#[test]
+fn stop_while_delivering_text_is_byte_exact() {
+    assert_eq!(
+        aite_control::stop_while_delivering_text("#A17"),
+        "任务 #A17 正在把答复发给你，停不了了。"
+    );
+}

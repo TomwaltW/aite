@@ -144,6 +144,9 @@ struct GatedModel {
     inner: Arc<RecordingModel>,
     armed: std::sync::atomic::AtomicBool,
     reached: Arc<tokio::sync::Notify>,
+    /// 闸门**到过没有**。`reached` 那个 `Notify` 答不了这个问题（通知是一次性的，
+    /// 发的时候没人在等就没了），所以另立一个标志位 —— 理由见 `wait_gate_reached`。
+    gate_reached: std::sync::atomic::AtomicBool,
     gate: Arc<tokio::sync::Notify>,
     gate_open: std::sync::atomic::AtomicBool,
 }
@@ -154,6 +157,7 @@ impl GatedModel {
             inner: RecordingModel::new(script),
             armed: std::sync::atomic::AtomicBool::new(true),
             reached: Arc::new(tokio::sync::Notify::new()),
+            gate_reached: std::sync::atomic::AtomicBool::new(false),
             gate: Arc::new(tokio::sync::Notify::new()),
             gate_open: std::sync::atomic::AtomicBool::new(false),
         })
@@ -162,10 +166,35 @@ impl GatedModel {
         self.gate_open.store(true, Ordering::SeqCst);
         self.gate.notify_waiters();
     }
+
+    /// 闸门到过没有。给用例当判据用 —— 它不经过 `wait_gate_reached` 那条被测的路。
+    fn gate_reached(&self) -> bool {
+        self.gate_reached.load(Ordering::SeqCst)
+    }
+
+    /// 等 worker 走到第一次 `chat`（也就是闸门跟前）。
+    ///
+    /// **这里有个真会发生的竞态，而且它咬过人。** `chat()` 里那句 `notify_waiters()`
+    /// 只叫得醒**当下已经挂在等待队列里**的人；worker 要是比本函数先一步到闸门，
+    /// 那一发通知就发给了空气，而 `armed` 是一次性的，不会再有第二发。
+    ///
+    /// 两个窗口要分开看，兜法不一样：
+    /// - **通知发生在 `notified()` 之后**：tokio 自己兜住了 —— `Notify::notified()` 建
+    ///   future 时会记下当时的 `notify_waiters` 调用次数，第一次 poll 发现次数变了就直接
+    ///   Ready。这一半从来不是问题。
+    /// - **通知发生在 `notified()` 之前**：tokio 兜不住，只能靠一个「到过没有」的标志位。
+    ///   原来这行写的是 `if self.inner.call_count() > 0` —— **它恒为 false**：闸门期间
+    ///   `inner.chat` 压根还没被调到，计数当然是 0。于是这道守卫从没生效过，
+    ///   它本该挡住的那个竞态一次都没被挡住。2026-09-12 建 W2 worktree 跑基线时撞到
+    ///   `cargo passed=792 failed=1`，失败名逐字是 `-p aite --test reconnect_replay`，
+    ///   而单独连跑五遍 10/10 全绿 —— 就是这里。本轨把这个窗口人为撑到 200ms 之后，
+    ///   它是**必现**的（复现过，panic 逐字落在下面那句 `expect` 上）。
+    ///
+    /// 所以标志位换成 `gate_reached`：`chat()` 在 `notify_waiters()` **之前**把它置真。
+    /// 「先置位、再通知」配上「先建 notified、再查位」，两个方向都不漏。
     async fn wait_gate_reached(&self) {
-        // Notify 的通知是一次性的，可能早于 await —— 所以先看标志位再等。
         let notified = self.reached.notified();
-        if self.inner.call_count() > 0 {
+        if self.gate_reached() {
             return;
         }
         tokio::time::timeout(std::time::Duration::from_secs(5), notified)
@@ -187,6 +216,8 @@ impl aite_contracts::ModelPort for GatedModel {
         temperature: f32,
     ) -> Result<aite_contracts::ModelTurn, aite_contracts::ModelError> {
         if self.armed.swap(false, Ordering::SeqCst) {
+            // 先置位再通知：等的人要是还没挂上队列，通知会丢，标志位不会。
+            self.gate_reached.store(true, Ordering::SeqCst);
             self.reached.notify_waiters();
             while !self.gate_open.load(Ordering::SeqCst) {
                 let waiter = self.gate.notified();
@@ -675,9 +706,23 @@ async fn a_task_running_across_the_reconnect_finishes_normally() {
 }
 
 // --------------------------------------------------------------------------
-// 5 同一话题的 root 与追问一起被重推（两种到达形状，结论必须一样）
+// 5 同一话题的 root 与追问一起被重推（两种到达形状）
 // --------------------------------------------------------------------------
 
+/// **两种形状的结论并不一样，原来这一组假定它一样 —— 那是这个 target 的第二个抖动源。**
+///
+/// 顺序到达（`together=false`）有先后：root 那条 `handle_event` 整个走完、会话落了库，
+/// 追问才进来，所以 R6 必然命中，一条都不许丢。
+///
+/// 一起到达（`together=true`）**没有先后可言**：两条各自 `tokio::spawn`，追问完全可能在
+/// root 的会话落库之前就进 `handle_event` —— 它自己没 @、话题又还不存在，于是命中
+/// R8「其余丢弃」。这正是紧挨着的 `a_followup_replayed_before_its_root_is_dropped`
+/// 逐字写下的那条**当前边界**（要补得改路由规则本身）。原来这一支照抄顺序那一支的断言
+/// （`events.ignored == 0`），于是谁先谁后全看调度 —— 本轨实测基线上 12 遍红 1 遍，
+/// 与本轨改动无关。
+///
+/// 所以并发那一支改成钉**真正成立的那条保证**：结局只许是两种之一，
+/// 「既没进 transcript、也没被记成丢弃」这种静悄悄没了的形状一个都不许有。
 async fn root_and_followup_replayed(together: bool) {
     let tmp = tempfile::tempdir().expect("tmpdir");
     let (mut rig, _model) = make_rig(make_config(tmp.path()), 2).await;
@@ -714,29 +759,52 @@ async fn root_and_followup_replayed(together: bool) {
         None => Vec::new(),
     };
 
+    let contents: Vec<String> = turns.iter().map(|t| t.content.clone()).collect();
+    let seqs: Vec<u64> = turns.iter().map(|t| t.seq).collect();
+    let ignored = rig.counter("events.ignored");
+
+    // ── 两种形状都成立的那几条 ────────────────────────────────
     assert!(!tasks.is_empty(), "root 那条至少要变成一个任务");
-    assert_eq!(
-        rig.counter("events.ignored"),
-        0,
-        "追问那条掉进了 R8（丢弃）—— 说明它到的时候话题会话还没落库。计数器：{:?}",
-        rig.app.plane.counters()
-    );
     assert_eq!(
         sessions.len(),
         1,
-        "两条在同一个话题里，只该有一个会话 —— 追问那条没命中 R6，自己另起了一个话题"
+        "两条在同一个话题里，只该有一个会话 —— 追问那条要么并进来、要么被丢，\
+         就是不许自己另起一个话题"
     );
-    assert_eq!(
-        turns.iter().map(|t| t.content.clone()).collect::<Vec<_>>(),
-        vec!["按月画个图", "再按季度画一张"],
-        "两句话都该进同一份 transcript"
-    );
-    assert_eq!(turns.iter().map(|t| t.seq).collect::<Vec<_>>(), vec![0, 1]);
     assert_eq!(
         rig.app.ingress.counter("ingress.errors"),
         0,
         "有事件在路由里炸了 —— 它既没变成任务也不会被重推第二次，等于丢了"
     );
+
+    let joined = contents == ["按月画个图", "再按季度画一张"] && ignored == 0;
+    if together {
+        // 并发到达没有先后，两种结局都合法；不合法的是「第三种」。
+        let dropped_as_r8 = contents == ["按月画个图"] && ignored == 1;
+        assert!(
+            joined || dropped_as_r8,
+            "并发重推只许落在两种结局上：追问并进同一份 transcript（ignored=0），\
+             或者它抢在 root 前面、按 R8 被丢掉并记一笔（ignored=1）。\
+             实际 transcript={contents:?}、events.ignored={ignored} —— \
+             这是第三种：有东西静悄悄没了。计数器：{:?}",
+            rig.app.plane.counters()
+        );
+    } else {
+        // 顺序到达有先后：root 的会话必然已经落库，追问一条都不许丢。
+        assert!(
+            joined,
+            "顺序重推时 root 先整个走完，追问必然命中 R6：\
+             transcript={contents:?}、events.ignored={ignored}。计数器：{:?}",
+            rig.app.plane.counters()
+        );
+    }
+    if joined {
+        assert_eq!(
+            seqs,
+            vec![0, 1],
+            "两句话在同一份 transcript 里要按到达顺序排"
+        );
+    }
     rig.run.shutdown().await.expect("run_app 正常收场");
 }
 
@@ -836,4 +904,55 @@ async fn dedup_holds_for_sequential_arrival() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dedup_holds_for_concurrent_arrival() {
     dedup_holds_for(true).await;
+}
+
+// --------------------------------------------------------------------------
+// 6 脚手架自己的那道守卫 —— 它曾经恒为 false
+// --------------------------------------------------------------------------
+
+/// 闸门**已经到过**了，再问一次「到了没」必须立刻返回，而不是干等到 5s 超时然后报
+/// 「worker 没走到第一次 chat」。
+///
+/// 这一条钉的不是产品代码，是上面 `a_task_running_across_the_reconnect_finishes_normally`
+/// 赖以成立的脚手架。原来 `wait_gate_reached` 用 `inner.call_count() > 0` 当「到过了」
+/// 的判据，而闸门期间 `inner.chat` 还没被调到 —— 判据恒为 0，守卫从没生效过，
+/// 那条用例就跟着偶发假红（台账记的 `792/1` 那次）。
+///
+/// 用例刻意造出「通知早于等待」这个次序：先把模型驱到闸门上，**之后**才去问。
+/// 把 `wait_gate_reached` 里的 `self.gate_reached()` 换回 `self.inner.call_count() > 0`，
+/// 这条立刻红（5s 超时）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_gate_reached_survives_a_notification_that_came_first() {
+    use aite_contracts::ModelPort;
+
+    let model = GatedModel::new(script_for(1));
+
+    // 直接驱一次 chat，把它停在闸门上（不经 worker，省掉整套建场）
+    let driving = model.clone();
+    let driver = tokio::spawn(async move { driving.chat(&[], &[], 128, 0.0).await });
+
+    // 等到闸门确实被走到。判据用新标志位，不用被测的那条路，免得自己证自己。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !model.gate_reached() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "5s 内模型没走到闸门 —— 这条用例的前提就没成立"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+
+    // 前提：旧守卫那个判据在这一刻仍然是 0 —— 它恒为 false 的根就在这儿
+    assert_eq!(
+        model.inner.call_count(),
+        0,
+        "闸门期间 inner.chat 不该被调到；它要是已经涨了，旧守卫就不是死代码，本条前提作废"
+    );
+
+    // 正题：通知早就发过了（而且发的那一刻一个等待者都没有），这一问必须立刻返回
+    tokio::time::timeout(std::time::Duration::from_secs(1), model.wait_gate_reached())
+        .await
+        .expect("闸门已经到过了，wait_gate_reached 必须立刻返回，不能干等到 5s 超时");
+
+    model.release();
+    driver.await.expect("driver").expect("chat");
 }

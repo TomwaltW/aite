@@ -529,6 +529,38 @@ pub async fn wait_until(predicate: impl FnMut() -> bool, what: &str) {
     wait_until_within(WAIT_TIMEOUT_SEC, predicate, what).await;
 }
 
+/// 等本群冒出活跃任务，把第一个取回来。
+///
+/// 凡是原来写 `list_active_tasks(CHAT).await.expect("list")[0]` 的地方都换成这个。
+/// 那个写法在列表为空时报的是 `index out of bounds` —— 一句**越界 panic 冒充断言失败**：
+/// 调试的人得先看懂那行代码，才知道它本来想说什么。
+///
+/// 列表为什么会空：`deliver()` 第一件事就是把状态改成 `Answering` 再 save，而 `Answering`
+/// **不在** `ACTIVE_TASK_STATUSES`（created / planning / working）里；落终态之后更不在。
+/// 也就是说「任务跑得太快、已经交付了」和「任务压根没建出来」在这里长得一模一样 ——
+/// 所以失败时要把两者分开说：全程没出现过是后者，出现过又消失是前者。
+pub async fn first_active_task(store: &Arc<dyn SessionStore>, chat_id: &str, what: &str) -> Task {
+    let deadline = std::time::Instant::now() + Duration::from_secs_f64(WAIT_TIMEOUT_SEC);
+    loop {
+        let tasks = store
+            .list_active_tasks(chat_id)
+            .await
+            .expect("list_active_tasks");
+        if let Some(task) = tasks.first() {
+            return task.clone();
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "{WAIT_TIMEOUT_SEC}s 内 {chat_id} 没等到活跃任务：{what}。\
+                 活跃列表从头到尾是空的 —— 要么任务压根没建出来，\
+                 要么它跑得比这句断言还快、已经落 `Answering` / 终态从活跃口径里退场了。\
+                 分辨办法：去 evidence 目录看这个群有没有留下任务目录。"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 /// 让出若干 tick + 极短的真等待。
 ///
 /// 用在「断言某件事**没有**发生」之前：给系统足够的机会去做那件不该做的事。
