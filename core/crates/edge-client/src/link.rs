@@ -80,8 +80,18 @@ impl Link {
     /// 一次成功的 RPC 就是「现在连得上」的最强证据 —— 比探针新鲜。
     ///
     /// 不加这条的话：探针一旦进了退避 sleep（最长 30s），哪怕 edge 已经起来、
-    /// RPC 一路跑通，`connected()` 也要等下一次拨号才翻 true。RΩ 拿它出健康行
-    /// 或做起飞门禁就会误判成「edge 不在」。
+    /// RPC 一路跑通，`connected()` 也要等下一次拨号才翻 true。
+    ///
+    /// **谁在看这个标志**：`connected()` 产品代码里**零调用方**（`EdgeClient::connected()`
+    /// 只是一层转发，`wiring.rs` 那个 `edge.connected()?` 是 `LazyEdge` 的同名方法、
+    /// 另一回事），唯一的使用者是 `tests/edge_client.rs`。原注释说 RΩ 拿它「出健康行
+    /// 或做起飞门禁」，**两件都不对**：健康行全仓不存在（`!status` 走 `cmd_status`，
+    /// 只从 store 列活跃任务、从头到尾不碰 edge），起飞门禁走的是 `status()`
+    /// （`app.rs` 的 `check_contract_version`）而不是这个标志。与 `app.rs:83`（W2 改掉）、
+    /// `lib.rs` 那两处（X1 改掉）是同一句谎话的副本。
+    ///
+    /// 这一行照样该留：它是 `connected()` 的语义本身（「最近一次 RPC 成功过」），
+    /// 真有人拿它出健康行的那天，答案才是对的。下面那半段才是它现在的**实际**分量。
     pub(crate) fn note_ok(self: &Arc<Self>) {
         self.connected.store(true, Ordering::SeqCst);
         // 同一个道理用在契约上：连得通、但版本还一次都没比成过（起飞那 4s 没拨通，
@@ -132,8 +142,13 @@ impl Link {
             .max_encoding_message_size(self.max_bytes))
     }
 
-    /// **不过闸门**：`GetStatus` 正是用来比版本的，拦住它闸门就永远开不了；
-    /// `!status` 的健康行也还得问得出来。
+    /// **不过闸门**：`GetStatus` 正是用来比版本的，拦住它闸门就永远开不了
+    /// （闸落着时它是唯一还出得去的一发 RPC，`verify_contract` 靠它解锁）。
+    ///
+    /// 两个调用方都在本 crate 里：`EdgeClient::status()` 与上面那个 `verify_contract`。
+    /// 原注释还有半句「`!status` 的健康行也还得问得出来」—— 那条健康行**全仓不存在**
+    /// （`!status` 由 `control` 的 `cmd_status` 答，只从 store 列活跃任务、不碰 edge），
+    /// 与 `app.rs:83`（W2 改掉）、`lib.rs` 那两处（X1 改掉）同源。
     pub(crate) fn status_client(&self) -> EdgeStatusServiceClient<Channel> {
         EdgeStatusServiceClient::new(self.channel.clone())
             .max_decoding_message_size(self.max_bytes)

@@ -4,25 +4,35 @@
 //!
 //! | # | 组 | 判据 |
 //! |---|---|---|
-//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且 `worker.system_prompt_path` 指到的文件真的在**（配置不存在退到样例，算 WARN；prompt 读不到是 FAIL） |
-//! | 2 | 环境变量齐 | config 里所有 `*_env` 点到的变量**在不在**（取值一个字都不打） |
-//! | 3 | 飞书凭证有效 | 换得到 `tenant_access_token` |
-//! | 4 | 飞书身份对得上 | `GET /open-apis/bot/v3/info` 的 `bot.open_id` == `FEISHU_BOT_OPEN_ID` |
+//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且它起得来**：`worker.system_prompt_path` 指到的文件真的在、`platform` / `model.provider` 的取值不需要注入（配置不存在退到样例，算 WARN；后两者是 FAIL） |
+//! | 2 | 环境变量齐 | config 里所有 `*_env` 点到的变量**在不在**（取值一个字都不打）。`platform: fake` 时 SKIP |
+//! | 3 | 飞书凭证有效 | 换得到 `tenant_access_token`。`platform: fake` 时 SKIP |
+//! | 4 | 飞书身份对得上 | `GET /open-apis/bot/v3/info` 的 `bot.open_id` == `FEISHU_BOT_OPEN_ID`。`platform: fake` 时 SKIP |
 //! | 5 | 模型端点通 | 一次最小 chat（`ping`，`max_tokens=16`） |
 //! | 6 | 沙箱可用 | 经 edge：daemon 可达 → 起容器 → 四个 import → **一定收掉** |
 //! | 7 | 落盘目录可写 | 三个路径的「最近的已存在祖先」写得进去 |
 //!
-//! **第 1 组为什么连 `system_prompt_path` 一起验**：2026-09-12 总管撞上过一次
-//! 「preflight 说可以起飞、`aite run` 退出码 2」—— 他那份 `config/aite.yaml` 还指着
-//! 当天被删掉的 Python 树（`aite/worker/prompts/`），而七组里**没有一组**碰
-//! `worker.system_prompt_path`，于是 `require_system_prompt`（`app.rs`）在起飞时才拦下来。
-//! 配置解析成功却指着一个不存在的文件，本来就不该叫「配置可加载」，所以判据扩到这里，
-//! 而不是新开第 8 组（`docs/dev-spec-2026-09-11-rustgo.md:308` 的「七组自检」是冻结面）。
+//! **第 1 组为什么不只验「解析得出来」**：2026-09-12 与 2026-09-13 总管连着撞上两次
+//! 「preflight 说可以起飞、`aite run` 退出码 2」，病根是同一个 —— 配置解析成功 ≠ 它起得来，
+//! 而七组里**没有一组**去问后半句。所以第 1 组管三件事，而不是新开第 8 / 9 组
+//! （`docs/dev-spec-2026-09-11-rustgo.md:308` 的「七组自检」是冻结面）：
 //!
-//! 判据直接复用 `aite run` 走的那个 [`load_system_prompt`]，两边是**逐字同一条路径**；
-//! 相对路径按 `Options.repo_root` 解析，而它就是进程 cwd（见 [`run`]），
-//! 与 `require_system_prompt` 相对 cwd 的口径对得上 —— 不会出现「这边说行、那边说不行」。
-//! 它不碰网络也不碰 docker，所以 `--offline` 下照样跑。
+//! 1. **yaml 解析得出来**（原本就有的那件事）。
+//! 2. **`worker.system_prompt_path` 指到的文件真的在**：他那份 `config/aite.yaml` 还指着
+//!    当天被删掉的 Python 树（`aite/worker/prompts/`），`require_system_prompt`（`app.rs`）
+//!    在起飞时才拦下来。判据直接复用 `aite run` 走的那个 [`load_system_prompt`]，两边是
+//!    **逐字同一条路径**；相对路径按 `Options.repo_root` 解析，而它就是进程 cwd（见 [`run`]），
+//!    与 `require_system_prompt` 相对 cwd 的口径对得上 —— 不会出现「这边说行、那边说不行」。
+//! 3. **`platform` / `model.provider` 的取值不需要注入**：`platform: fake` 与
+//!    `model.provider: scripted` 只能被**注入着**用，而 `aite run` 不注入任何实现，
+//!    `build_app` 明文拒绝、退出码 2。判据见 [`injection_fault`]，与 `app.rs` 那两条
+//!    不等式同源。这一档下第 2/3/4 组一并 SKIP —— fake 平台压根不连飞书，那三组的
+//!    判据对它毫无意义（理由写在各自那一行里，见 [`FAKE_PLATFORM_SKIP`]）。
+//!
+//! 三件事**一次报齐**（口径照第 5 组「缺什么一次报齐」），不是撞上第一条就早退。
+//! 它们都不碰网络也不碰 docker，所以 `--offline` 下照样跑 —— 这正是要紧的地方：
+//! 上面两种「全绿而起不来」在 `--offline` 下也全绿，第 5/6 组那种「被 offline 跳过」
+//! 的口子救不了它们。
 //!
 //! **红线：任何输出都不得出现密钥取值。** 第一道是代码里根本不去打它们；第二道是
 //! [`Redactor`] —— 所有 detail / fix / extra 在渲染前都过一遍，把已知的取值抹掉。
@@ -41,8 +51,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aite_contracts::{
-    AiteConfig, CONTRACT_VERSION, ExecRequest, Message, ModelConfig, ModelProvider, Role,
-    SandboxError, SandboxErrorKind, SandboxNetwork, SandboxPort, SandboxSpec,
+    AiteConfig, CONTRACT_VERSION, ExecRequest, Message, ModelConfig, ModelProvider, PlatformChoice,
+    Role, SandboxError, SandboxErrorKind, SandboxNetwork, SandboxPort, SandboxSpec,
 };
 use aite_edge_client::{EdgeClient, EdgeStatus};
 use aite_models::{OpenAiCompatModel, cost_of, env_snapshot, resolve_api_key};
@@ -60,6 +70,18 @@ const DEFAULT_SYSTEM_PROMPT_PATH: &str = "core/crates/worker/prompts/platform.md
 /// 2026-09-12 删掉的 Python 树里 prompt 的位置。旧配置十有八九还指着它 ——
 /// 认出来就能在「怎么补」里直接说破病史，而不是让人自己去猜路径为什么不对。
 const DELETED_PYTHON_PROMPT_DIR: &str = "aite/worker/prompts/";
+
+/// `platform: fake` 时第 2/3/4 组那一行的理由。口径照 `--offline：不碰网络` ——
+/// 「判据不适用」要写在那一行里，不能默默跳过。
+const FAKE_PLATFORM_SKIP: &str = "platform=fake：不连飞书，这一组的判据不适用";
+
+/// 真机起飞该用的 `platform` / `model.provider`。它们只在「怎么补」里露面 ——
+/// 就是那句「该改成什么」。契约哪天换了默认值而这两个常量没跟上，自检会一脸笃定地
+/// 把人指到一个起不来的取值上，**而且没有任何别的测试会红**（第 1 组照样 FAIL、
+/// 照样给 fix，只是那句 fix 是错的）。所以拿契约当唯一真值源钉一次，口径照
+/// [`DEFAULT_SYSTEM_PROMPT_PATH`]：`injection_fix_matches_the_contract_defaults`。
+const REAL_PLATFORM: &str = "feishu";
+const REAL_MODEL_PROVIDER: &str = "openai_compat";
 
 /// 飞书开放平台默认域（与 `edge/internal/feishu` 同值）。
 const DEFAULT_DOMAIN: &str = "https://open.feishu.cn";
@@ -352,6 +374,63 @@ fn system_prompt_fix(raw: &str, abs: &Path) -> String {
     out
 }
 
+/// 第 ① 组的第三件事：`platform` / `model.provider` 的取值跟「有没有注入」搭不搭。
+///
+/// 返回 `(那一行说什么, 怎么补)`；两个取值都能自己起飞时返回 `None`。
+///
+/// **preflight 凭什么断定「没有注入」**：`Injections` 是 `build_app` 的入参，preflight
+/// 手上根本没有这个东西 —— 但它也不需要有。preflight 体检的对象是 `aite run`，而
+/// `aite run` 那条路（`cli.rs` 里唯一那个 `build_app` 调用点）传的是
+/// `Injections::default()`，**三个口子全空、也没有任何开关能往里塞东西**。所以在
+/// preflight 的语境里「有没有注入」不是未知数，是一个定值：没有，且不可能有。
+/// 这条前提由 `tests/preflight_e2e.rs` 的 `build_app_really_refuses_what_the_first_check_refuses`
+/// 拿真 `build_app` 对拍钉着 —— 哪天真给 `aite run` 加了注入开关，那条会红。
+///
+/// 判据与 `app.rs` 逐字同源：平台那条是 `config.platform == Fake`（`build_app` 第 3 步），
+/// 模型那条是 `provider != OpenaiCompat`（`build_model`）—— **照抄它的不等式而不是写死
+/// `== Scripted`**，契约哪天加第三个 provider，这里自动跟上。
+///
+/// 与第 5 组不重复：第 5 组管「端点通不通」，`provider=scripted` 时那件事无从谈起，
+/// 所以它给 WARN；「这份配置起不起得来」是第 ① 组的本分，所以这里是 FAIL。
+fn injection_fault(cfg: &AiteConfig) -> Option<(String, String)> {
+    let mut needs: Vec<String> = Vec::new();
+    let mut fixes: Vec<String> = Vec::new();
+
+    if cfg.platform == PlatformChoice::Fake {
+        needs.push("platform=fake 要由调用方注入平台实现".to_string());
+        fixes.push(format!(
+            "真机起飞把配置里的 platform 改成 {REAL_PLATFORM}（{EXAMPLE_CONFIG_PATH} 里就是这个值）；\
+             当前值 fake 是留给评测 / 回放的取值（§3.1），不会去连真实飞书 —— \
+             评测走 `aite evals --platform fake`，那条路自己注入替身，不经过 aite run"
+        ));
+    }
+    if cfg.model.provider != ModelProvider::OpenaiCompat {
+        needs.push(format!(
+            "model.provider={} 要由调用方注入模型实现",
+            cfg.model.provider
+        ));
+        fixes.push(format!(
+            "真机起飞把配置里的 model.provider 改成 {REAL_MODEL_PROVIDER}（{EXAMPLE_CONFIG_PATH} 里就是这个值）；\
+             当前值 {} 是留给评测的取值（§3.1），没有真端点 —— \
+             评测走 `aite evals --model scripted`，那条路自己注入替身，不经过 aite run",
+            cfg.model.provider
+        ));
+    }
+
+    if needs.is_empty() {
+        return None;
+    }
+    Some((
+        format!(
+            "{} —— aite run 不注入任何实现，起飞会被拒（退出码 2）",
+            needs.join("、")
+        ),
+        // 与 `check_config` 拼 `faults` / `fixes` 用同一个连接词：三件事全犯的配置，
+        // 「怎么补」读起来是三条并列的指令，而不是一句话的延续。
+        fixes.join("；另外，"),
+    ))
+}
+
 fn display_width(text: &str) -> usize {
     text.chars()
         .map(|c| if (c as u32) > 0x2e80 { 2 } else { 1 })
@@ -443,9 +522,17 @@ fn check_config(
     extra.insert("sandbox_image".into(), json!(cfg.sandbox.image));
     extra.insert("config_path".into(), json!(path.display().to_string()));
 
-    // 配置解析成功 ≠ 它指到的东西在。`worker.system_prompt_path` 是硬起飞前提
-    // （`build_app` 第 2 步 `require_system_prompt` 读不到就拒绝起飞），所以这里
-    // 是 FAIL 不是 WARN —— 见模块头「第 1 组为什么连 system_prompt_path 一起验」。
+    // 配置解析成功 ≠ 它起得来。下面两件事都是**硬起飞前提**（`build_app` 拒绝起飞的
+    // 原文就是它们），所以都是 FAIL 不是 WARN —— 见模块头「第 1 组为什么不只验解析」。
+    //
+    // **一次报齐，不是撞上第一条就早退**：口径照第 5 组那句「缺什么一次报齐，别让人补完
+    // base_url 重跑一遍才发现还缺 key」。两条都犯了的配置，一轮就能全改完。
+    // 只命中一条时这一行与「只验 prompt」那天**逐字相同**（涟漪最小）。
+    let mut faults: Vec<String> = Vec::new();
+    let mut fixes: Vec<String> = Vec::new();
+
+    // 其一：`worker.system_prompt_path` 指到的文件真的在（`build_app` 第 2 步
+    // `require_system_prompt`）。
     let prompt_raw = cfg.worker.system_prompt_path.clone();
     let prompt_abs = resolve_under(repo_root, &prompt_raw);
     extra.insert("system_prompt_path".into(), json!(prompt_raw));
@@ -453,32 +540,54 @@ fn check_config(
         "system_prompt_resolved".into(),
         json!(prompt_abs.display().to_string()),
     );
-    if let Err(e) = load_system_prompt(&prompt_abs) {
-        extra.insert("system_prompt_ok".into(), json!(false));
-        // 上一句已经把绝对路径打全了，`WorkerError` 的消息里还会再带一遍 —— 不存在这种
-        // 最常见的形态只说两个字，把版面留给「怎么补」。别的（是个目录、没读权限）
-        // 才需要上游的原文，那时候绝对路径重复一次也认了。
-        let why = if prompt_abs.exists() {
-            tail(&e.to_string(), 120)
-        } else {
-            "不存在".to_string()
-        };
+    match load_system_prompt(&prompt_abs) {
+        Err(e) => {
+            extra.insert("system_prompt_ok".into(), json!(false));
+            // 上一句已经把绝对路径打全了，`WorkerError` 的消息里还会再带一遍 —— 不存在这种
+            // 最常见的形态只说两个字，把版面留给「怎么补」。别的（是个目录、没读权限）
+            // 才需要上游的原文，那时候绝对路径重复一次也认了。
+            let why = if prompt_abs.exists() {
+                tail(&e.to_string(), 120)
+            } else {
+                "不存在".to_string()
+            };
+            faults.push(format!(
+                "worker.system_prompt_path 指不到文件：{prompt_raw} → {}（{why}）",
+                prompt_abs.display(),
+            ));
+            fixes.push(system_prompt_fix(&prompt_raw, &prompt_abs));
+        }
+        Ok(_) => {
+            extra.insert("system_prompt_ok".into(), json!(true));
+        }
+    }
+
+    // 其二：`platform` / `model.provider` 的取值自己起得来（`build_app` 第 3 步与
+    // `build_model` 那两条明文拒绝）。见 [`injection_fault`]。
+    match injection_fault(&cfg) {
+        Some((why, fix)) => {
+            extra.insert("needs_injection".into(), json!(true));
+            faults.push(why);
+            fixes.push(fix);
+        }
+        None => {
+            extra.insert("needs_injection".into(), json!(false));
+        }
+    }
+
+    if !faults.is_empty() {
         return (
             fail(
                 "config",
                 "配置可加载",
-                format!(
-                    "{detail} · 但 worker.system_prompt_path 指不到文件：{prompt_raw} → {}（{why}）",
-                    prompt_abs.display(),
-                ),
+                format!("{detail} · 但 {}", faults.join("；另外，")),
             )
-            .with_fix(system_prompt_fix(&prompt_raw, &prompt_abs))
+            .with_fix(fixes.join("；另外，"))
             // FAIL 也把 cfg 交出去：「一项失败不阻断后面的」，后面六组照常跑完。
             .with_extra(extra),
             Some(cfg),
         );
     }
-    extra.insert("system_prompt_ok".into(), json!(true));
 
     if fell_back {
         // 样例配置能过形状校验，但 base_url / model 是空的，真机起飞用它必炸。
@@ -1549,17 +1658,39 @@ pub async fn run_checks(
     };
 
     // 真 config 可以把 `*_env` 指到默认之外的名字上，上面那遍兜不住，按它再补一遍。
+    // 装料与第 2 组跑不跑无关 —— fake 那一档下面把第 2 组 SKIP 掉了，但 `check_config`
+    // 的 FAIL detail 照样会回显 yaml 里的标量，脱敏这一道一步都不能省。
     arm_redactor(redactor, &env_var_names(&cfg), env);
-    checks.push(check_env(&cfg, env, opts.offline));
 
-    if opts.offline {
-        let reason = "--offline：不碰网络";
+    // `platform: fake` 压根不连飞书，第 2/3/4 组的判据对它不适用 —— 跟 `--offline`
+    // 一样是「这一项没法查」，只是原因写在配置里而不是命令行上。**它不是在掩盖问题**：
+    // 真正拦住起飞的那条（fake 要注入）第 1 组已经 FAIL 了，整份自检退出码 1。
+    //
+    // 两个原因同时成立时**说 fake**：去掉 `--offline` 重跑，这几组仍然不适用，
+    // 说「--offline：不碰网络」会让人以为去掉那个开关就查得了。
+    //
+    // 代价（如实记在这儿）：第 2 组是**泛化**扫 `*_env` 的，整组 SKIP 连
+    // `model.api_key_env` 一起跳过了。fake 配置注定在第 1 组 FAIL、必须改回 feishu 重跑，
+    // 那一轮会把四个变量全查一遍，所以只是推迟一轮、不会静默放行。
+    let fake_platform = cfg.platform == PlatformChoice::Fake;
+    if fake_platform {
+        checks.push(skipped("env", "环境变量齐", FAKE_PLATFORM_SKIP));
+    } else {
+        checks.push(check_env(&cfg, env, opts.offline));
+    }
+
+    let feishu_na = if fake_platform {
+        Some(FAKE_PLATFORM_SKIP)
+    } else if opts.offline {
+        Some("--offline：不碰网络")
+    } else {
+        None
+    };
+    if let Some(reason) = feishu_na {
         checks.push(skipped("feishu_token", "飞书凭证有效", reason));
         checks.push(skipped("feishu_identity", "飞书身份对得上", reason));
         notes.push(note_passive_listen());
         notes.push(note_history_scope_unverified());
-        checks.push(skipped("model", "模型端点通", reason));
-        checks.push(skipped("sandbox", "沙箱可用", "--offline：不碰 docker"));
     } else {
         let outcome = check_feishu(
             &cfg,
@@ -1572,6 +1703,14 @@ pub async fn run_checks(
         checks.push(outcome.token);
         checks.push(outcome.identity);
         notes.extend(outcome.notes);
+    }
+
+    // 第 5/6 组只认 `--offline`：模型端点与沙箱跟 platform 取值无关（fake 平台照样
+    // 要跑真沙箱、`provider=scripted` 那条第 5 组自己会给 WARN）。
+    if opts.offline {
+        checks.push(skipped("model", "模型端点通", "--offline：不碰网络"));
+        checks.push(skipped("sandbox", "沙箱可用", "--offline：不碰 docker"));
+    } else {
         checks.push(check_model(&cfg, env, redactor).await);
         checks.push(check_sandbox(&cfg, &opts.repo_root).await);
     }
@@ -2361,6 +2500,132 @@ mod tests {
         for fix in [&stale, &typo] {
             assert!(fix.contains(DEFAULT_SYSTEM_PROMPT_PATH), "{fix}");
             assert!(fix.contains(EXAMPLE_CONFIG_PATH), "{fix}");
+        }
+    }
+
+    /// [`REAL_PLATFORM`] / [`REAL_MODEL_PROVIDER`] 必须和契约默认值对得上。
+    ///
+    /// 同 [`prompt_default_matches_the_contract`] 那条的道理：这两个常量只在「怎么补」里
+    /// 露面，指错了别的测试一条都不会红 —— 第 1 组照样 FAIL、照样给 fix，只是那句
+    /// 「该改成什么」把人指到一个同样起不来的取值上。样例配置里那两行一起验，三处同源。
+    #[test]
+    fn injection_fix_matches_the_contract_defaults() {
+        let def = AiteConfig::default();
+        assert_eq!(
+            REAL_PLATFORM,
+            def.platform.as_str(),
+            "「怎么补」里那句「platform 该改成什么」和契约默认值分家了"
+        );
+        assert_eq!(
+            REAL_MODEL_PROVIDER,
+            def.model.provider.as_str(),
+            "「怎么补」里那句「model.provider 该改成什么」和契约默认值分家了"
+        );
+
+        let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join(EXAMPLE_CONFIG_PATH);
+        let text = std::fs::read_to_string(&example)
+            .unwrap_or_else(|e| panic!("读不到 {}：{e}", example.display()));
+        assert!(
+            text.contains(&format!("platform: {REAL_PLATFORM}")),
+            "{EXAMPLE_CONFIG_PATH} 里的 platform 和「怎么补」指的不是同一个值"
+        );
+        assert!(
+            text.contains(&format!("provider: {REAL_MODEL_PROVIDER}")),
+            "{EXAMPLE_CONFIG_PATH} 里的 model.provider 和「怎么补」指的不是同一个值"
+        );
+    }
+
+    /// 能自己起飞的配置一个字都不碰 —— 判据不许误伤 `feishu` + `openai_compat`。
+    #[test]
+    fn injection_fault_lets_a_config_that_can_fly_through() {
+        assert!(injection_fault(&AiteConfig::default()).is_none());
+    }
+
+    /// 模型那条照抄 `build_model` 的**不等式**（`provider != OpenaiCompat`），
+    /// 不是写死 `== Scripted`。
+    ///
+    /// 契约现在只有两个 provider，所以这条钉不出「第三个 provider 也该被拦」；能钉的是
+    /// **唯一放行的那个是哪个** —— 判据要是写成 `== Scripted`，哪天加了第三个取值，
+    /// preflight 会放它起飞而 `build_model` 照样拒绝，两边当场分家。真出现第三个取值时，
+    /// `build_app_really_refuses_what_the_first_check_refuses`（e2e）会替这条把关。
+    #[test]
+    fn injection_fault_only_lets_the_one_provider_through() {
+        for p in [ModelProvider::OpenaiCompat, ModelProvider::Scripted] {
+            let mut cfg = AiteConfig::default();
+            cfg.model.provider = p;
+            let got = injection_fault(&cfg);
+            assert_eq!(
+                got.is_none(),
+                p == ModelProvider::OpenaiCompat,
+                "provider={p} 的放行判断反了"
+            );
+        }
+    }
+
+    /// 第 1 组的注入判据，纯函数这一层：FAIL，**但 config 要照常交出去**。
+    ///
+    /// 后半句是 X1 点名的那条口径（prompt 那边同款）：交不出去的话后面六组会全变成
+    /// 「第 1 组没过，配置读不出来」，「一项失败不阻断后面的」当场破功。
+    #[test]
+    fn check_config_fails_but_still_hands_over_the_config_when_the_platform_is_fake() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("aite.yaml");
+        std::fs::write(&path, "platform: fake\n").expect("write");
+        // prompt 那条判据别来插一脚：把契约默认那个路径真建出来。
+        let prompt = root.path().join(DEFAULT_SYSTEM_PROMPT_PATH);
+        std::fs::create_dir_all(prompt.parent().expect("有父目录")).expect("mkdir");
+        std::fs::write(&prompt, "# 假 prompt\n").expect("write");
+
+        let (r, cfg) = check_config(&path, false, root.path());
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
+        assert!(r.detail.contains("platform=fake"), "{}", r.detail);
+        assert!(r.fix.contains(REAL_PLATFORM), "{}", r.fix);
+        assert_eq!(r.extra["needs_injection"], json!(true));
+        // prompt 那条没被误伤。
+        assert_eq!(r.extra["system_prompt_ok"], json!(true));
+    }
+
+    /// 两件事都犯的配置**一次报齐** —— 不是撞上 prompt 那条就早退。
+    ///
+    /// 早退的话，人补完 prompt 重跑才发现还有 `platform: fake` 挡着，白跑一轮。
+    /// 口径照第 5 组那句「缺什么一次报齐，别让人补完 base_url 重跑一遍才发现还缺 key」。
+    #[test]
+    fn check_config_reports_the_prompt_and_the_injection_in_one_go() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("aite.yaml");
+        std::fs::write(
+            &path,
+            "platform: fake\nmodel:\n  provider: scripted\nworker:\n  \
+             system_prompt_path: aite/worker/prompts/platform.md\n",
+        )
+        .expect("write");
+
+        let (r, cfg) = check_config(&path, false, root.path());
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(cfg.is_some());
+        for keyword in [
+            "worker.system_prompt_path",
+            "platform=fake",
+            "model.provider=scripted",
+        ] {
+            assert!(
+                r.detail.contains(keyword),
+                "三件事没报齐，缺 {keyword}：{}",
+                r.detail
+            );
+        }
+        // 「怎么补」也要三件齐 —— 报齐了却只教一件，等于没报齐。
+        for keyword in [
+            DEFAULT_SYSTEM_PROMPT_PATH,
+            REAL_PLATFORM,
+            REAL_MODEL_PROVIDER,
+        ] {
+            assert!(r.fix.contains(keyword), "「怎么补」缺 {keyword}：{}", r.fix);
         }
     }
 
