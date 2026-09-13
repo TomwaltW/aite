@@ -29,7 +29,54 @@ pub const REAPER_INTERVAL_SEC: f64 = 60.0;
 
 pub const NO_SUCH_TASK_TEXT: &str = "没有这个任务";
 pub const NO_ACTIVE_TASK_TEXT: &str = "本群没有活跃任务";
+
+/// `!stop` / 卡片 stop 按钮撞上一个**已经在交付里**的任务时的那句话。
+///
+/// 不能回 `NO_SUCH_TASK_TEXT` —— V5 之后它明明还在 `!status` 的列表里，
+/// 用户看得见的东西不许被这一句说成不存在（见 `StopTarget` 那段）。
+pub fn stop_while_delivering_text(task_no: &str) -> String {
+    format!("任务 {task_no} 正在把答复发给你，停不了了。")
+}
 pub const RESTART_EMPTY_TEXT: &str = "已重开会话，请直接说要做什么。";
+
+/// `!stop` / 卡片 stop 按钮找目标的三种结局。
+///
+/// **「交付中的任务停不了」是刻意的约定，不是查不到。** 理由在 worker 那边：
+/// 取消标志位只在每一步的**开头**被看一眼（`worker/src/agent.rs` 里
+/// `if (hooks.is_cancelled)()` 是全仓唯一一处），而 `deliver()` 是最后一步之后的一段直路 ——
+/// 逐个 `send_file` → `send_text` → 写 delivered 证据 → 收卡片 → `finish()`，
+/// 中间**一个取消点都没有**。
+///
+/// 所以「让 `!stop` 跟上、真去停它」那条路是走不通的，它只会造出三样坏东西：
+/// 1. 文件和答复该发的照发 —— 用户已经收到了，却被告知「已停止」；
+/// 2. `cancel_task` 写进去的 `Cancelled` 随后被 `finish()` 的 `Delivered` 盖掉，
+///    库里最终是 `delivered`，回帖却说停了，两边对不上；
+/// 3. V5 那道「落刀前按 id 重读、终态不改写」的防线在这里**兜不住** ——
+///    `Answering` 不是终态，重读出来照样往下走。
+///
+/// 于是本轨选的是把它写成明面上的约定：查得到（口径与 `!status` 完全一致），
+/// 但回一句说得通的话（`stop_while_delivering_text`），而不是「没有这个任务」。
+enum StopTarget {
+    /// 可停：还在活跃口径里（created / planning / working），worker 每步开头会看标志位。
+    Stoppable(Task),
+    /// 找得到，但停不了：已经走进 `deliver()`。
+    Delivering(Task),
+    /// 本群压根没这个任务。
+    NotFound,
+}
+
+impl StopTarget {
+    fn of(task: Option<Task>) -> Self {
+        match task {
+            None => Self::NotFound,
+            Some(task) if task.status.is_active() => Self::Stoppable(task),
+            // 非活跃、又没到终态（`status_tasks` 会把终态滤掉）—— P0 里只可能是 `Answering`。
+            // `AwaitingApproval` 那一格全仓没有任何一处写得进去，只活在契约枚举和
+            // `frozen_values.rs` 里；真有一天用上了，它同样不该被「没有这个任务」打发掉。
+            Some(task) => Self::Delivering(task),
+        }
+    }
+}
 
 /// R4 的四种「不触发任务」事件。
 const R4_KINDS: [EventKind; 4] = [
@@ -392,8 +439,12 @@ impl InProcessControlPlane {
                     .resolve_task(&ev.chat_id, action.task_id.as_deref(), &action.card_id)
                     .await?;
                 match task {
-                    None => self.reply(ev, NO_SUCH_TASK_TEXT).await?,
-                    Some(task) => {
+                    StopTarget::NotFound => self.reply(ev, NO_SUCH_TASK_TEXT).await?,
+                    StopTarget::Delivering(task) => {
+                        self.reply(ev, &stop_while_delivering_text(&task.task_no))
+                            .await?
+                    }
+                    StopTarget::Stoppable(task) => {
                         self.cancel_task(
                             task,
                             Some(ev.anchor.message_id.clone()),
@@ -559,17 +610,23 @@ impl InProcessControlPlane {
     }
 
     async fn cmd_stop(&self, ev: &NormalizedEvent, rest: &str) -> Result<(), IngressError> {
-        let Some(task) = self.resolve_stop_target(&ev.chat_id, rest).await? else {
-            return self.reply(ev, NO_SUCH_TASK_TEXT).await;
-        };
-        self.cancel_task(
-            task,
-            Some(ev.anchor.message_id.clone()),
-            Some(ev.chat_id.clone()),
-            true,
-        )
-        .await;
-        Ok(())
+        match self.resolve_stop_target(&ev.chat_id, rest).await? {
+            StopTarget::NotFound => self.reply(ev, NO_SUCH_TASK_TEXT).await,
+            StopTarget::Delivering(task) => {
+                self.reply(ev, &stop_while_delivering_text(&task.task_no))
+                    .await
+            }
+            StopTarget::Stoppable(task) => {
+                self.cancel_task(
+                    task,
+                    Some(ev.anchor.message_id.clone()),
+                    Some(ev.chat_id.clone()),
+                    true,
+                )
+                .await;
+                Ok(())
+            }
+        }
     }
 
     async fn cmd_restart(
@@ -643,21 +700,31 @@ impl InProcessControlPlane {
         )
     }
 
+    /// `!stop` / 卡片 stop 按钮找目标，找**同一份**列表：`status_tasks`。
+    ///
+    /// V5 只把控制面的 `running` 并进了 `cmd_status`，`resolve_stop_target` /
+    /// `resolve_task` 原地没动，于是交付中的短任务在 `!status` 里列得出来、
+    /// `!stop` 却回「没有这个任务」—— 用户看见它在列表里、伸手去停却被告知不存在。
+    /// 改之前两条命令口径一致（都查不到），改之后互相矛盾，比原来更费解。
+    ///
+    /// 这里把「查哪些任务」统一到 `status_tasks`，再按能不能停分成两种结局。
+    /// **`ACTIVE_TASK_STATUSES` 一个字都没动** —— 它是双重冻结的
+    /// （`contracts` 的 `frozen_values.rs` + `roundtrip.rs`），这条路本来也走不通。
     async fn resolve_stop_target(
         &self,
         chat_id: &str,
         raw: &str,
-    ) -> Result<Option<Task>, IngressError> {
-        let tasks = self.store.list_active_tasks(chat_id).await?;
-        if raw.is_empty() {
-            // 只有一个活跃任务时允许省略任务号
-            if tasks.len() == 1 {
-                return Ok(tasks.into_iter().next());
-            }
-            return Ok(None);
-        }
-        let want = normalize_task_no(raw);
-        Ok(tasks.into_iter().find(|t| t.task_no == want))
+    ) -> Result<StopTarget, IngressError> {
+        let tasks = self.status_tasks(chat_id).await?;
+        let found = if raw.is_empty() {
+            // 只有一个任务时允许省略任务号。「只有一个」按**用户看得见的那份列表**算，
+            // 也就是 `!status` 列出来的那些 —— 否则又成了两条命令各数各的。
+            (tasks.len() == 1).then(|| tasks.into_iter().next().expect("刚判过长度"))
+        } else {
+            let want = normalize_task_no(raw);
+            tasks.into_iter().find(|t| t.task_no == want)
+        };
+        Ok(StopTarget::of(found))
     }
 
     async fn resolve_task(
@@ -665,16 +732,18 @@ impl InProcessControlPlane {
         chat_id: &str,
         task_id: Option<&str>,
         card_id: &str,
-    ) -> Result<Option<Task>, IngressError> {
-        let tasks = self.store.list_active_tasks(chat_id).await?;
-        if let Some(task_id) = task_id.filter(|t| !t.is_empty()) {
-            return Ok(tasks.into_iter().find(|t| t.id == task_id));
-        }
-        Ok(tasks.into_iter().find(|t| {
-            t.card_id
-                .as_deref()
-                .is_some_and(|c| !c.is_empty() && c == card_id)
-        }))
+    ) -> Result<StopTarget, IngressError> {
+        let tasks = self.status_tasks(chat_id).await?;
+        let found = if let Some(task_id) = task_id.filter(|t| !t.is_empty()) {
+            tasks.into_iter().find(|t| t.id == task_id)
+        } else {
+            tasks.into_iter().find(|t| {
+                t.card_id
+                    .as_deref()
+                    .is_some_and(|c| !c.is_empty() && c == card_id)
+            })
+        };
+        Ok(StopTarget::of(found))
     }
 
     // ---- R6 / R7 ---------------------------------------------------------

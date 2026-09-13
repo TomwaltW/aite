@@ -186,6 +186,42 @@ fn log_takeoff(app: &AiteApp) {
 // 收尾
 // --------------------------------------------------------------------------
 
+/// 把宽限期收敛成一个**一定造得出来**的 `Duration`。
+///
+/// `Duration::from_secs_f64` 对三类取值直接 panic：`NaN`、负数、以及 `Duration` 装不下的
+/// 那些（`f64::INFINITY` 是一类，`1e300` 这种超大有限数是另一类）。原来那句 `grace.max(0.0)`
+/// 只挡住负数 —— `NaN.max(0.0)` 碰巧是 `0.0` 所以侥幸不炸，上溢则一个字都没拦。
+///
+/// **为什么非拆不可**：这一句在 `shutdown()` 里，panic 一起，C-TΩ-1 的退出序列就从这里
+/// 整段被跳过 —— `sandbox.close_all()` 不还容器、`store.close()` 不关 SQLite。
+/// `cli.rs` 的 `0..=86400` 校验（V6 ④a）只守住命令行这一个入口，而
+/// `ServeOptions::shutdown_grace_sec` 是 `pub` 的裸 `f64`：集成测试、评测接线、
+/// 将来任何直接构造 `ServeOptions` 的调用方都从它旁边走过去。
+///
+/// 所以拆弹放在真正要用它的这一句前面，规矩只有一条：**造得出来就照用，造不出来就退到
+/// C-TΩ-1 的默认 20s 并 warn 一行，收尾照常走完**。合法取值一个字都不改 ——
+/// 包括 `0.0`（「一秒都不等」，`cli.rs` 允许的下界）。
+///
+/// 这里刻意**不**复刻 `cli.rs` 那个 86400 的上界：那是命令行的人机约定，
+/// 而这一层的职责只有「不许 panic、不许跳过收尾」。一个 `Duration` 装得下的大数字
+/// 拿来当宽限期是调用方的自由，等于「等到队列排空为止」，不是故障。
+fn grace_duration(grace: f64) -> Duration {
+    match Duration::try_from_secs_f64(grace) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(
+                target: "aite.app",
+                grace,
+                error = %e,
+                fallback_sec = DEFAULT_SHUTDOWN_GRACE_SEC,
+                "aite.grace_invalid 宽限期不是个能用的秒数，退到默认值，收尾照走"
+            );
+            // 常量是自己家的，一定造得出来（20.0）
+            Duration::from_secs_f64(DEFAULT_SHUTDOWN_GRACE_SEC)
+        }
+    }
+}
+
 async fn shutdown(app: &AiteApp, runner: Option<JoinHandle<()>>, grace: f64) {
     tracing::info!(target: "aite.app", grace, pending = app.plane.pending(), "aite.stopping");
 
@@ -194,7 +230,7 @@ async fn shutdown(app: &AiteApp, runner: Option<JoinHandle<()>>, grace: f64) {
     }
 
     let timed_out = runner.as_ref().is_some_and(|h| !h.is_finished())
-        && tokio::time::timeout(Duration::from_secs_f64(grace.max(0.0)), app.plane.join())
+        && tokio::time::timeout(grace_duration(grace), app.plane.join())
             .await
             .is_err();
 

@@ -105,9 +105,11 @@ fn run_app_grace_period_defaults_to_twenty_seconds() {
     assert!(ServeOptions::default().install_signals);
 }
 
-/// 硬约束 1：只组装。不连网、不起容器、不发消息。
+/// 硬约束 1 的**注入路**：不起容器、不发消息、不惊动模型。
 ///
-/// 唯一允许的副作用是建那三个落盘目录 —— 所以这条顺带把「目录真被建出来了」也钉住。
+/// 「连网」那一半不在这条里 —— 它是下面 `..._when_all_three_are_injected` /
+/// `..._when_one_injection_is_missing` 那一对钉的分界。这条顺带把允许的那个副作用
+/// （三个落盘目录真被建出来）一起钉住。
 #[tokio::test]
 async fn build_app_has_no_side_effects() {
     let tmp = tempfile::tempdir().expect("tmpdir");
@@ -178,4 +180,91 @@ async fn missing_system_prompt_refuses_to_fly_with_the_config_key_named() {
     assert!(err.0.contains("worker.system_prompt_path"), "{err}");
     assert!(err.0.contains("no/such/platform.md"), "{err}");
     assert!(err.0.contains("仓库根"), "{err}");
+}
+
+// --------------------------------------------------------------------------
+// 「注入了就不连 edge，少注入一个才连」—— C-TΩ-1 这条边界原来只有半边有测试
+// --------------------------------------------------------------------------
+
+/// `check_contract_version` 连不上 edge 时的固定开销：`EDGE_STATUS_ATTEMPTS`（5）发
+/// `GetStatus`，每两发之间 `sleep(1s)` —— 也就是**至少 4s**。
+///
+/// 这 4s 就是下面两条用来分辨「到底走没走 edge 那条路」的判据。比起断言
+/// 「`app.edge` 是不是 None」，它直接量的是**行为**：走了就一定付这笔钱，没走就是瞬间返回。
+/// （原来想用一个拼不成 URI 的 socket 地址当探针，实测 `Endpoint::from_shared` 连带空格的
+/// 路径都收，这条路不通。）
+const EDGE_DIAL_COST_SEC: f64 = 4.0;
+
+/// 快到不可能是走了 edge 的那条路。两条线中间留了 2s 的空档，机器再忙也分得开。
+const NO_DIAL_CEILING_SEC: f64 = 2.0;
+
+/// 一个语法合法、但那头什么都没有的 socket 路径。
+fn nobody_home_socket(tmp: &std::path::Path) -> String {
+    tmp.join("nobody-home.sock").display().to_string()
+}
+
+/// 三个口子全注入 → `need_edge` 为假 → 连 edge 那条路一步都不走。
+///
+/// 两条断言缺一不可：`edge` 是 `None` 只说明「没留下客户端」，**没付那 4s** 才说明
+/// `EdgeClient::connect` / `check_contract_version` 根本没被叫到。
+/// 把 `need_edge` 那个判断拿掉改成无条件连，这条会在计时上红。
+#[tokio::test]
+async fn build_app_does_not_touch_edge_when_all_three_are_injected() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let mut config = make_config(tmp.path());
+    config.edge.edge_socket = nobody_home_socket(tmp.path());
+
+    let started = std::time::Instant::now();
+    let app = build_with(
+        config,
+        GatedPlatform::new(),
+        RecordingModel::new(vec![final_step("没人会叫我。")]),
+        Arc::new(FakeSandbox::new(Vec::new())),
+    )
+    .await;
+    let elapsed = started.elapsed().as_secs_f64();
+
+    assert!(app.edge.is_none(), "三个口子都注入了，不该留下 edge 客户端");
+    assert!(
+        elapsed < NO_DIAL_CEILING_SEC,
+        "组装花了 {elapsed:.3}s —— 连 edge 那条路要付 {EDGE_DIAL_COST_SEC}s，\
+         这一趟不该走上去"
+    );
+}
+
+/// 反过来：少注入一个（这里是沙箱）→ 就**真的**去连 edge，并且真付那 4s。
+///
+/// 这半边原来一条测试都没有，于是 `build_app` 的注释说「不连网」也没人拦得住。
+/// 顺带钉住 §2.1「启动顺序无关」：edge 不在**不是**起飞失败，
+/// `check_contract_version` 记一行 `aite.edge_unreachable` 就照常返回。
+///
+/// **这条是真等 4s**（tokio 的 `start_paused` 要 `test-util` feature，
+/// 而 `Cargo.toml` 不在本轨可写面上）。断的是**下界**，所以它只会慢，不会抖。
+#[tokio::test]
+async fn build_app_does_go_to_edge_when_one_injection_is_missing() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let mut config = make_config(tmp.path());
+    config.edge.edge_socket = nobody_home_socket(tmp.path());
+
+    let started = std::time::Instant::now();
+    let app = build_app(
+        config,
+        Injections {
+            platform: Some(GatedPlatform::new()),
+            model: Some(RecordingModel::new(vec![final_step("没人会叫我。")])),
+            // 沙箱这个口子空着 —— 只缺一个也要连 edge
+            sandbox: None,
+            repo_root: Some(repo_root()),
+        },
+    )
+    .await
+    .expect("edge 连不上不算起飞失败（§2.1 启动顺序无关）");
+    let elapsed = started.elapsed().as_secs_f64();
+
+    assert!(app.edge.is_some(), "走了 edge 那条路就该留下客户端");
+    assert!(
+        elapsed >= EDGE_DIAL_COST_SEC,
+        "只过了 {elapsed:.3}s —— 5 发 GetStatus 之间该有 4 次 sleep(1s)。\
+         要么重试次数变了、要么 sleep 没了，`build_app` 注释里那个「最坏 4s」得跟着改"
+    );
 }

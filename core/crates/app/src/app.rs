@@ -75,7 +75,20 @@ pub struct AiteApp {
     pub worker: Arc<dyn TaskWorker>,
     pub plane: Arc<dyn ControlPlane>,
     pub ingress: Ingress,
-    /// 真机那一路才有：留着它是为了 `!status` 的健康行与收尾时的连接态日志。
+    /// 真机那一路才有：`platform` / `sandbox` 有一个没被注入就得连 edge，连出来的客户端
+    /// 挂在这儿；三个口子全注入 → `None`（`build_app_contract.rs` 钉着这条分界）。
+    ///
+    /// **产品代码里只有两处读它**（测试另算）：`run.rs` 的 `log_takeoff` 印起飞那行 `aite.up` 里的 edge socket
+    /// 绝对路径（真机排障的第一现场），以及本文件 `Debug` 里那个 `edge: true/false`。
+    /// 原注释写的「`!status` 的健康行与收尾时的连接态日志」**两处都不存在**：
+    /// `cmd_status`（`control/src/plane.rs`）从头到尾不碰 edge，收尾路径也没有任何一行
+    /// 连接态日志 —— 唯一那行是起飞时打的。
+    ///
+    /// **别把它当生命线。** `EdgeClient` 交出去的 `platform()` / `sandbox()` 各自攥着同一根
+    /// `Link` 的 `Arc`，后台重连探针又是 `tokio::spawn` 出去、自己也攥着一个 —— 所以 V5 之后
+    /// edge 客户端真正要紧的那件事，契约闸门（`edge-client/src/gate.rs`：每重新连上一次就补比
+    /// 一次 `contract_version`，不一致就闸断 platform / sandbox 两条链路），**不经过这个字段**，
+    /// 它置空也照跑。
     pub edge: Option<Arc<EdgeClient>>,
 }
 
@@ -126,9 +139,30 @@ pub fn sandbox_spec_of(config: &AiteConfig) -> SandboxSpec {
     }
 }
 
-/// 按 config 把零件装起来。**只组装**：不连网、不起容器、不发消息。
+/// 按 config 把零件装起来。
 ///
-/// 唯一的副作用是建那三个落盘目录（C-TΩ-1 允许的那一条）。
+/// **只组装**：不起容器、不发消息、不建表（建表是起飞时的 `store.init()`）、不处理事件。
+/// 但原来那句「不连网，唯一的副作用是建那三个落盘目录」是假的 —— C-TΩ-1 的边界实际画在
+/// 下面这几条上，逐条写清楚，别让人照着那句话去推断。
+///
+/// **落盘**
+/// - `prepare_storage`：`mkdir -p` 三个目录（sqlite 的父目录、`evidence_dir`、
+///   `artifacts_dir`）。这是硬约束 1 明文允许的那一条，也是 `aite preflight` 第 7 项
+///   对人承诺的「data 待建，起飞时自动 mkdir」。
+/// - `SqliteSessionStore::open`：打开连接，**库文件不在就建一个空的**（里面还没有表）。
+///
+/// **读盘**：`require_system_prompt` 真去读 `worker.system_prompt_path`，读不到拒绝起飞。
+///
+/// **连 edge**：只有 `platform` / `sandbox` 至少缺一个注入时才走（`need_edge`）。
+/// 三个口子全注入就完全不碰 edge —— 这条分界由 `build_app_contract.rs` 两条测试钉着。
+/// 走上去的话是两件事，代价差得很远：
+/// - `EdgeClient::connect` 是**懒连接，不发一个字节**：解析 socket 路径、备一条 tonic 的
+///   lazy Channel，再 `tokio::spawn` 一条后台重连探针（1→2→…→30s 退避）。
+///   它只会因为「socket 路径拼不成合法地址」失败。
+/// - `check_contract_version` 才是真 RPC：`GetStatus` 最多 `EDGE_STATUS_ATTEMPTS`（5）次、
+///   每两次之间 `sleep(1s)`。所以 **edge 没起来时最坏在这里阻塞约 4s**，
+///   然后记一行 `aite.edge_unreachable` 照常返回 `Ok`（§2.1「启动顺序无关」）；
+///   答上来而版本不一致则是 `StartupError`，拒绝起飞。
 pub async fn build_app(
     config: AiteConfig,
     inject: Injections,

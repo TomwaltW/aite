@@ -50,7 +50,7 @@ async fn crash_with_a_task_in_flight(
         .await
         .expect("handle_event");
 
-    let mut task = app.store.list_active_tasks(CHAT).await.expect("list")[0].clone();
+    let mut task = first_active_task(&app.store, CHAT, "handle_event 把任务建出来").await;
     task.status = TaskStatus::Working; // 崩溃那一刻它正在干活
     app.store.update_task(&task).await.expect("update_task");
 
@@ -122,7 +122,7 @@ async fn crash_does_not_block_new_work_in_the_same_thread() {
                 .build(),
         )
         .await;
-    let new_task = app.store.list_active_tasks(CHAT).await.expect("list")[0].clone();
+    let new_task = first_active_task(&app.store, CHAT, "旧话题里那句追问建出新任务").await;
     assert_eq!(
         new_task.session_id, closed.session_id,
         "同一会话，话题锚点没断"
