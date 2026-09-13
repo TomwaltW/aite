@@ -511,3 +511,475 @@ fn deny_rules_only_use_the_edit_and_read_prefixes() {
         );
     }
 }
+
+// =====================================================================================
+// AA3（2026-09-13）：把误拦归类表从**归纳**推到**实测**。
+//
+// 上面模块头那张表是从会话经历里归出来的，一行都没有黑盒验过。本轨拿 `run_guard()`
+// 喂了 180 条 payload 把每一格的**触发条件**量到精确，下面八条各钉一格。
+// 量出来有三处和那张表不一致，**以实测为准**（详见台账「十六、AA3 回执」）：
+//
+// 1. 「heredoc 正文里有配不平的引号 / **中文引号**」——**中文引号根本不触发**，
+//    而且这条病**跟 heredoc 无关**。真判据见 `a_quote_must_close_on_its_own_line`。
+// 2. 「不透明载荷」既不是 Y2 说的「正文太长」，也不是 Z2 说的「判不出读/写的位置」。
+//    真判据见 `command_substitution_is_what_the_opaque_payload_verdict_means`。
+// 3. 「`cargo fmt --all`（写模式，碰冻结面）」——和 `--all` 无关、和它会碰什么也无关，
+//    只看 `--check` 在不在。真判据见 `cargo_fmt_is_judged_by_the_check_flag_alone`。
+//
+// **这八条只断退出码，不断错误消息的措辞。** 措辞改了不是行为变了；而标签
+// （`读取位置` / `写入/执行位置` / `不透明载荷` / `解析失败` / `解释器内联代码` /
+// `授权变量赋值`）作为判据证据写在各条的注释里 —— 那是黑盒能拿到的全部信息。
+// =====================================================================================
+
+/// 守卫把命令**按行**切开逐行解析，所以引号必须在**它自己那一行**里闭合。
+///
+/// 这一条治的是历史上最常撞的那一格（Y1 1 次、Y2 1 次、Z1 1 次，本轨开工十分钟内又撞
+/// 一次）。老归因写的是「heredoc 正文里有配不平的引号 / 中文引号」，**两半都不准**：
+///
+/// * **跟 heredoc 无关**。`echo '\nhi\n'` 一个 heredoc 都没有，整条看引号还是**配平的**
+///   （两个 `'`），照样被判 `<命令无法解析: No closing quotation>（解析失败）` ——
+///   因为第一行 `echo '` 里那个单引号没在本行闭合。heredoc 只是最容易写出跨行引号的场合。
+/// * **中文引号不触发**。`“”`、`‘’`、`「」` 三种全部放行：解析器只认 ASCII 的 `'` 和 `"`。
+///   历史上那几次归到中文引号头上的，正文里多半还有个英文撇号（`it's` 那种）。
+///
+/// **所以标准绕法要改口径**：不是「别用 heredoc」，是「别让引号跨行」。
+/// 正文里有 `it's` 这种撇号时才需要换 Write 工具落文件。
+#[test]
+fn a_quote_must_close_on_its_own_line() {
+    // 该拦的：某一行里的 ASCII 引号没在本行闭合
+    let blocked: &[(&str, &str)] = &[
+        ("单行内不配对的单引号", "echo it's fine"),
+        ("单行内不配对的双引号", r#"echo "abc"#),
+        (
+            "引号跨行 —— 整条看是配平的，逐行看第一行就炸了",
+            "echo '\nhi\n'",
+        ),
+        (
+            "python3 -c 的双引号跨行（本轨开工十分钟内自撞的那一条）",
+            "python3 -c \"\nprint('hi')\n\"",
+        ),
+        (
+            "heredoc 正文里有英文撇号",
+            "cat > /tmp/x <<'EOF'\nit's fine\nEOF",
+        ),
+    ];
+    for (label, cmd) in blocked {
+        assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
+    }
+
+    // 该放的：引号各自在本行闭合，或者压根不是 ASCII 引号
+    let allowed: &[(&str, &str)] = &[
+        ("同一条压成单行就好了", "python3 -c \"print('hi')\""),
+        ("多行，但每行的引号各自闭合", "echo \"a\"\necho \"b\""),
+        ("中文弯引号", "echo 他说“你好”"),
+        ("中文单弯引号", "echo 他说‘你好’"),
+        ("中文直角引号", "echo 他说「你好」"),
+        (
+            "heredoc 正文里的中文弯引号",
+            "cat > /tmp/x <<'EOF'\n他说“你好”\nEOF",
+        ),
+        // 反引号不参与这条判据（它归命令替换那条管）
+        ("不配对的反引号", "echo `date"),
+    ];
+    for (label, cmd) in allowed {
+        assert_eq!(bash(cmd), 0, "{label} 被误拦：{cmd:?}");
+    }
+}
+
+/// 「不透明载荷」= **命令替换**里出现受保护路径，不是「正文太长」、也不是「判不出读/写」。
+///
+/// 两版旧归因都证伪了：
+///
+/// * **Y2 的「正文太长」**：8KB 的纯填充命令放行；8KB 填充**加上**一条契约路径也放行
+///   （`echo` 是读取位置）。长度一个字都不参与。
+/// * **Z2 的「受保护路径出现在判不出读/写的位置」**：那种情况实测拿到的标签是
+///   **`写入/执行位置`**（`foobarbaz <契约>`、`touch <契约>`、heredoc 正文里的路径……
+///   全是它）。`不透明载荷` 这个标签只有命令替换能触发。
+///
+/// 判据窄得很干净：`$(…)`、反引号、`$((…))` 三种展开 **+** 同一条命令里有受保护路径。
+/// `$VAR` / `${VAR}` 这种纯变量展开**不触发**，进程替换 `<(…)` 也**不触发**。
+/// 外层命令在不在 `READ_SAFE` 里也不管用 —— `echo $(echo <契约>)` 照样拦。
+///
+/// 本轨自撞那一条（一份带 `$(echo …)` 的 heredoc）逐字喂回去复现了这个标签；
+/// 把那两行 `$(echo …)` 删掉，同一条命令**放行**。判据就落在这儿。
+#[test]
+fn command_substitution_is_what_the_opaque_payload_verdict_means() {
+    const CONTRACT: &str = "core/crates/contracts/src/lib.rs";
+
+    let blocked: &[(&str, String)] = &[
+        (
+            "$(…) 里藏契约路径",
+            format!("cat $(echo {CONTRACT}) > /tmp/x"),
+        ),
+        ("反引号里藏契约路径", format!("cat `echo {CONTRACT}`")),
+        (
+            "外层是 echo（读取位置）也没用 —— 命令替换的判定在前",
+            format!("echo $(echo {CONTRACT})"),
+        ),
+        ("算术展开也算命令替换", format!("echo $((1+1)) {CONTRACT}")),
+        (
+            "命令替换在赋值右边",
+            format!("X=$(echo {CONTRACT}); echo done"),
+        ),
+    ];
+    for (label, cmd) in blocked {
+        assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
+    }
+
+    let allowed: &[(&str, String)] = &[
+        (
+            "命令替换但不碰受保护面",
+            "cat $(echo /tmp/x) > /tmp/y".into(),
+        ),
+        // 长度不是判据 —— Y2 的归因在这两条上证伪
+        ("8KB 纯填充", format!("echo {}", "x".repeat(8000))),
+        (
+            "8KB 填充 + 一条契约路径（echo 是读取位置，PREFIX 族放行）",
+            format!("echo {} {CONTRACT}", "x".repeat(8000)),
+        ),
+        // 纯变量展开不是命令替换
+        ("$VAR 展开", format!("cat $F/{CONTRACT}")),
+        ("${{VAR}} 展开", format!("cat ${{F}}/{CONTRACT}")),
+    ];
+    for (label, cmd) in allowed {
+        assert_eq!(bash(cmd), 0, "{label} 被误拦：{cmd:?}");
+    }
+}
+
+/// `cargo fmt` 只看命令里有没有 `--check`，**不看 `--all`、也不看它到底会碰什么**。
+///
+/// 老表写的是「`cargo fmt --all`（写模式，碰冻结面）」，两个修饰语都不是判据：
+///
+/// * `--all` 不是判据：`cargo fmt`（不带 `--all`）照样拦，`cargo fmt --check --all` 照样放行；
+/// * 「碰冻结面」也不是判据：`cargo fmt -p aite` 碰不到 `core/crates/contracts/**`，
+///   一样被拦（守卫算不出 `-p` 的覆盖面，宁可错杀 —— 这条是**固有代价**，别改）。
+///
+/// **`--check` 在哪个位置都认**：`--check --all`、`--all --check`、`--all -- --check`
+/// 三种写法全放行。派单里「只读模式还拦的话是一条可以收窄的真误拦」那个猜想，**证伪**。
+///
+/// **但这里有一条真误拦**：`cargo fmt --version` / `--help` 一个字节都不写，照样被判
+/// 「写模式」。下面钉的是**现状**（characterization），不是我们想要的行为 ——
+/// 守卫哪天收窄了这一格，这两行会红，那时来改它、别当回归失败。
+/// 收窄提案与它的 fail-closed 复核见台账「十六、AA3 回执」③④。
+#[test]
+fn cargo_fmt_is_judged_by_the_check_flag_alone() {
+    let blocked: &[(&str, &str)] = &[
+        ("光杆 cargo fmt", "cargo fmt"),
+        ("--all 写模式", "cargo fmt --all"),
+        (
+            "-p 限定单个 package 也拦（覆盖面算不出来，固有代价）",
+            "cargo fmt -p aite",
+        ),
+        // ↓ 真误拦，钉的是现状
+        ("--version 纯查询，一个字节不写", "cargo fmt --version"),
+        ("--help 纯查询，一个字节不写", "cargo fmt --help"),
+    ];
+    for (label, cmd) in blocked {
+        assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
+    }
+
+    let allowed: &[(&str, &str)] = &[
+        ("--check 在前", "cargo fmt --check --all"),
+        ("--check 在后", "cargo fmt --all --check"),
+        ("--check 经 rustfmt 直传", "cargo fmt --all -- --check"),
+        ("--check 配 -p", "cargo fmt -p aite --check"),
+        // 纪律 5 的标准绕法：绕开 cargo fmt，直接喊 rustfmt
+        (
+            "rustfmt 单文件",
+            "rustfmt --edition 2024 crates/app/tests/guard.rs",
+        ),
+        // 同族的别的重写工具，判据各不相同
+        ("ruff check 不带 --fix", "ruff check ."),
+        ("gofmt -w（受保护面里一个 .go 都没有）", "gofmt -w ."),
+        (
+            "clippy --fix 不在 REWRITERS 里",
+            "cargo clippy --fix --workspace",
+        ),
+    ];
+    for (label, cmd) in allowed {
+        assert_eq!(bash(cmd), 0, "{label} 被误拦：{cmd:?}");
+    }
+}
+
+/// **冻结面是按命令文本里的路径字面量匹配的，所以先 `cd` 进去就绕过了。**
+///
+/// 这一条钉的是**漏拦**，不是误拦 —— 一个拦过十次不该拦的东西，边界的**另**半边同样没人量过。
+///
+/// `PROT_PREFIXES`（`core/crates/contracts/**`、`proto/**`）匹配的是命令文本里写出来的
+/// 那一串字符。写法变形基本都堵住了（绝对路径、`./` 前缀、双斜杠、`..` 回绕、`$HOME`
+/// 展开、大小写变体 —— 本轨逐条量过，全部拦住）。**唯独少了 cwd 这一维**：
+///
+/// ```text
+/// cd core && echo x > crates/contracts/src/lib.rs      → 放行
+/// Write(crates/contracts/src/lib.rs)                   → 放行
+/// ```
+///
+/// 两条都真能改到契约文件，而 `cd core` 就写在命令里、不需要任何前置状态。
+/// `Write` 那条更不需要命令 —— 会话在 `core/` 下起，`file_path` 自然就是这个形状。
+///
+/// **没在本轨修**：修它要动 `guard_bash.py`（把路径按 cwd 归一化再匹配），而本轨拿不到
+/// 那个文件的内容，锚点定位不到就不许写补丁（派单 ③）。**先钉成已知行为**，
+/// 下一个人一眼看得到这个洞在哪、有多大。守卫收窄之后这两行会红 —— 那时来改它。
+///
+/// 这条**不影响 fail-closed**：它是「本该拦的没拦」，不是「守卫失效了却放行」。
+/// 守卫仍然在跑、仍然会对它认得出的写法退 2。
+#[test]
+fn protected_prefixes_match_the_literal_path_so_a_cd_first_slips_through() {
+    // 绝对路径那两条按**当前仓库根**拼 —— 写死 `/Users/…/task-aa3/…` 的话，
+    // 换个 worktree 跑就在验一条不存在的路径，而守卫是按文本匹配的、照样会绿：
+    // 那就成了恒真断言。
+    let root = repo_root()
+        .canonicalize()
+        .expect("仓库根算不出来")
+        .display()
+        .to_string();
+    let abs = format!("{root}/core/crates/contracts/src/lib.rs");
+
+    // 认得出的那些写法：全拦
+    let blocked: &[(&str, String)] = &[
+        ("绝对路径", format!("echo x > {abs}")),
+        (
+            "./ 前缀",
+            "echo x > ./core/crates/contracts/src/lib.rs".into(),
+        ),
+        (
+            "双斜杠",
+            "echo x > core//crates//contracts//src//lib.rs".into(),
+        ),
+        (
+            ".. 回绕",
+            "echo x > core/crates/contracts/src/../src/lib.rs".into(),
+        ),
+        (
+            "$HOME 展开后才是绝对路径",
+            format!(
+                "echo x > $HOME{}",
+                abs.trim_start_matches(&std::env::var("HOME").expect("HOME 没设"))
+            ),
+        ),
+        (
+            "大小写变体（APFS 不敏感）",
+            "echo x > core/crates/CONTRACTS/src/lib.rs".into(),
+        ),
+        (
+            "tee 写",
+            "echo x | tee core/crates/contracts/src/lib.rs".into(),
+        ),
+    ];
+    for (label, cmd) in blocked {
+        assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
+    }
+
+    // ↓ 这两条断的是「**没**拦住」。钉的是现状，不是我们想要的行为。
+    assert_eq!(
+        bash("cd core && echo x > crates/contracts/src/lib.rs"),
+        0,
+        "守卫开始认 cwd 了（好事）—— 这条 characterization 测试该跟着改，别当回归失败"
+    );
+    assert_eq!(
+        tool("Write", "crates/contracts/src/lib.rs"),
+        0,
+        "守卫开始认 cwd 了（好事）—— 这条 characterization 测试该跟着改，别当回归失败"
+    );
+}
+
+/// `READ_SAFE` 只救得了 `PROT_PREFIXES` 那一族，救不了被点名的那几个文件。
+///
+/// 两族保护面的行为差一整档，而老表把它们混在一起写了：
+///
+/// | | `cat <它>` | `echo <它>` |
+/// |---|---|---|
+/// | `core/crates/contracts/**`、`proto/**`（前缀族） | 放行 | 放行 |
+/// | `.claude/hooks/guard_bash.py`、`.claude/settings.json`、`.contracts.lock`（点名族） | **拦** | **拦** |
+///
+/// 点名族命中时 `readable=False`，**连读取位置一起拦** —— 所以 `cat` / `ls` / `echo`
+/// 在它们身上一个都不管用。这正是开场自检要撞的那一条（Read 守卫自己必须被拦）。
+///
+/// `docs/dev-spec-*.md` 是第三档：**可读不可写**（`cat` 放行、`echo x >` 拦）。
+#[test]
+fn read_safe_rescues_the_prefix_family_but_not_the_named_files() {
+    const CONTRACT: &str = "core/crates/contracts/src/lib.rs";
+    const GUARD: &str = ".claude/hooks/guard_bash.py";
+    const SPEC: &str = "docs/dev-spec-2026-09-09.md";
+
+    // 前缀族：读取位置全放行
+    for (label, cmd) in [
+        ("cat", format!("cat {CONTRACT}")),
+        ("grep", format!("grep -n fn {CONTRACT}")),
+        ("ls", format!("ls -l {CONTRACT}")),
+        ("head", format!("head -5 {CONTRACT}")),
+        ("wc", format!("wc -l {CONTRACT}")),
+        ("echo", format!("echo {CONTRACT}")),
+        ("管道里的 cat", format!("cat {CONTRACT} | head -3")),
+        (
+            "git log 只读历史",
+            format!("git log --oneline -1 -- {CONTRACT}"),
+        ),
+    ] {
+        assert_eq!(bash(&cmd), 0, "前缀族 + {label} 被误拦：{cmd:?}");
+    }
+
+    // 前缀族：写入/执行位置全拦（`cp` 只读源也拦 —— 守卫判不出哪个参数是目标）
+    for (label, cmd) in [
+        ("git add 点名", format!("git add {CONTRACT}")),
+        ("touch", format!("touch {CONTRACT}")),
+        ("chmod", format!("chmod 644 {CONTRACT}")),
+        (
+            "cp（只读源，但判不出方向）",
+            format!("cp {CONTRACT} /tmp/x"),
+        ),
+        ("守卫不认识的命令", format!("foobarbaz {CONTRACT}")),
+    ] {
+        assert_eq!(bash(&cmd), BLOCKED, "前缀族 + {label} 没被拦：{cmd:?}");
+    }
+
+    // 点名族：连 READ_SAFE 都救不了
+    for (label, cmd) in [
+        ("cat", format!("cat {GUARD}")),
+        ("ls", format!("ls -l {GUARD}")),
+        ("echo（纯输出，既不读也不写）", format!("echo {GUARD}")),
+        ("echo 契约锁", "echo .contracts.lock".to_string()),
+        (
+            "echo settings.json",
+            "echo .claude/settings.json".to_string(),
+        ),
+    ] {
+        assert_eq!(bash(&cmd), BLOCKED, "点名族 + {label} 没被拦：{cmd:?}");
+    }
+
+    // 点名族的**目录**不在保护面里 —— 看得见有哪些文件，读不到内容
+    for (label, cmd) in [
+        ("ls 守卫所在目录", "ls -l .claude/hooks/"),
+        ("git log -- .claude", "git log --oneline -1 -- .claude"),
+    ] {
+        assert_eq!(bash(cmd), 0, "{label} 被误拦：{cmd:?}");
+    }
+
+    // 第三档：冻结 spec 可读不可写
+    assert_eq!(bash(&format!("cat {SPEC}")), 0, "冻结 spec 读不了");
+    assert_eq!(bash(&format!("sed -n 1,5p {SPEC}")), 0, "冻结 spec 读不了");
+    assert_eq!(
+        bash(&format!("echo x > {SPEC}")),
+        BLOCKED,
+        "冻结 spec 写进去了"
+    );
+}
+
+/// `find` 只要带 `-delete` / `-exec` / `-execdir` 就拦，**跟它指着哪儿完全无关**。
+///
+/// 老表写「`find … -delete` / `-exec`｜设计如此」是对的，但漏了范围有多大：
+/// `find /tmp -name "aa3_*" -delete` —— 起点在 `/tmp`，跟冻结面一点关系都没有，照样拦。
+/// 报的还是 `冻结面（proto/** 与 core/crates/contracts/**）（find 的 -delete/-exec 覆盖面判不出来）`。
+///
+/// **这是有意的宁可错杀**，别当误拦去改：`find` 的覆盖面要真算出来得把整棵树遍历一遍，
+/// 而守卫只有命令文本。代价是每轨收尾清临时文件都得换写法 ——
+/// **标准绕法**：`ls` 列出来 + 点名 `rm -f`（`rm -rf <非保护目录>` 本身是放行的）。
+#[test]
+fn find_with_delete_or_exec_is_blocked_no_matter_where_it_points() {
+    let blocked: &[(&str, &str)] = &[
+        ("-delete 在仓库里", r#"find . -name "*.rs" -delete"#),
+        ("-exec 在仓库里", r#"find . -name "*.rs" -exec ls {} \;"#),
+        ("-execdir", r#"find . -name "*.rs" -execdir ls {} \;"#),
+        // ↓ 起点压根不在仓库里，照样拦
+        ("-delete 指着 /tmp", r#"find /tmp -name "aa3_*" -delete"#),
+        (
+            "-exec 指着 /tmp",
+            r#"find /tmp -name "aa3_*" -exec rm -f {} \;"#,
+        ),
+        (
+            "-exec 的动作只是 echo",
+            r#"find . -type f -exec echo {} \;"#,
+        ),
+    ];
+    for (label, cmd) in blocked {
+        assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
+    }
+
+    let allowed: &[(&str, &str)] = &[
+        ("光检索", r#"find . -name "*.rs""#),
+        ("-print 是显式只读动作", r#"find . -name "*.rs" -print"#),
+        // 标准绕法的后半截
+        ("点名 rm -f", "rm -f /tmp/aa3_probe.txt"),
+        (
+            "rm -rf 非保护目录（走的是权限询问，不是守卫）",
+            "rm -rf /tmp/aa3_dir",
+        ),
+    ];
+    for (label, cmd) in allowed {
+        assert_eq!(bash(cmd), 0, "{label} 被误拦：{cmd:?}");
+    }
+}
+
+/// `AITE_RELOCK` 是按**文本**匹配的：赋成什么值、在注释里、在 heredoc 正文里，全拦。
+///
+/// `relock_and_self_authorization_are_blocked` 钉的是「不许自我授权」这条纪律；
+/// 这一条量的是那道门有多宽 —— 它比纪律本身宽，宽出来的部分是**误拦**，
+/// 而这些误拦恰好都站在 fail-closed 那一侧，所以**不提收窄**：
+///
+/// * `AITE_RELOCK=0`（明明是在**关**授权）也拦；
+/// * 写在 `#` 注释里也拦；
+/// * 写在 heredoc 正文里（比如往派单文档里抄一行运行命令）也拦 —— 这一格最容易撞到，
+///   **标准绕法**：用 Write 工具落文件，别用 heredoc 抄带 `AITE_RELOCK=` 的命令。
+///
+/// 唯一放行的是**不带等号**的裸提及（`echo AITE_RELOCK`）——「赋值」这个形状是判据。
+#[test]
+fn the_relock_variable_is_matched_as_text_anywhere_in_the_command() {
+    let blocked: &[(&str, &str)] = &[
+        ("正经的自我授权", "AITE_RELOCK=1 echo hi"),
+        ("赋 0 也拦（在关授权，照样算赋值）", "AITE_RELOCK=0 echo hi"),
+        ("export 形式", "export AITE_RELOCK=1"),
+        ("写在注释里", "echo hi  # AITE_RELOCK=1"),
+        (
+            "写在 heredoc 正文里（抄运行命令进文档时最容易撞）",
+            "cat > /tmp/x <<'EOF'\nAITE_RELOCK=1 python3 review/x.py\nEOF",
+        ),
+    ];
+    for (label, cmd) in blocked {
+        assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
+    }
+
+    let allowed: &[(&str, &str)] = &[
+        ("裸提及，没有等号", "echo AITE_RELOCK"),
+        ("别的变量赋值", "FOO=1 echo hi"),
+        ("lock --check 是每轨的验收项", "aite contracts lock --check"),
+    ];
+    for (label, cmd) in allowed {
+        assert_eq!(bash(cmd), 0, "{label} 被误拦：{cmd:?}");
+    }
+}
+
+/// 整行 `#` 注释会被当成一条命令去判 —— 里面提到受保护路径就拦。
+///
+/// ```text
+/// # 随手记一句 core/crates/contracts/src/lib.rs   → 拦（写入/执行位置）
+/// echo hi  # 说的是 core/crates/contracts/src/lib.rs → 放行
+/// ```
+///
+/// 差别在第一个词：整行注释的首词是 `#`，不在 `READ_SAFE` 里，于是那一行被当成
+/// 「拿受保护路径去执行点什么」；尾部注释那一行的首词是 `echo`，读取位置，前缀族放行。
+///
+/// **这是一条真误拦** —— 一行注释不可能执行任何东西。没在本轨收窄：收益极小
+/// （现实里极少单发一行注释），而任何「注释整行跳过」的改动都要动 `guard_bash.py`
+/// 的分词那一段，本轨拿不到源码、锚点定位不到（派单 ③）。钉着，别再花时间重新发现它。
+#[test]
+fn a_whole_line_comment_is_parsed_as_a_command() {
+    const CONTRACT: &str = "core/crates/contracts/src/lib.rs";
+    const GUARD: &str = ".claude/hooks/guard_bash.py";
+
+    assert_eq!(
+        bash(&format!("# 随手记一句 {CONTRACT}")),
+        BLOCKED,
+        "整行注释不再被当命令了（好事）—— 这条 characterization 测试该跟着改"
+    );
+    assert_eq!(
+        bash(&format!("# 随手记一句 {GUARD}")),
+        BLOCKED,
+        "整行注释不再被当命令了（好事）—— 这条 characterization 测试该跟着改"
+    );
+    // 对照：同一句话挂在真命令后面就放行
+    assert_eq!(
+        bash(&format!("echo hi  # 说的是 {CONTRACT}")),
+        0,
+        "尾部注释被误拦了"
+    );
+}

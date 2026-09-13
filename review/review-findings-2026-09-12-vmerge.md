@@ -1882,3 +1882,317 @@ go 六包全 `ok`、`passed 10/10`，「全部通过」退出码 0。**五行关
 3. **Z2 想改而没伸手的文档面，本轮一个字没碰** —— 派单说它会把原文 + 改法写进自己的回执、
    由总管在合并时落。本轨也没碰 `guard.rs` 与 `.claude/**` 相关的任何东西。
 4. **`contract_state()` 零调用方那件事没动**（X1 记过，派单点名「要不要删不是本轨的决定」）。
+
+## 十六、AA3 回执 —— 2026-09-13
+
+守卫在台账里留下过十次误拦，而钉着它行为的只有十条回归。本轨**先量后改**：拿
+`run_guard()` 喂了 **183 条 payload**，把 Z2 那张归纳表的每一格推到精确触发条件，
+把量出来的判据落成 **8 条新回归**（10 → 18），并在量完之后**决定不出补丁**（③ 给了理由）。
+
+**量出来有三处和 Z2 那张表不一致，两处和 Y2 的归因不一致 —— 全部以实测为准。**
+另外量到了一件那张表完全没覆盖的事：**守卫有一个真漏拦**（不是误拦），
+`cd core &&` 之后写契约**完全不被拦**。
+
+### 基线与开场自检
+
+HEAD `76c62fd`、`git status` 空，与派单抬头逐字相符。`scripts/check.sh` 一次跑过、
+退出码 0、末行「全部通过」，五行关键值全部对上派单：
+
+| 行 | 期望 | 实测 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` ✅ |
+| C1 契约测试 | `contracts passed=25 failed=0` | 逐字相同 ✅ |
+| B 全量 cargo test | `cargo passed=853 failed=0` | 逐字相同 ✅ |
+| B go test（-race） | 六个包全 `ok` | aiteerr/config/feishu/ingress/sandbox/server 全 `ok` ✅ |
+| B8 评测 | `passed 10/10` | 逐字相同 ✅ |
+
+**三个抖动 target 一个都没撞到**，`.claude/settings.json` 那一格已进 git（`guard` 这个
+target 是绿的，没出现派单警告的 `852/1`）。
+
+`Read .claude/hooks/guard_bash.py` **被守卫当场拦下** ✅，原话逐字（含它自己把 hook
+命令打进了方括号 —— 那条命令就是 `76c62fd` 落的那一版）：
+
+```text
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+---
+
+### ① 测量矩阵 —— 本轨的主交付
+
+#### 1. 怎么量的（以及没怎么量）
+
+一条**临时** Rust 集成测试当驱动器（`tests/aa3_probe.rs`，从 JSON 清单读 payload，
+逐条 spawn 守卫、收退出码**和 stderr 逐字**），跑完立刻删。它干的事和
+`tests/guard.rs::run_guard()` 一模一样，只多收了 stderr —— 判定标签只在那里。
+
+**守卫源码一个字节都没读。** 派单的硬约束禁止的是「用测试当读取通道 dump 源码」；
+本轨没有取任何锚点字符串（Z2 取过一条 hook 命令，本轨连那个都不需要 ——
+开场自检被拦时守卫自己把它打出来了）。**所有结论都是从「退出码 + 错误消息」倒推的。**
+
+**收尾无残留**：驱动器每次跑完即 `rm`，`git status` 复核只有 `guard.rs` 一个改动文件。
+
+#### 2. Z2 那张归类表逐行复核
+
+| Z2 的行 | Z2 的判定 | 本轨实测 | 一致？ |
+|---|---|---|---|
+| `AITE_RELOCK=1 …` | 设计如此 | 拦，`AITE_RELOCK（授权变量赋值）`。**门比纪律宽**：`=0` 也拦、写在 `#` 注释里也拦、写在 heredoc 正文里也拦；只有不带等号的裸提及（`echo AITE_RELOCK`）放行 | **一致**（范围补全） |
+| `find … -delete` / `-exec` | 设计如此 | 拦，`冻结面（proto/** 与 core/crates/contracts/**）（find 的 -delete/-exec 覆盖面判不出来）`。**与它指着哪儿完全无关** —— `find /tmp -name "aa3_*" -delete` 照样拦 | **一致**（范围比表上写的大） |
+| Read / `cat` 守卫自身或 `settings.json` | 设计如此 | 拦，`.claude/hooks/guard_bash.py（读取位置）`。同族还有 `.contracts.lock`。**`echo` 它们也拦** —— `READ_SAFE` 对这一族一点用没有 | **一致** |
+| 命令里出现受保护路径的**字面量** | 固有代价 | **要分两族说**，见下面第 3 节 (c) | **不一致** |
+| `cargo fmt --all`（写模式，碰冻结面） | 固有代价 | 判据**既不是 `--all`、也不是「碰冻结面」**，见 3 (a) | **不一致** |
+| heredoc 正文里有配不平的引号 / **中文引号** | 固有代价 | **中文引号根本不触发**，而且**跟 heredoc 无关**，见 3 (b) | **不一致** |
+| heredoc 正文被判「不透明载荷」 | 固有代价 | 判据是**命令替换**，跟 heredoc、跟长度都无关，见 3 (d) | **不一致** |
+| 正文里的 `**` 反向匹配到死探针 | 已收窄（V6 (3a)） | 复验两条：`**加粗**` 的 heredoc 放行、`ls core/crates/*/src/lib.rs` 放行 | **一致**（确认已收） |
+
+#### 3. 四处不一致，逐条摆证据
+
+**(a) `cargo fmt`：判据只有「`--check` 在不在」，别的一概不看。**
+
+| payload | 退出码 | 消息里的标签 |
+|---|---|---|
+| `cargo fmt` | 2 | `core/crates/contracts/**（cargo fmt 写模式（用 cargo fmt --check））` |
+| `cargo fmt --all` | 2 | 同上 |
+| `cargo fmt -p aite` | 2 | 同上 ← **碰不到 contracts，照样拦** |
+| **`cargo fmt --version`** | **2** | 同上 ← **一个字节都不写** |
+| **`cargo fmt --help`** | **2** | 同上 ← **一个字节都不写** |
+| `cargo fmt --check --all` | 0 | — |
+| `cargo fmt --all --check` | 0 | — |
+| `cargo fmt --all -- --check` | 0 | — |
+| `cargo fmt -p aite --check` | 0 | — |
+
+**派单里那个猜想（「`cargo fmt --check --all` 只读模式还拦的话是条真误拦」）证伪了** ——
+`--check` 在哪个位置都认，三种写法全放行。**但量出了派单没想到的一条真误拦**：
+`--version` / `--help` 是纯查询，被判「写模式」。这是本轨唯一一条**判据精确、意图明确**
+的真误拦（③ 会说为什么仍然没出补丁）。
+
+**(b) 「解析失败」：守卫按行切，引号必须在它自己那一行闭合。跟 heredoc 无关，中文引号不触发。**
+
+铁证是这一条 —— 整条看引号是**配平的**（两个 `'`），没有任何 heredoc：
+
+```text
+payload:  echo '\nhi\n'          （即 echo ' / hi / ' 三行）
+退出码:   2
+消息:     blocked: 该操作触碰受保护面 <命令无法解析: No closing quotation>（解析失败）。停止当前工作并向人类报告。
+```
+
+对照组（每行的引号各自闭合 → 放行）：`echo "a"\necho "b"`。
+
+**中文引号四条全部放行**：`“”`、`‘’`、`「」`，heredoc 正文里的 `“”` 也放行。
+解析器只认 ASCII 的 `'` 与 `"`。历史上那三次（Y1 1 次、Y2 1 次、Z1 1 次）记到中文引号
+头上的，正文里多半另有一个英文撇号（`it's` 那种）。
+
+**本轨开工十分钟内自撞了同一格**，原文是一条 `python3 -c "` 跨行的命令 —— 引号整条配平、
+一个 heredoc 都没有。逐字喂回守卫复现了同一条消息。
+
+> **所以标准绕法要改口径**：不是「别用 heredoc」，是**「别让引号跨行」**。
+> 正文里有 `it's` 这种撇号时才需要换 Write 工具落文件；一份纯中文的长 heredoc 是安全的。
+
+**(c) 受保护路径字面量：两族行为差一整档，Z2 把它们混成一行了。**
+
+| | `cat <它>` | `echo <它>` | `touch <它>` |
+|---|---|---|---|
+| `core/crates/contracts/**`、`proto/**`（前缀族） | 0 放行 | 0 放行 | 2 `写入/执行位置` |
+| `.claude/hooks/guard_bash.py`、`.claude/settings.json`、`.contracts.lock`（点名族） | **2 `读取位置`** | **2 `读取位置`** | 2 |
+| `docs/dev-spec-*.md` | 0 放行 | 0 放行 | 2 `docs/dev-spec-*.md（写入/执行位置）` |
+
+三档，不是一档：点名族**读写都拦**（`readable=False`）、前缀族**可读不可写**、
+冻结 spec 也是**可读不可写**。`READ_SAFE`（`cat` / `grep` / `ls` / `head` / `wc` / `echo` /
+`git log`）只救得了后两档。
+
+顺带量到的两条实用边界：**点名族的目录不在保护面里** —— `ls -l .claude/hooks/` 与
+`git log -- .claude` 都放行（看得见有哪些文件，读不到内容）。
+
+**(d) 「不透明载荷」= 命令替换。不是长度（Y2），也不是「判不出读/写的位置」（Z2）。**
+
+Z2 那条的归因已经比 Y2 近了一步，但仍然不准。实测：
+
+| payload | 退出码 | 标签 |
+|---|---|---|
+| `cat $(echo core/crates/contracts/src/lib.rs) > /tmp/x` | 2 | **`不透明载荷`** |
+| ``cat `echo core/crates/contracts/src/lib.rs` `` | 2 | **`不透明载荷`** |
+| `echo $(echo core/crates/contracts/src/lib.rs)` | 2 | **`不透明载荷`** ← 外层是 `echo`（读取位置）也没用 |
+| `echo $((1+1)) core/crates/contracts/src/lib.rs` | 2 | **`不透明载荷`** |
+| `cat $(echo /tmp/x) > /tmp/y` | 0 | — ← 命令替换但不碰受保护面 |
+| `cat $F/core/crates/contracts/src/lib.rs` | 0 | — ← `$VAR` 展开**不**触发 |
+| `diff <(cat core/crates/contracts/src/lib.rs) /tmp/x` | 0 | — ← 进程替换**不**触发 |
+| `echo <8000 个 x>` | 0 | — ← 长度不是判据 |
+| `echo <8000 个 x> core/crates/contracts/src/lib.rs` | 0 | — ← **长度 + 路径也不是** |
+| `foobarbaz core/crates/contracts/src/lib.rs` | 2 | `写入/执行位置` ← Z2 说的「判不出读/写」实际是**这个**标签 |
+
+**收口实验**：本轨自撞过一次「不透明载荷」（往探针脚本里 `cat >> … <<'PYEOF'` 追加时），
+把那条命令逐字喂回去 → 复现 `core/crates/contracts/**（不透明载荷）`；
+**把其中带 `$(echo …)` 的那两行删掉、其余一字不动 → 放行**；只留那两行 → 又拦。
+判据就落在命令替换上。
+
+Z2 拿到的那条原话（`.claude/hooks/guard_bash.py（不透明载荷）`）本轨也复现了：
+`cat $(echo .claude/hooks/guard_bash.py) > /tmp/x`。
+
+#### 4. 那张表完全没覆盖的一格：**守卫有一个真漏拦**
+
+边界有两半，而十次误拦只压着一半。量另一半时撞到的：
+
+```text
+cd core && echo x > crates/contracts/src/lib.rs     → 退出码 0，放行
+Write(file_path = "crates/contracts/src/lib.rs")     → 退出码 0，放行
+```
+
+两条都**真能改到契约文件**。`PROT_PREFIXES` 匹配的是命令文本里写出来的那串字符，
+写法变形基本都堵住了（下面七种逐条量过，**全部拦住**）：绝对路径、`./` 前缀、双斜杠、
+`..` 回绕、`$HOME` 展开、大小写变体（APFS）、`tee` 写。**唯独少了 cwd 这一维** ——
+而 `cd core` 就写在命令里，不需要任何前置状态；`Write` 那条连命令都不需要，
+会话在 `core/` 下起，`file_path` 自然就是这个形状（**本轨这条会话大半时间 cwd 就在 `core/`**）。
+
+**这条不影响 fail-closed**：它是「本该拦的没拦」，不是「守卫失效了却静默放行」——
+守卫仍然在跑、仍然对它认得出的写法退 2。但它是本轨量到的**最值钱的一条**，
+比任何一条误拦都要紧。
+
+同族还有一条**固有代价**（不算洞）：`python3 /tmp/writer.py` 放行 —— 路径在脚本文件里，
+扫命令文本的机制看不见。这个没法治，除非守卫去读脚本。
+
+#### 5. 判定的全图（黑盒倒推，按命中顺序）
+
+| # | 触发条件 | 标签 |
+|---|---|---|
+| 1 | 任何**一行**内 ASCII 引号未闭合 | `<命令无法解析: …>（解析失败）` |
+| 2 | `AITE_RELOCK=` 赋值（任意位置，含注释 / heredoc 正文） | `AITE_RELOCK（授权变量赋值）` |
+| 3 | `$(…)` / 反引号 / `$((…))` **且**命令里有受保护路径 | `（不透明载荷）` |
+| 4 | 解释器 `-c` 内联代码里有受保护路径 | `（解释器内联代码）` |
+| 5 | `find` 带 `-delete` / `-exec` / `-execdir`（与路径无关） | `冻结面（…）（find 的 … 覆盖面判不出来）` |
+| 6 | `cargo fmt` 且命令里没有 `--check` | `（cargo fmt 写模式（用 cargo fmt --check））` |
+| 7 | `ruff format` / `ruff check --fix` | `冻结面（proto/** 与 core/crates/contracts/**）` |
+| 8 | `aite contracts lock --write` | `（重生成契约锁（--check 放行，--write 需 AITE_RELOCK=1））` |
+| 9 | 受保护路径 + 该段首词在 `READ_SAFE` 里 | 点名族 `（读取位置）`；前缀族 / spec **放行** |
+| 10 | 受保护路径 + 其它 | `（写入/执行位置）` |
+
+`（解释器内联代码）` 与 `（重生成契约锁 …）` 两个标签**在 Z2 那张表里没有** ——
+不是新行为，是那张表没量到。
+
+---
+
+### ② 落成回归：`tests/guard.rs` 10 → 18 条
+
+每条钉一格，测试名读出来就知道钉的是哪一格；**全部双向断言**（该拦的拦 + 该放的放）；
+只断退出码、不断消息措辞（措辞改了不是行为变了，标签作为判据证据写在各条的文档注释里）。
+
+| 新测试 | 钉的是哪一格 | 里面最要紧的那条 |
+|---|---|---|
+| `a_quote_must_close_on_its_own_line` | 3 (b) | `echo '\nhi\n'` —— 整条配平、无 heredoc，照样拦 |
+| `command_substitution_is_what_the_opaque_payload_verdict_means` | 3 (d) | 8KB 填充 + 契约路径**放行**，`$(echo <契约>)` **拦** |
+| `cargo_fmt_is_judged_by_the_check_flag_alone` | 3 (a) | `cargo fmt --version` / `--help` 被拦（**characterization**，钉现状） |
+| `protected_prefixes_match_the_literal_path_so_a_cd_first_slips_through` | ①.4 那个洞 | `cd core && echo x > crates/…` **断它放行**（characterization） |
+| `read_safe_rescues_the_prefix_family_but_not_the_named_files` | 3 (c) | `cat <契约>` 放行 vs `echo <守卫>` 拦 |
+| `find_with_delete_or_exec_is_blocked_no_matter_where_it_points` | Z2 第 2 行的真实范围 | `find /tmp … -delete` 也拦 |
+| `the_relock_variable_is_matched_as_text_anywhere_in_the_command` | Z2 第 1 行的真实范围 | `=0`、注释里、heredoc 正文里都拦 |
+| `a_whole_line_comment_is_parsed_as_a_command` | 新量到的一条真误拦 | 整行 `#` 注释拦 / 尾部注释放行（characterization） |
+
+**三条 characterization 测试的用法写在各自的文档注释里**：它们断的是「现状」而不是
+「应然」。守卫哪天收窄了那一格，它们会红 —— **那时来改它，别当回归失败**。
+
+#### 变异验证：16 次，16 次红
+
+每条测试的**两半各打一次**（该拦半换成已知放行的、该放半换成已知被拦的），
+两半都红才算这条测试真在判事。全部逐条真跑，无一漏网：
+
+| 测试 | 该拦半变异 → 红在 | 该放半变异 → 红在 |
+|---|---|---|
+| `a_quote_must_close_…` | `echo 'hi'` → `guard.rs:567` 没被拦 | `echo it's` → `:585` 被误拦 |
+| `command_substitution_…` | 去掉 `$(…)` → `:626` 没被拦 | 无关路径换契约路径 → `:642` 被误拦 |
+| `cargo_fmt_…` | `--version`→`--check` → `:672` 没被拦 | 摘掉 `--check` → `:691` 被误拦 |
+| `protected_prefixes_…` | `./核心路径`→`./tmp/…` → `:745` 没被拦 | **把 `cd` 拿掉 → `:749` 被误拦** |
+| `read_safe_…` | 点名族→前缀族 → `:813` 没被拦 | 前缀族→点名族 → `:791` 被误拦 |
+| `find_…` | 摘掉 `-delete` → `:851` 没被拦 | `-print`→`-delete` → `:862` 被误拦 |
+| `the_relock_…` | `AITE_RELOCK=0`→`FOO=0` → `:891` 没被拦 | 补上等号 → `:900` 被误拦 |
+| `a_whole_line_comment_…` | 整行注释→尾部注释 → `:922` 没被拦 | 尾部注释→整行注释 → `:933` 被误拦 |
+
+还原用**重写内容**，不是 `copy2` —— 旧 mtime 会让 cargo 跳过重编、拿上一轮产物跑出假绿。
+
+---
+
+### ③ 收窄：**没出补丁**，理由是锚点定位不到
+
+派单的判断标准是两条：有没有真误拦（有），**以及能不能在不读源码的前提下把锚点定位到
+可以精确替换的程度（不能）**。
+
+本轨量到**三条**够格的候选，逐条说为什么仍然不写：
+
+| 候选 | 判据精确度 | 锚点定位 | 结论 |
+|---|---|---|---|
+| `cargo fmt --version` / `--help` 被判写模式 | **精确**：判据是「有 `cargo fmt` 且词里没有 `--check`」，改成「没有 `--check` / `--version` / `--help`」即可 | **定位不到**。要替换的是那个 `if` 条件的**代码**，而黑盒只给得出**消息字符串** `cargo fmt 写模式（用 cargo fmt --check）`。那行判据长什么样（`"--check" not in cmd`？`not in toks`？`any(t == …)`？）一个字都不知道 | **不写** |
+| 整行 `#` 注释被当命令 | 精确 | **定位不到**，要动分词那一段，连函数名都不知道 | **不写** |
+| `cd` 之后的漏拦（①.4） | 精确 | **定位不到**，要动路径归一化，而且改的是**匹配逻辑本身**，不是一处字面量 | **不写** |
+
+> Z2 那份补丁能写，是因为它要换的东西**本身就是一条字符串字面量**，而且有三处交叉确认的
+> 逐字原文。本轨这三条要换的都是**判据代码**，黑盒给不出它的样子。
+> 派单说得很清楚：「一份锚点靠猜的补丁比不写更坏 —— 它会在『整份拒写』和『改错地方』
+> 之间赌，而赌输的代价是守卫静默失效。」**所以 ② 就是本轨的交付。**
+
+**真要改需要什么**（给总管 / 下一轮，人能读源码，照这个做）：
+
+1. **`cargo fmt` 那条**（收益最大、风险最小）：把「有没有 `--check`」那个判据扩成
+   「有没有 `--check` / `--version` / `--help`」。**按词匹配，别按子串** ——
+   子串匹配会让 `cargo fmt --all -- --help-xyz` 这种东西绕过去。
+   验收：`cargo test -p aite --test guard cargo_fmt_is_judged_by_the_check_flag_alone`
+   会**红在那两行 characterization 上**，把它们从 `blocked` 挪到 `allowed` 即为改完。
+2. **`cd` 漏拦那条**（收益最大、风险最高）：要在匹配前把路径按 cwd 归一化。
+   风险在于 `cd` 的解析一旦做歪，误拦会成片出现 —— 上面那 18 条回归就是它的安全网，
+   改完必须全绿。**这条建议单开一轨**，别顺手做。
+3. 整行注释那条：收益极小（现实里极少单发一行注释），列在这儿只是省得下一个人重新发现它。
+
+---
+
+### ④ fail-closed 复核（每条提案都过了这一关）
+
+守卫的第一性质是**失效时停下来喊人，不能静默放行**。三条提案逐条过：
+
+| 提案 | 收窄后守卫失效时还 fail-closed 吗 | 结论 |
+|---|---|---|
+| `cargo fmt --version/--help` 放行 | **是**。它只动「守卫正常跑时的判定」，碰不到「守卫跑不起来时怎么办」—— 那一层是 hook 命令的事，由 Z2 的 `[ -f ]` 回退 + `the_hook_command_recovers_…` 钉着，本轨一个字没动 | **通过** |
+| 整行 `#` 注释跳过 | **是**，同上。次级风险（把真命令伪装成注释）不成立：shell 里行首 `#` 本来就不执行，跳过它与 shell 语义一致 | **通过**（但收益太小，不推） |
+| `cd` 之后的漏拦修掉 | **不适用 —— 它是收紧，不是收窄**。方向上只会让守卫拦得更多 | **通过** |
+
+**一条都没有为了省麻烦而动摇 fail-closed。** 另外记一句：本轨量到的
+`find … -delete` 无条件拦（连 `/tmp` 都拦）**看着像误拦，但不该收** ——
+`find` 的覆盖面要真算出来得遍历整棵树，守卫只有命令文本，宁可错杀是对的。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `.claude/hooks/guard_bash.py` 的路径匹配 | **真漏拦**：`cd core && echo x > crates/contracts/src/lib.rs` 与 `Write(crates/contracts/src/lib.rs)` 都放行，真能改到契约。本轨钉成了 characterization（`protected_prefixes_match_the_literal_path_so_a_cd_first_slips_through`），没修 —— 锚点定位不到 | **下一轮（建议单开一轨，见 ③.2）** |
+| 同上，`cargo fmt` 判据 | `--version` / `--help` 被判写模式，纯查询也拦。改法与验收写在 ③.1 | 下一轮（或总管直接改，风险很低） |
+| 台账第十节 Y2「一次『不透明载荷』（**正文太长**）」 | Z2 已经记了一次「归因错了」。**本轨把正确答案量出来了：判据是命令替换 `$(…)` / 反引号 / `$((…))`**。Z2 给的替代归因（「判不出读/写的位置」）也不对 —— 那种情况实测是 `写入/执行位置` | 总管（改一句归因，指向本节 ①.3 (d)） |
+| 台账第十二节 Z2 误拦表第 7 行「heredoc 正文里有配不平的引号 / **中文引号**」 | **两半都要更正**：中文引号不触发（四条实测放行）；这条病跟 heredoc 无关（`echo '\nhi\n'` 复现）。真判据是「某一行内 ASCII 引号未闭合」。**标准绕法也要改口径**：不是「别用 heredoc」，是「别让引号跨行」 | 总管（改表 + 下一批派单模板里的绕法那句） |
+| `tests/guard.rs` 模块头那张精简表 | 同上两条，模块头里那份精简版也不准。**本轨没动 Z2 写的那张表**，只在它下面追加了一段「AA3：把它推到实测」并指出三处不一致 —— 免得和 Z2 的叙述打架 | 总管（合并时决定是直接改那张表，还是留着两段并存） |
+| `.claude/settings.json` 的实际内容 | 本轨**一个字节都没读过**，也没取任何锚点字符串 | —（如实记着） |
+
+### 没做的 / 拿不准的
+
+1. **没出补丁，这是本轨最大的一个「没做」。** 理由在 ③：三条候选的判据都量精确了，
+   但要替换的是**判据代码**而不是字符串字面量，黑盒给不出它的样子。
+   派单允许这个结果（「改不了的话，② 就是本轨的全部交付」），但它确实意味着
+   **那三条误拦 / 漏拦这一轮没被治好**，只是被钉住了。
+2. **判定顺序（①.5 那张表的「#」列）是推断，不是测量。** 我能量到「什么条件触发什么标签」，
+   量不到「守卫内部先查哪一条」。表里的顺序是从「两个条件同时满足时报了哪个标签」
+   倒推的（例如 `echo it's core/…/lib.rs` 报解析失败而不是路径命中 → 解析在前），
+   只覆盖了我真造出来的那几组组合，**不是完整的优先级**。
+3. **`READ_SAFE` 的完整清单没量全。** 量到了 `cat` / `grep` / `ls` / `head` / `wc` / `echo` /
+   `git log` / `diff` / `sed -n` 在里面，`touch` / `chmod` / `cp` / `mv` / `tee` / 陌生命令不在。
+   中间还有多少条没试过 —— 黑盒可以穷举，但那是没有尽头的，本轨按「实战会撞到的」取样。
+4. **`PROT_PATHS` / `PROT_PREFIXES` 的完整成员没量全。** 确认在里面的：
+   `.claude/hooks/guard_bash.py`、`.claude/settings.json`、`.contracts.lock`（点名族，读写都拦）；
+   `core/crates/contracts/**`、`proto/**`（前缀族）；`docs/dev-spec-*.md`（可读不可写）。
+   **还有没有别的成员，量不出来** —— 只能一个个猜着试，猜不到的就看不见。
+5. **`（解释器内联代码）` 这个标签的边界只量了两格**（`python3 -c` 带守卫路径 / 带契约路径）。
+   别的解释器（`node -e`、`ruby -e`、`sh -c`）在不在这条判据里，没试。
+6. **没有实证「守卫在会话里挂着」这件事的第二个证据。** 和 Z2 的结论一样：
+   `tests/guard.rs` 里每一条读的都是脚本 / `settings.json` 的**内容**，
+   一份内容完美却没被 Claude Code 加载的配置，18 条全会绿。
+   **「它挂上了」照旧只有开场自检那一条能验**（Read 守卫自己，必须被拦）。
+   本轨这一条撞到了 ✅，而且中途又被守卫真拦了两次（一次解析失败、一次不透明载荷），
+   算是三次独立确认。
+7. **本轨零产品代码改动。** `check.sh` 收尾除 `cargo passed=` 外四行与基线逐字相同
+   （go 那六行只有耗时数字不同）；`cargo passed=853 → 861`，**+8 正好是新加的 8 条测试**。
+   `cargo clippy --workspace --all-targets -- -D warnings` 干净。
+   `cargo fmt --all` 照例被守卫拦（本轨正好量了这一格），改用
+   `rustfmt --edition 2024 crates/app/tests/guard.rs`。
