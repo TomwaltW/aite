@@ -124,6 +124,11 @@ core/target/debug/aite preflight            # 七组全跑，FAIL 必须是 0
 > **拿评测那份配置上台同理会被第 1 组拦下**：`platform: fake` / `model.provider: scripted`
 > 只能被注入着用（那是 `aite evals` 走的路），`aite run` 不注入任何实现、当场退出码 2。
 > 演示要的是 `platform: feishu` + `model.provider: openai_compat`。
+>
+> **`storage.sqlite_path` 上那个文件也归第 1 组管**：排练时手动挪过库、或者那个名字被
+> 别的东西占了（备份、半截下载），文件在而内容不是 SQLite —— 第 1 组当场 FAIL。
+> 改前这一条是**全绿放行**的，台上要到 `aite run` 才炸（退出码 2、`建表失败`），
+> 那时镜头已经开着了。**文件不在反而没事**：起飞时自己建一个空库，那是正常路径。
 
 **①b 加演那段（§5）演不演，现在就能定**（C 窗口）
 

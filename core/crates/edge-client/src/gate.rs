@@ -14,9 +14,15 @@
 //! 于是「两个进程各拿一半契约在跑」这件事可以一声不响地持续下去，而 §2.1 明令它该拒绝。
 //!
 //! **这里怎么补。** 把比对下沉到 `EdgeClient` 自己：`link.rs` 的后台探针是「重新连上」的
-//! 唯一事件源，它每拨通一次就发一发 `GetStatus` 比一次；`EdgeClient::status()`（起飞体检
-//! 和健康行走的那条）每答上来一次也顺手记一次。比出不一致就落闸，此后每发 platform /
-//! sandbox RPC 直接失败并带人话。
+//! 唯一事件源，它每拨通一次就发一发 `GetStatus` 比一次；`EdgeClient::status()` 每答上来
+//! 一次也顺手记一次。比出不一致就落闸，此后每发 platform / sandbox RPC 直接失败并带人话。
+//!
+//! 原注释把 `status()` 括注成「起飞体检**和健康行**走的那条」—— 那条健康行**全仓不存在**
+//! （`!status` 由 `control` 的 `cmd_status` 答，只从 store 列活跃任务、不碰 edge）。
+//! `status()` 在产品代码里的三个调用方是：`app.rs` 的 `check_contract_version`（起飞比版本）、
+//! `preflight.rs` 第 6 组（沙箱可用，先问 daemon 可达）、`wiring.rs` 的评测接线 ——
+//! 括注留「起飞体检」这半句也不准，索性去掉。与 `app.rs:83`（W2 改掉）、`lib.rs` 那两处
+//! （X1 改掉）、`link.rs` 那两处（Y2 改掉）、`tests/contract_gate.rs`（Z1 改掉）同源。
 //!
 //! **为什么是闸门而不是退出。** M6 的「只重启 edge」那一遍，core 自己也退的话，compose 的
 //! `restart: unless-stopped` 会把两个进程拖进互相重启；只记一行 ERROR 又太轻（真机上没人

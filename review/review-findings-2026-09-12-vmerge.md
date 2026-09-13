@@ -1715,3 +1715,166 @@ A1/A2/A3/A4a/A4b/A4c/A4d/A5/C1/B-go/B8 **全部 exit 0**，唯一 `✗` 落在 B
    （`guard.rs` 模块头 + 补丁脚本 docstring）够用了。
 5. **`.claude/hooks/guard_bash.py` 一个字没碰**（纪律 4）。上表 9 那条死探针是 V6 收的，
    不是本轨。
+
+## 十三、Z3 回执 —— 2026-09-13
+
+纯文字轨，零行为改动。收掉 Z1 记账转出去的前四条：第 ① 组「四件事」在四处文档的追平，
+外加「`!status` 的健康行」最后两个副本。**④ 收口时发现同一句谎话还有另一种说法**，
+比派单预计的多 4 处（见 ④）。
+
+### 基线与开场自检
+
+HEAD 是 `7a261f7`，不是派单抬头写的 `f3bc017`。差的那一格就是**出 Z2 / Z3 两份派单本身**
+（`review/paste-Z2.md` + `review/paste-Z3.md`，545 行文档、零代码改动），`7a261f7^` 正是 `f3bc017`。
+当基线用，不是回归。
+
+`scripts/check.sh` 开场：`OK 25 files`、`contracts passed=25 failed=0`、
+`cargo passed=852 failed=0`、go 六个包全 `ok`、`passed 10/10`，「全部通过」退出码 0。
+**一次跑过，三个抖动 target 一个都没撞到。** Read `.claude/hooks/guard_bash.py` 被守卫拦下 ✅。
+
+### ①.1 事实核对 —— 三格实跑（没照抄 Z1 的病史原文）
+
+配置：样例复制，只改 `storage.sqlite_path` 指到一个 46 字节的纯文本文件
+（`this is definitely not a sqlite database file`）。
+
+| 格 | 结果 | 退出码 |
+|---|---|---|
+| `preflight --offline` | `[1/7] FAIL 配置可加载 … 但 storage.sqlite_path 指着的文件当不了 SQLite 库（sqlite: file is not a database）`；`[7/7] OK 落盘目录可写`；`汇总：OK 1 · WARN 1 · FAIL 1 · SKIP 4` | **1** |
+| `preflight` 全跑 | 第 1 组同上一字不差；第 7 组**仍然 OK**；`汇总：OK 1 · WARN 0 · FAIL 6 · SKIP 0`（另五红是本机没凭证 / 没起 edge） | **1** |
+| `aite run` | `aite 起不来：建表失败（<D>/aite.db）：sqlite: file is not a database` | **2** |
+
+**踩到一个坑，记给下一轮**：样例配置**只改一行 `sqlite_path` 是复现不出建表失败的** ——
+`model.base_url` / `model.model` 在样例里是空的，`aite run` 先死在
+`模型配置不完整：ModelConfig.base_url 是空的`（同样是退出码 2，但**病因完全不同**）。
+把 `base_url` / `model` 填上之后才走到 `store.init()`，才是 Z1 记的那条病史。
+照抄病史而不实跑的话，很容易拿前一个退出码 2 当成后一个。
+
+跑完复核：那个文件仍是 46 字节、md5 未变（`af9c1828…`），三格全程**纯读**，
+`data/` 没被建出来。
+
+「病史那半句」（改前 `--offline` 与全跑**都全绿**）本轮**没有重新实证** ——
+要看到它得把 `sqlite_fault` 摘掉，那是行为改动、`preflight.rs` 又是本轨只读面。
+它由 Z1 的六格对照表 + `M1` 变异（摘掉判据 → 5 条测试红）钉着；本轮能独立佐证的那一半是
+**第 7 组在两格里都是 OK** —— 也就是「第 7 组接不住这一条」为真，所以改前那两格确实无人拦。
+
+### ①.2 `acceptance-M.md` §0.1 那份逐行实测输出 —— 重跑，结论「不用改」
+
+环境正好符合文档自述的条件：只设了 `AITE_MODEL_API_KEY`、无 `FEISHU_*`、无 `data/`。
+`cp config/aite.example.yaml config/aite.yaml` 后跑 `preflight --offline`，
+**机器比对**（把时间行与两条 NOTE 按文档自己声明的省写方式归一后 `diff -u`）：
+
+```
+【逐字一致，无差异】
+```
+
+`FAIL 0`、`OK 2 · WARN 1 · FAIL 0 · SKIP 4`、「全部没红，可以起飞。」退出码 **0** —— 与文档一字不差。
+第 1 组仍是 OK，因为四条判据一条都不命中：`data/aite.db` **不存在**（「文件不在就不探」是正常路径）、
+prompt 路径在、`platform: feishu` / `provider: openai_compat` 不需要注入。
+**这是本轮自己跑出来的结论，不是继承 X1 / Y2 的。** 跑完把临时的 `config/aite.yaml` 删了，
+`data/` 也没被建出来。
+
+### ① 四处改了什么
+
+基准是 `core/crates/app/src/preflight.rs` 模块头那张表（Z1 已写对），四处只调措辞、不改事实。
+
+| 文件 | 原话 | 改成 | 为什么这么调 |
+|---|---|---|---|
+| `README.md:143` 一带 | 「**三件事**一次报齐：yaml / prompt / 注入」+ 下面「同族的口子当场咬过人**两次**」两条病史 | 「**四件事**一次报齐」，第四件补 `storage.sqlite_path` 上已有的文件真能当库打开；「咬过人**三次**」并加第三条病史 | 读者在问「**怎么跑起来**」。正文只加一个并列项 + 一句「文件不在不算问题，起飞时自己建一个空库」（免得有人以为要先手工建库）；病史挪到下面 ⚠️ 块里，不挡正文 |
+| `docs/acceptance-M.md:126` + 末尾 ⚠️ 块 | §0.1「七组分别是：① …（yaml、prompt、注入）」；⚠️ 块到「第三个同族口子」为止 | 括注加第四条；新增「**第四个同族口子**」整段 | 读者在**排障**。所以写足三件事：症状原文（`建表失败…file is not a database`）、**第 ⑦ 组为什么接不住**（问的是目录不是文件，别拿「⑦ 是绿的」当反证）、以及**探不出来的那一半**（库是好的但只读时两组都看不见）—— 后者是这份文档独有的，别处不写 |
+| `docs/demo-3min.md:124` 一带 | 第 1 组那段 ⚠️ 只说了 prompt 与 fake/scripted 两族 | 加一段 sqlite 族 | 读者在**上台前 3 分钟**。所以只讲「排练时挪过库 / 名字被占 → 第 1 组当场拦你」，落点是「改前是全绿放行的，台上要到 `aite run` 才炸，那时镜头已经开着」。判据机制一个字不讲 |
+| `review/inventory-gateway-evals.md:142` | 「三件事一次报齐」，只列两条，各带「谁补的 + FAIL 条件 + 病史」 | 「四件事」，第三条照前两条的三段式补齐，另加判据形状（纯读 / 文件不在就不探 / `:memory:` 放过）与炸点归属（`run.rs` 的 `store.init()`，**不是** `SqliteSessionStore::open`） | 这是**清单**，唯一读者是下一轮接手的人。所以最密、写机制、写归因更正 —— 派单和 Y2 都把炸点归到 `open` 上，Z1 更正过，这里落成台账 |
+
+**「要不要统一成同一句」的判断：不统一。** 四种读者要的信息量差一个数量级
+（README 一句并列项 / demo 一句台上后果 / acceptance 三段排障 / inventory 全量机制），
+硬统一的结果只能是取交集 —— 那样 acceptance 就丢了「⑦ 接不住」和「只读那一半」这两条排障时最值钱的话，
+或者 demo 被塞进一段台上根本没空读的机制说明。**统一的是事实，不是句子**：四处都与
+`preflight.rs` 模块头那张表逐条对得上（第四件事的名字、FAIL 条件、纯读、文件不在不算问题）。
+
+### 「七组」计数
+
+改前 **78** 处 / 改后 **78** 处（含 `review/`）。**逐文件比对，每一份都一模一样**：
+`preflight.rs` 6、`cli_smoke.rs` 1、`preflight_e2e.rs` 2、`acceptance-M.md` 4、`demo-3min.md` 1、
+冻结那份 dev-spec 1、`README.md` 4、`inventory` 1，`review/` 那批不变。
+「八组」改前 8 处，全在 `review/` 的历史派单里（原文就是「不许变成八组」），**一处都不是本轮引入的**。
+
+> 把本节（十三、Z3 回执）自己追加进台账之后，全仓数字变成「七组」80 / 「八组」9 ——
+> 多出来的 2 + 1 全是**本节正文自己的字**（台账那个文件 19→21 / 1→3）。
+> 判据文件一处没动，见上面那份逐文件对比。
+
+### ②③ 两个副本
+
+**真调用方本轮重新 grep 核过**，与 Y2 / Z1 的结论一致：`EdgeClient::status()` 产品代码里三个调用方 ——
+`app.rs:373`（`check_contract_version`，起飞比版本）、`preflight.rs:1345`（第 6 组，先问 daemon 可达）、
+`wiring.rs:388`（评测接线）。`cmd_status`（`plane.rs:587`）走 `status_tasks(&ev.chat_id)`，
+函数体内 **edge 引用数 = 0**。
+
+* **② `gate.rs:18`** —— 括注「（起飞体检**和健康行**走的那条）」整个去掉，另起一段按 `link.rs:145-151`
+  的口径写：健康行全仓不存在 + `!status` 由 `cmd_status` 答只列活跃任务 + 点名三个真调用方 +
+  列出同源的五处（W2/X1/Y2/Z1）。**连「起飞体检」那半句也去掉了** —— 三个调用方里只有一个算体检，
+  留着仍然不准。`rustfmt --edition 2024` 单文件跑过（**没用 `cargo fmt --all`**，那条会被守卫拦）。
+* **③ `client.go:200`** —— 同样口径，另外写明这个标志现在谁在看：`ingress.Client.Connected()`
+  在**产品代码里零调用方**，只有两个 `_test.go` 拿它当判据；`EdgeStatus.platform_connected`
+  填的是 `feishu.Platform.Connected()`（`main.go:60`），**不是这个**。行留着、话说准。
+  `gofmt -l .` 空、`go vet ./...` 干净。
+
+**`git diff` 里没有代码行**：两个文件的 diff 全部命中 `^[+-]\s*//`（Rust 侧 `//!`），机器核过。
+
+### ④ 收口 —— 「健康行」清完了，但同一句谎话有另一种说法
+
+**先把派单那个「40 处」对上**：改前全仓（git 跟踪文件）**50** 处，其中派单文件
+`review/paste-Z3.md` 自己贡献 **10** 处 —— 50 − 10 = 40，派单是在自己落盘前数的。不是漂移。
+
+**排除 `review/` 后 12 处，逐条落类**（改后）：
+
+| 位置 | 落类 |
+|---|---|
+| `app.rs:83`、`lib.rs:81/99/100`、`link.rs:87/88/94/149`、`contract_gate.rs:217` | 在解释病史 / 已经说准了 —— **不动**（9 处，逐条读过上下文，不是只看 grep 行） |
+| `gate.rs:20`、`client.go:202/210` | 本轮改的 ②③ 自己的解释文本 |
+
+**「健康行」这个说法：一共 7 个副本，现在全清了。没有第 8 个。**
+
+**但这不是收口。** 又 grep 了一遍 `!status` 在源码里的**其他**说法（排除 `review/`），
+同一句谎话换了个词还活着 **4 处**（两处是同一个 proto 注释的生成副本）：
+
+| 位置 | 原话 | 为什么是同一句谎话 | 处置 |
+|---|---|---|---|
+| `edge/internal/ingress/client.go:40` | 「`Counters` 是给 **!status** / 运维看的快照」 | `Counters()` 产品代码里**只有一个调用方**：`main.go:196` 收尾时打的那行 `edge.counters` 日志。四个数一个都不过线（`EdgeStatus` 里没有它们） | **已改**（本轨可写面，只改注释） |
+| `edge/internal/ingress/client.go:129` | 「照『断过就 +1』算的话 **`!status`** 会说『重连 1 次』」 | 同上，`c.reconnects` 只进那行收尾日志。`EdgeStatus.reconnect_count` 填的是 `feishu.Platform.ReconnectCount()` | **已改**（改成 `ingress.reconnects` 会报） |
+| `edge/cmd/aite-edge/main.go:58` | 「别让 **!status** 误报『飞书在线』」 | `platform_connected` → `EdgeStatus` → 被 `app.rs:388` 打成日志、被 preflight 第 6 组读。到不了 `!status` | **没伸手**（`edge/` 除 `client.go` 是只读） |
+| `proto/aite/v1/edge.proto:151`（生成副本：`edge_grpc.pb.go:831/858`） | 「edge 自身健康：给 **!status** / preflight 用」 | `preflight` 那半句是**对的**（第 6 组）；`!status` 那半句是同一句谎话的源头 —— 两个 `.pb.go` 副本就是从它生成的 | **没伸手**（`proto/**` 冻结） |
+
+**判据是核过的，不是推的**：`!status` 唯一会多报的计数是 core 控制面自己的
+`events.dropped`（`plane.rs:692` 的 `dropped_note`，取自 `self.shared`），edge 侧的计数一个都到不了。
+
+> **所以完整结论**：「**健康行**」那个说法 7 个副本、全清；但「**`!status` 会显示某个 edge 侧的东西**」
+> 这个更底层的错误信念还有 **2 处活着**（`main.go:58` 与 `proto:151` + 两个生成副本），都在本轨可写面外。
+> 派单只让 grep「健康行」，按那个判据本轨是收口了；按「这句谎话清完了没」这个问法，**没有**。
+
+### 测试数
+
+`cargo passed=852 → 852`（本轨不加测试，纯文档 + 纯注释）。
+
+收尾 `scripts/check.sh`：`OK 25 files`、`contracts passed=25 failed=0`、`cargo passed=852 failed=0`、
+go 六包全 `ok`、`passed 10/10`，「全部通过」退出码 0。**五行关键值与开场逐字相同**
+（机器 diff 过，只有 go 各包耗时秒数不同）。收尾也是一次跑过，没撞抖动。
+冻结面一个字没动，落盘无残留（`data/` 与临时的 `config/aite.yaml` 都已确认不存在）。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `edge/cmd/aite-edge/main.go:58` | 「别让 `!status` 误报『飞书在线』」—— `!status` 看不到 `platform_connected`。`edge/` 除 `client.go` 是本轨只读面 | 下一轮（顺手带掉，纯注释） |
+| `proto/aite/v1/edge.proto:151` + 生成的 `edge/gen/aitepb/edge_grpc.pb.go:831/858` | 「edge 自身健康：给 `!status` / preflight 用」—— `preflight` 对、`!status` 错。**这是那句谎话的源头**：两个 `.pb.go` 副本从它生成，改它要重跑 codegen + 契约锁 | **总管**（`proto/**` 冻结，改不改是他的决定） |
+| `core/crates/app/src/app.rs:152` 的文档注释 | Z1 记过、本轮仍在：「`SqliteSessionStore::open`：库文件不在就建一个空的」没说「文件在而不是库」会怎样。`app/src/**` 是本轨只读面 | 待定（总管，Z1 已记，此处只是确认还没销） |
+| 第 ① 组探不出「库是好的但文件只读」 | Z1 记过、本轨没动判据。**本轮把它写进了 `acceptance-M.md` §0.1 的排障文本**（「真机上遇到 preflight 全绿而 `aite run` 报建表失败，先查这个」）—— 代码面的记账仍然挂着 | 待定（总管） |
+
+### 没做的 / 拿不准的
+
+1. **「病史那半句」（改前两格全绿）没有重新实证** —— 见 ①.1 末段，要摘判据才看得到，
+   那是行为改动 + 只读面。本轮补的是能独立跑出来的那一半（第 7 组在两格里都 OK）。
+2. **`client.go:40` / `:129` 这两处超出了派单 ③ 点名的行号。** 判断依据：它们在本轨点名的可写文件里、
+   只改注释、且 ④ 明写「还在断言健康行存在 → 改掉」。但它们不含「健康行」三个字，
+   严格说不在派单的 grep 判据内 —— **如实标出来，总管觉得越界的话回退这两处即可**（不影响 ②③ 与 ①）。
+3. **Z2 想改而没伸手的文档面，本轮一个字没碰** —— 派单说它会把原文 + 改法写进自己的回执、
+   由总管在合并时落。本轨也没碰 `guard.rs` 与 `.claude/**` 相关的任何东西。
+4. **`contract_state()` 零调用方那件事没动**（X1 记过，派单点名「要不要删不是本轨的决定」）。

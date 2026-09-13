@@ -37,7 +37,14 @@ const (
 	defaultMaxDelay  = 30 * time.Second
 )
 
-// Counters 是给 !status / 运维看的快照。键名与 spec §2.2 的计数器名一致。
+// Counters 是给运维看的快照。键名与 spec §2.2 的计数器名一致。
+//
+// **`!status` 看不到这些。** 原注释写的是「给 !status / 运维看的」，而 `Counters()` 在产品
+// 代码里只有一个调用方：`cmd/aite-edge/main.go` 收尾时打的那行 `edge.counters` 日志。
+// 这四个数一个都不过线（`EdgeStatus` 里没有它们），而 `!status` 由 core 的
+// `control::cmd_status` 答，只从 store 列活跃任务；它唯一会多报的计数是 core 自己的
+// `events.dropped`（`plane.rs` 的 `dropped_note`），与 edge 无关。
+// 与本文件 `noteUp` / `HandleEvent` 里那两句、`main.go` 的 `platform_connected` 那句同源。
 type Counters struct {
 	Sent       int64 `json:"events.sent"`
 	Invalid    int64 `json:"ingress.invalid"`
@@ -126,7 +133,10 @@ func (c *Client) client() (pb.IngressServiceClient, error) {
 //
 // **第一次连上不算重连**，哪怕之前已经 TransientFailure 过一轮：core 晚起来是常态
 // （§2.1 启动顺序无关），那一路必然先 TF 再 Ready —— 照「断过就 +1」算的话
-// `!status` 会说「重连 1 次」，而它从没断过。
+// `ingress.reconnects` 会报「重连 1 次」，而它从没断过。
+//
+// 原注释这里写的是「`!status` 会说」，那是同一句谎话的又一个说法：这个计数只出现在
+// 收尾那行 `edge.counters` 日志里，`!status` 看不到（见 `Counters` 的注释）。
 func (c *Client) noteUp() {
 	c.connected.Store(true)
 	wasDown := c.down.Swap(false)
@@ -196,9 +206,19 @@ func (c *Client) HandleEvent(ctx context.Context, ev *pb.NormalizedEvent) error 
 	}
 	c.sent.Add(1)
 	// 一次成功的 RPC 就是「现在连得上」的最强证据 —— 比 watch 的状态迁移新鲜。
-	// 不加这条的话：watch 那边要等 gRPC 自己迁移到 Ready 才翻 true，而 RPC 已经
-	// 跑通了，`!status` 的健康行会在这中间报「没连上」。
-	// （core 侧 R6 的 `link.note_ok()` 是同一个修法，这边补齐。）
+	// 不加这条的话：watch 那边要等 gRPC 自己迁移到 Ready 才翻 true，这中间
+	// Connected() 会报「没连上」，而 RPC 其实已经跑通了。
+	//
+	// 原注释说那段空窗里「`!status` 的健康行会报没连上」—— 那条健康行**全仓不存在**
+	// （`!status` 由 core 的 `control::cmd_status` 答，只从 store 列活跃任务、不碰 edge）。
+	// 这是 core 侧同一句谎话抄过来的副本：`link.note_ok()` 的注释原本也这么写，
+	// 那边已经改掉（W2/X1/Y2/Z1 共六处），这边补齐 —— 修法同源这半句是对的，
+	// 连病一起抄过来的是括注。
+	//
+	// 这个标志现在谁在看：`Connected()` 在**产品代码里零调用方**，只有
+	// `client_test.go` / `client_lifecycle_test.go` 拿它当判据（`EdgeStatus.platform_connected`
+	// 填的是 `feishu.Platform.Connected()`，不是这个）。真有人拿它出健康行的那天，
+	// 有这一句答案才是对的 —— 所以行留着，话说准。
 	c.noteUp()
 	return nil
 }

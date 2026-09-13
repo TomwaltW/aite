@@ -140,10 +140,12 @@ aite contracts lock --check
 
 `aite preflight` 的七组：配置可加载 / 环境变量齐 / 飞书凭证有效 / 机器人身份对得上 /
 模型端点通 / 沙箱可用 / 落盘目录可写。任一 FAIL → 退出 1，**一项失败不阻断后面的**；
-第 1 组问的是「这份配置**起得来**吗」而不只是「yaml 解析得出来吗」，三件事一次报齐：
+第 1 组问的是「这份配置**起得来**吗」而不只是「yaml 解析得出来吗」，四件事一次报齐：
 yaml 解析得出来、`worker.system_prompt_path` **指到的文件真的在**、
-`platform` / `model.provider` 的取值**不需要注入**（后两件读不到 / 要注入都是 FAIL ——
-它们是硬起飞前提，`aite run` 遇上就拒绝起飞，退出码 2）；
+`platform` / `model.provider` 的取值**不需要注入**、`storage.sqlite_path` 上**已经有的
+那个文件真能当库打开**（后三件读不到 / 要注入 / 读得到但不是库都是 FAIL ——
+它们是硬起飞前提，`aite run` 遇上就拒绝起飞，退出码 2。最后那条**纯读**，
+文件不在不算问题：那是正常路径，起飞时自己建一个空库）；
 `platform: fake` 那一档下第 2/3/4 组 SKIP（fake 平台不连飞书，那三组的判据不适用）。
 `--offline` 只跑 1、2、7（不碰网络也不碰 docker，适合没凭证的机器；**CI 用的就是这一档**）。
 `--chat-id <测试群 chat_id>` 会顺带真调一次群历史，回答 spec §3.7(b) 那条待核实项。
@@ -152,7 +154,7 @@ yaml 解析得出来、`worker.system_prompt_path` **指到的文件真的在**�
 > `model.model` 是空的 —— 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2。
 > 真机起飞前那一遍必须不带 `--offline`。
 >
-> 同族的口子当场咬过人两次，**现在都补上了**，两次都归第 1 组、**`--offline` 下照样跑**
+> 同族的口子当场咬过人三次，**现在都补上了**，三次都归第 1 组、**`--offline` 下照样跑**
 > （它不碰网络也不碰 docker）：
 >
 > * 2026-09-12：配置里的 `worker.system_prompt_path` 指着当天删掉的 Python 树
@@ -163,6 +165,10 @@ yaml 解析得出来、`worker.system_prompt_path` **指到的文件真的在**�
 >   一样没有一组问「这个取值自己起得来吗」，`--offline` 报「全部没红，可以起飞」退出 0，
 >   `aite run` 退出码 2。同一份配置还在要飞书凭证（fake 平台压根不连飞书），
 >   所以那一档下第 2/3/4 组现在一并 SKIP。
+> * 2026-09-13：`storage.sqlite_path` 指着一个**已经存在、但内容不是 SQLite** 的文件。
+>   `--offline` 与全跑**都全绿**，而 `aite run` 退出码 2 ——
+>   `aite 起不来：建表失败（…）：sqlite: file is not a database`。第 7 组接不住它：
+>   那一组问的是三个路径的最近已存在祖先**目录**写不写得进去，不是这个**文件**是不是个库。
 >
 > ℹ️ **CI 里跑的是 `--offline` 这一档，而且只在 `compose-smoke` 那个 job 里**
 > （`.github/workflows/ci.yml:115-118`，命令是 `docker compose run --rm core preflight --offline`
