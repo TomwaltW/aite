@@ -150,6 +150,13 @@ pub fn sandbox_spec_of(config: &AiteConfig) -> SandboxSpec {
 ///   `artifacts_dir`）。这是硬约束 1 明文允许的那一条，也是 `aite preflight` 第 7 项
 ///   对人承诺的「data 待建，起飞时自动 mkdir」。
 /// - `SqliteSessionStore::open`：打开连接，**库文件不在就建一个空的**（里面还没有表）。
+///   反过来，**文件在、但根本不是个库**时这一步照样成功 —— SQLite 是懒打开的，
+///   要到第一次真去读库头才认出来，也就是起飞时 `run.rs` 的 `store.init()` 建表那一下：
+///   那时才炸，退出码 2、`aite 起不来：建表失败（…）`。所以这条边界不在 `build_app` 上。
+///   （目录、坏符号链接、没读权限这几种是例外，`Connection::open` 当场就打不开。）
+///   提前把它验出来的是 `aite preflight` 第 1 组第 4 件事（`preflight.rs` 的 `sqlite_fault`，
+///   拿 `PRAGMA schema_version` 探一下就还回去）—— 口径以 `preflight.rs` 模块头那张表为准，
+///   那里是唯一把这四件事写全的地方。
 ///
 /// **读盘**：`require_system_prompt` 真去读 `worker.system_prompt_path`，读不到拒绝起飞。
 ///

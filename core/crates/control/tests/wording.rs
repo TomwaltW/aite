@@ -378,3 +378,21 @@ fn stop_while_delivering_text_is_byte_exact() {
         "任务 #A17 正在把答复发给你，停不了了。"
     );
 }
+
+/// `!restart` 撞上交付中的任务时那句话，逐字钉住（AA2 新加）。
+///
+/// 和上一句是同一件事的两种说法 —— 那句是「你指着它要停」，这句是
+/// 「你重开了会话，这几个我替你停不下来」。多说的后半句「结果仍会回到原来那条话题里」
+/// 是必要的：会话这时已经归档，而那几笔照样落在旧话题里。
+#[test]
+fn restart_while_delivering_text_is_byte_exact() {
+    assert_eq!(
+        aite_control::restart_while_delivering_text(&["#A17".to_string()]),
+        "任务 #A17 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。"
+    );
+    // 多个时用顿号并成**一句**，不是一个任务一行
+    assert_eq!(
+        aite_control::restart_while_delivering_text(&["#A17".to_string(), "#A18".to_string()]),
+        "任务 #A17、#A18 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。"
+    );
+}

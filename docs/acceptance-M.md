@@ -41,6 +41,17 @@
 >   意见不一致，比改之前更费解 —— 原来「已知记账，别去查沙箱」那一行按半边重写了。
 >   **（这条已被 W2 收口，见下。）**
 >
+> **2026-09-13（AA2）：`!restart` 跟上了那两条，最后一处分家的口径收了。**
+> `cmd_restart` 归档会话时用的还是 `list_active_tasks`，交付中（`Answering`）的任务
+> 整个看不见 —— 而它那段注释点名要防的两件事（结果落进已归档的会话、继续出现在
+> `!status` 里），一个正在交付的任务恰好两条都中。现在它查的是同一份 `status_tasks`，
+> 分流共用同一条规则（`StopTarget::of_existing`）：能停的照停，**停不掉的不碰，
+> 改成在回帖里点名**（新文案见下表）。为什么不是「换个列表、照停不误」：实测过两头，
+> 那只会造出「终止了 1 个进行中的任务」这句假话 —— 答复照发、库里的 `Cancelled`
+> 随后被 worker 的 `finish()` 盖回 `Delivered`。改的是 §0.4 本节这段与下面那张表
+> （从三行变四行）、§M1 排障表（多一行）、§7 末那一节（「两条使用口径」→「三条」）；
+> `plane.rs` 的行号引用跟着全文重核了一遍（本轨在它上游加了 27 行）。
+>
 > **2026-09-12（W2）：`!stop` 跟上了 `!status`，上面那条记账销了。**
 > `resolve_stop_target` / `resolve_task` 改走同一个 `status_tasks`，
 > 并把「交付中（`Answering`）停不了」写成**明面上的约定**：找得到、回一句
@@ -505,19 +516,20 @@ core/target/debug/aite evidence show <task_id>
   的 `in_thread` 写死 `true`），所以「在话题里回复」这条路**一定**走得通。
 
 > ⚠️ **第一步就 `final` 的短任务，交付中的那几秒停不掉 —— 但 `!stop` 会明说，
-> 不会告诉你「没有这个任务」。**
+> 不会告诉你「没有这个任务」；`!restart` 也会明说，不会假装替你停掉了它。**
 >
 > 机理还是原来那条：`deliver()` 在 W3 那一路（第一步就 `final`、从没发过卡片）把状态置成
 > `Answering`（`core/crates/worker/src/agent.rs:645`），而 `Answering` **不在**
 > `ACTIVE_TASK_STATUSES`（= created / planning / working，
 > `core/crates/contracts/src/session.rs:33`）里，所以 `list_active_tasks` 空掉。
-> 三条命令现在查的是**同一份**列表：
+> 四条路现在查的是**同一份**列表：
 >
 > | 走哪条路 | 查的是什么 | 交付中的短任务 |
 > |---|---|---|
-> | `!status` | `status_tasks`：`list_active_tasks` **+ 控制面自己的 `running`**（过滤终态 + 用 `get_session` 过滤到本群），`plane.rs:531-563` | **列得出来**（V5 补的） |
-> | `!stop <任务号>` | `resolve_stop_target`：同一个 `status_tasks`，`plane.rs:713-728` | 找得到，回「任务 #A17 正在把答复发给你，停不了了。」 |
-> | 卡片 stop 按钮那条路 | `resolve_task`：同一个 `status_tasks`，`plane.rs:730-747` | 同上（P0 不渲染按钮，见本节开头） |
+> | `!status` | `status_tasks`：`list_active_tasks` **+ 控制面自己的 `running`**（过滤终态 + 用 `get_session` 过滤到本群），`plane.rs:558-591` | **列得出来**（V5 补的） |
+> | `!stop <任务号>` | `resolve_stop_target`：同一个 `status_tasks`，`plane.rs:775-790` | 找得到，回「任务 #A17 正在把答复发给你，停不了了。」 |
+> | 卡片 stop 按钮那条路 | `resolve_task`：同一个 `status_tasks`，`plane.rs:792-809` | 同上（P0 不渲染按钮，见本节开头） |
+> | `!restart` | `cmd_restart`：同一个 `status_tasks`，分流同一条 `StopTarget::of_existing`，`plane.rs:683-736` | **一个字都不碰它**，改在回帖里点名：「任务 #A17 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。」（AA2 补的） |
 >
 > **「交付中停不了」是刻意写下的约定，不是查不到**（W2 收的口）。理由在 worker：
 > 取消标志位只在每一步的**开头**被看一眼（`agent.rs:117` 是全仓唯一一处），
@@ -528,6 +540,11 @@ core/target/debug/aite evidence show <task_id>
 > **排障时要认得出这个形状**：任务在 `!status` 的列表里，`!stop` 回的是「正在把答复发给你」。
 > 这是对的。**不是环境问题，别去查沙箱**；再等一两秒它就落 `delivered` 了。
 > 回「没有这个任务」才不对 —— 那说明两条命令的口径又岔开了。
+>
+> **`!restart` 这一路多一条要认**：它会把旧会话归档，而那个交付中的任务**还在跑**，
+> 答复与产物照样落进旧话题。所以「已重开会话」之后又从旧话题冒出一段答复是**对的**，
+> 回帖里那句点名就是提前告诉你这件事。反过来，`!restart` 说「终止了 N 个进行中的任务」
+> 却把交付中的那个算进了 N —— 那是假话，是 bug（AA2 收的口）。
 >
 > 发过卡片的正常任务置的是 `Working`，仍在活跃集里，`!stop` 照常停得掉，不受影响。
 
@@ -601,6 +618,7 @@ core/target/debug/aite evidence show <task_id>
 | 有表情有回复，但超过 2 秒才出现表情 | 回调里被塞了重活 | core 日志 `ingress.slow_callback`（>1s 就 WARN，带 `elapsed=`） |
 | 交付的那几秒 `!stop` 回「任务 #A17 正在把答复发给你，停不了了。」 | **刻意的约定，不是故障** | 这一路是 W3 的 Answering 状态，`deliver()` 里没有取消点（`agent.rs:117` 是全仓唯一一处取消检查），所以它真停不掉，只能等它落 `delivered`。详见 §0.4 那段引用框。**别去查沙箱** |
 | 交付的那几秒 `!stop` 回「**没有这个任务**」 | **这是真故障，不是记账** | W2 之后 `!stop` / 卡片按钮与 `!status` 查的是同一份 `status_tasks`，列得出来的任务不许被这一句说成不存在。真撞上了：`aite evidence show <task_id>` 看它是不是已经落了终态（终态会被 `status_tasks` 主动滤掉，那时回「没有这个任务」是对的）；不是终态就记下 `!status` 与 `!stop` 的原文，这是 bug |
+| `!restart` 之后，已归档的旧话题里又冒出一段答复 | **刻意的约定，不是故障** | 那是一个交付中（`Answering`）的任务，`!restart` 停不掉它（同 `!stop`，理由见上上行），所以只点名不动手。回帖里应当有一句「任务 #A17 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。」。**没有那句、或者回的是「终止了 N 个进行中的任务」而 N 把它算了进去 → 这才是 bug**（AA2 收的口，`plane.rs` 的 `cmd_restart`） |
 | 交付的那几秒 `!status` 也查不到它 | **这是真故障，不是记账** | V5 之后 `status_tasks` 把控制面的 `running` 并了进来，交付中的短任务**应该**列得出来（§0.4）。列不出来说明并的那一半没生效：core 日志看这个任务的 `task_created` 在不在、`aite evidence show <task_id>` 看它是不是已经落了终态（终态会被 `status_tasks` 主动滤掉，那是对的）。两者都不是 → 记下 `!status` 的原文与 `--list` 输出，这是 bug |
 | 机器人自己触发了自己 | R1 没拦住 | 不该发生（`sender_kind != human` 直接丢）。真出现了记下来，这是 bug 不是环境问题 |
 
@@ -769,7 +787,7 @@ core/target/debug/aite evidence show <task_id>
       **停下来**，把这条消息的 `event_id` / `message_id` / `root_id`、
       M3 那个任务的 `task_created` 一行、core 日志同一时刻的片段一起记下来。
    5. ⚠️ **进程侧帮不上忙，不要指望在日志里找答案。** 被 R8 丢弃的事件只 bump 一次
-      `events.ignored`（`core/crates/control/src/plane.rs:424-425`），**INFO 级没有任何日志**，
+      `events.ignored`（`core/crates/control/src/plane.rs:451-452`），**INFO 级没有任何日志**，
       而 core 侧计数器没有对外查看入口（§7 末、§8 第 3 条）。所以只有开放平台那份推送记录
       能分开这两种情况。
 5. **补一条带 @ 的**：`@Aite 再按季度画一张`，还是发在同一条话题里。
@@ -1018,27 +1036,33 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 - **core 侧**（`ControlPlane` / `Ingress`）：`events.handled` / `events.duplicate` /
   `events.nonhuman` / `events.ignored` / `events.steer` / `events.edited` /
   `events.deleted` / `events.dropped` / `sandbox.reaped` / `ingress.errors` / `ingress.slow`。
-  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1374`）全仓没有
+  **没有对外查看入口** —— `counters()`（`core/crates/control/src/plane.rs:1436`）全仓没有
   任何非测试调用方，`!status` 只回任务列表、一个计数器都不回（`cmd_status`，
-  `plane.rs:587-610`；它列的是什么见 §0.4）。见 §8 第 3 条。
+  `plane.rs:614-637`；它列的是什么见 §0.4）。见 §8 第 3 条。
   - 唯一的例外：`events.dropped` 不为 0 时，`!status` 的回复末尾会多一句
     「⚠ 本进程启动以来有 N 条事件没接住…」（`cmd_status` 里的两处 `dropped_note()` 调用，
-    `plane.rs:590` 与 `:607`；函数体在 `plane.rs:692-701`）。
+    `plane.rs:617` 与 `:634`；函数体在 `plane.rs:754-763`）。
     **只有这一个计数器漏了出来，`events.ignored` 没有。**
 - **edge 侧**：进程**退出时**打一行（实测）
   `level=INFO msg=edge.counters events.sent=0 ingress.invalid=0 ingress.errors=0 ingress.reconnects=0`
   （`edge/cmd/aite-edge/main.go:196-199`）。想看就得停一次 edge —— 跑 M 的过程中拿不到。
 
-### `!status` / `!stop` 的两条使用口径
+### `!status` / `!stop` / `!restart` 的三条使用口径
 
-- `!stop` 在**本群只有一个任务**时可以省略任务号（`plane.rs:713-728`）；「只有一个」按
+- `!stop` 在**本群只有一个任务**时可以省略任务号（`plane.rs:775-790`）；「只有一个」按
   `!status` 列出来的那份算。给了任务号的话 `#A17` / `a17` / ` #a17 ` 都收
   （`normalize_task_no` 去空格 + 补 `#` + 转大写）。
 - 两条命令都要满足 R5 的投递条件（@ 机器人，或在已有会话的话题里），见 §0.4。
-- **两条命令查的是同一份列表**（W2 收的口）：`!status`、`!stop`、卡片 stop 按钮都走
-  `status_tasks`（活跃集 **+ 控制面 `running`**，过滤终态 + 过滤到本群）。
-  交付中的短任务因此**列得出来，也认得出来** —— 只是停不掉，`!stop` 会明说
-  「正在把答复发给你，停不了了」，而不是「没有这个任务」。为什么停不掉见 §0.4 那段引用框。
+- **这几条路查的是同一份列表**（W2 收的口，AA2 补上最后一条）：`!status`、`!stop`、
+  卡片 stop 按钮、`!restart` 都走 `status_tasks`（活跃集 **+ 控制面 `running`**，
+  过滤终态 + 过滤到本群）。交付中的短任务因此**列得出来，也认得出来** —— 只是停不掉，
+  `!stop` 会明说「正在把答复发给你，停不了了」，而不是「没有这个任务」。
+  为什么停不掉见 §0.4 那段引用框。
+- **`!restart` 与 `!stop` 的差别一句话**：`!stop` 是指着**一个**任务问「停它」，
+  `!restart` 是换一个会话、顺手把旧会话名下**所有能停的**都停掉；
+  两者对「能不能停」的判定完全同源（`StopTarget::of_existing`）。
+  所以 `!restart` 的「终止了 N 个进行中的任务。」里的 N **只数真停掉的那些**，
+  交付中的那些单独点名（`plane.rs` 的 `restart_while_delivering_text`）。
 
 ---
 
