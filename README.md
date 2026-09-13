@@ -35,6 +35,11 @@
   [`proto/aite/v1/`](proto/aite/v1) 的 gRPC 契约说话（unix socket）。
 - **启动顺序无关**：谁先起都行，另一边按 1→2→…→30s 退避重连，进程不退出。
   core 起飞时问一次 edge 的 `GetStatus`，`contract_version` 不等就拒绝起飞。
+  **edge 完全没起时 `aite run` 照样起得来** —— 问不到就等满 5 次（约 4s）、记一行
+  `aite.edge_unreachable` 继续走，一路走到 `ingress.listening`（core 侧那个监听是本地的，
+  不需要 edge）；能力表问不到也只是一行 `edge.capabilities_unavailable` 的 warn。
+  edge 后起时，重连探针拨通那一下会补比一次版本（契约闸门，`edge-client/src/gate.rs`）。
+  这是**刻意**的，不是漏判；回归钉在 `core/crates/app/tests/signals.rs`。
 - **沙箱不是第三个进程**：edge 用 Docker client 按任务起**兄弟容器**
   （标签 `aite.task=<task_id>`），所以只有 edge 需要 `/var/run/docker.sock`。
 - **单副本**：同一飞书应用的多副本长连接只有一个能收到事件。
@@ -118,6 +123,8 @@ make compose-config  # 只校验编排能不能解析，不打印取值
 
 停机：`SIGTERM` 走优雅退出（停投递 → 等在跑的任务善终，宽限 20s → 还沙箱 → 关库），
 退出码 0；**再来一次**信号立刻硬退，退出码 130。
+**起飞还没走完时收到也算数**（compose 的 `stop_grace_period`、k8s 滚动更新都会这么来）——
+信号会被记住，起飞一走完立刻进收尾。回归见 `core/crates/app/tests/signals.rs`。
 
 ## 命令面
 

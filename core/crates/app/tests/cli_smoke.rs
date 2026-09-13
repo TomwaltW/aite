@@ -212,6 +212,74 @@ fn preflight_exits_one_when_the_platform_needs_an_injection() {
     );
 }
 
+/// **进程级**那条（库判据）：`storage.sqlite_path` 指着一个不是 SQLite 的文件时，
+/// 退出码必须是 1。
+///
+/// 2026-09-13 的现场，同一族的第三个：`preflight --offline` 报「汇总：OK 2 · WARN 1 ·
+/// FAIL 0 · SKIP 4 / 全部没红，可以起飞。」退出 0，全跑那一档第 1 组和第 7 组也都是 OK，
+/// 紧接着 `aite run` 退出码 2（`aite 起不来：建表失败（…）：sqlite: file is not a database`）。
+///
+/// 判据面（第 7 组照样绿、offline 下照跑、与 `store.init()` 的对拍、零落盘副作用）钉在
+/// `tests/preflight_e2e.rs`；**这一条只钉真二进制的退出码和它打给人看的那两行**。
+#[test]
+fn preflight_exits_one_when_the_database_file_is_not_a_database() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("aite.db");
+    std::fs::write(&db, "this is definitely not a sqlite database").expect("写坏库");
+    let cfg = tmp.path().join("baddb.yaml");
+    // prompt 指到仓库里真有的那份、platform/provider 都用真取值：要红的是库这一条，
+    // 别让前两件事抢答。
+    std::fs::write(
+        &cfg,
+        format!(
+            "platform: feishu\nmodel:\n  provider: openai_compat\n  \
+             base_url: http://127.0.0.1:1/v1\n  model: fake-model\n\
+             worker:\n  system_prompt_path: core/crates/worker/prompts/platform.md\n\
+             storage:\n  sqlite_path: {d}/aite.db\n  evidence_dir: {d}/evidence\n  \
+             artifacts_dir: {d}/artifacts\n",
+            d = tmp.path().display()
+        ),
+    )
+    .expect("写 config");
+
+    let out = aite()
+        .args(["preflight", "--offline", "--config"])
+        .arg(&cfg)
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "退出码必须是 1：\n{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("[1/7]"))
+        .unwrap_or_else(|| panic!("没有第 1 组那一行：\n{stdout}"));
+    assert!(row.contains("FAIL"), "第 1 组没红：{row}");
+    assert!(row.contains("storage.sqlite_path"), "{row}");
+    assert!(
+        !stdout.contains("全部没红，可以起飞"),
+        "起不来还说可以起飞 —— 这正是 2026-09-13 那条：\n{stdout}"
+    );
+    // 第 7 组照旧绿：它问的是目录写不写得进去，不是这个文件是不是个库。
+    let storage = stdout
+        .lines()
+        .find(|l| l.starts_with("[7/7]"))
+        .unwrap_or_else(|| panic!("没有第 7 组那一行：\n{stdout}"));
+    assert!(storage.contains("OK "), "第 7 组不该管这一条：{storage}");
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with('[')).count(),
+        7,
+        "{stdout}"
+    );
+    // 那个文件一个字节都没被动过（第 1 组是纯读的）。
+    assert_eq!(
+        std::fs::read_to_string(&db).expect("坏库还在"),
+        "this is definitely not a sqlite database",
+        "preflight 把那个文件改了"
+    );
+}
+
 /// R7 的评测面：场景清单读得出来，且恰好是 §3.8 的十个。
 #[test]
 fn evals_lists_the_ten_p0_scenarios() {

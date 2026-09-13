@@ -38,6 +38,8 @@ use std::sync::{Arc, Mutex};
 use aite_app::preflight::{
     Options, Redactor, Report, Status, render_json, render_text, run_checks,
 };
+use aite_contracts::SessionStore;
+use aite_store::SqliteSessionStore;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -57,6 +59,12 @@ const PATH_TOKEN: &str = "/open-apis/auth/v3/tenant_access_token/internal";
 const PATH_BOT_INFO: &str = "/open-apis/bot/v3/info";
 const PATH_MESSAGES: &str = "/open-apis/im/v1/messages";
 const PATH_CHAT: &str = "/v1/chat/completions";
+
+/// 契约默认的 `storage.sqlite_path`，也是「怎么补」里那句「该改成什么」。
+/// 与 `src/preflight.rs` 的 `DEFAULT_SQLITE_PATH` 同值（那边拿契约 + 样例两头钉着）。
+const DEFAULT_SQLITE_PATH: &str = "data/aite.db";
+/// 造病用：内容明摆着不是 SQLite 的一个文件。
+const NOT_A_DATABASE: &[u8] = b"this is definitely not a sqlite database";
 
 const ALL_TITLES: [&str; 7] = [
     "配置可加载",
@@ -268,12 +276,44 @@ fn write_config_with_choices(
     write_config_full(root, model_base_url, &prompt, platform, provider)
 }
 
+/// 同上，但 `storage.sqlite_path` 由调用方说了算 —— 第 1 组那条**库**判据
+/// （已经在那儿的那个文件当不当得了库）要拿它造病。
+fn write_config_with_sqlite(root: &Path, model_base_url: &str, sqlite_path: &str) -> String {
+    let prompt = write_prompt(root);
+    write_config_full_with_sqlite(
+        root,
+        model_base_url,
+        &prompt,
+        "feishu",
+        "openai_compat",
+        sqlite_path,
+    )
+}
+
 fn write_config_full(
     root: &Path,
     model_base_url: &str,
     prompt_path: &str,
     platform: &str,
     provider: &str,
+) -> String {
+    write_config_full_with_sqlite(
+        root,
+        model_base_url,
+        prompt_path,
+        platform,
+        provider,
+        DEFAULT_SQLITE_PATH,
+    )
+}
+
+fn write_config_full_with_sqlite(
+    root: &Path,
+    model_base_url: &str,
+    prompt_path: &str,
+    platform: &str,
+    provider: &str,
+    sqlite_path: &str,
 ) -> String {
     let path = root.join("aite.yaml");
     let text = format!(
@@ -285,7 +325,7 @@ fn write_config_full(
          worker:\n  \
            system_prompt_path: {prompt_path}\n\
          storage:\n  \
-           sqlite_path: data/aite.db\n  \
+           sqlite_path: {sqlite_path}\n  \
            evidence_dir: data/evidence\n  \
            artifacts_dir: data/artifacts\n\
          edge:\n  \
@@ -758,6 +798,190 @@ async fn build_app_really_refuses_what_the_first_check_refuses() {
             "两边说的不是同一件事：{err}"
         );
     }
+}
+
+// ===========================================================================
+// 第 1 组的库判据（`storage.sqlite_path` 上那个文件当不当得了库）
+// ===========================================================================
+
+/// `sqlite_path` 指着一个不是 SQLite 的文件 → 第 1 组 FAIL，而第 7 组照样 OK。
+///
+/// **病史（这条测试守的就是它）**：2026-09-13，同一族的**第三个**口子。把 `sqlite_path`
+/// 指到一个内容是 `this is definitely not a sqlite database` 的文件：
+///
+/// | | 结果 |
+/// |---|---|
+/// | `preflight --offline` | 全绿，「全部没红，可以起飞。」退出码 0 |
+/// | `preflight` 全跑 | 第 1 组 OK、**第 7 组 OK**（红的那几组是本机没凭证 / 没起 edge，与它无关）|
+/// | `aite run` | 退出码 2：`aite 起不来：建表失败（…）：sqlite: file is not a database` |
+///
+/// **第 7 组接不住它**：那一组问的是「三个路径的最近已存在祖先**目录**写得进去」，
+/// 这一条问的是「那个**文件本身**能不能当库打开」。所以下面那句
+/// `status_of(&report, "storage") == Ok` 不是顺手写的 —— 它就是「两件事」这个判断本身，
+/// 谁哪天把库判据挪进第 7 组，这一行会红。
+#[tokio::test]
+async fn a_sqlite_path_that_is_not_a_database_fails_the_first_row() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let db = root.path().join(DEFAULT_SQLITE_PATH);
+    std::fs::create_dir_all(db.parent().expect("有父目录")).expect("建 data 目录");
+    std::fs::write(&db, NOT_A_DATABASE).expect("写坏库");
+    let stub = Stub::start(&happy_routes(FAKE_OPEN_ID)).await;
+    let cfg = write_config_with_sqlite(
+        root.path(),
+        &format!("{}/v1", stub.base),
+        DEFAULT_SQLITE_PATH,
+    );
+
+    let (report, text, raw_json) =
+        run(&opts(root.path(), cfg, stub.base.clone()), &full_env()).await;
+
+    let row = row_for(&text, "配置可加载");
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(row.contains("storage.sqlite_path"), "{row}");
+    assert!(
+        !report.ok(),
+        "第 1 组红了整份自检就该红（退出码 1）：{text}"
+    );
+    // 第 7 组照旧绿 —— 两件事，别混。
+    assert_eq!(
+        status_of(&report, "storage"),
+        Status::Ok,
+        "第 7 组不该管这一条，它问的是目录写不写得进去：{text}"
+    );
+    // 「怎么补」三件齐：当前值 / 该改成什么 / 不补的后果。
+    let fix = report
+        .checks
+        .iter()
+        .find(|c| c.name == "config")
+        .expect("第 1 组")
+        .fix
+        .clone();
+    assert!(fix.contains(&db.display().to_string()), "少了当前值：{fix}");
+    assert!(
+        fix.contains(&format!("里是 {DEFAULT_SQLITE_PATH}）")),
+        "少了「该改成什么」（断到右括号，免得被 data/aite.db.bak 之类蒙过去）：{fix}"
+    );
+    assert!(fix.contains("建表失败"), "少了不补的后果：{fix}");
+    // 一项失败不阻断后面的：七行齐，后面几组照跑。
+    assert_eq!(rows(&text).len(), 7, "{text}");
+    assert_eq!(status_of(&report, "model"), Status::Ok, "{text}");
+    // --json 那一面也得说得出这件事。
+    let v: Value = serde_json::from_str(&raw_json).expect("json");
+    assert_eq!(
+        v["checks"][0]["extra"]["sqlite_ok"],
+        json!(false),
+        "{raw_json}"
+    );
+    assert_eq!(
+        v["checks"][0]["extra"]["sqlite_probed"],
+        json!(true),
+        "{raw_json}"
+    );
+}
+
+/// 同一条判据在 `--offline` 下**照样跑** —— 这才是要紧的地方。
+///
+/// 上面那条的实证里，`--offline` 那一档是**全绿退出 0** 的：第 5/6 组那种「被 offline 跳过」
+/// 的口子救不了它。谁哪天把库判据挪进「非 offline 才跑」的那半边，只有这条会红。
+#[tokio::test]
+async fn the_database_row_still_runs_offline() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let db = root.path().join(DEFAULT_SQLITE_PATH);
+    std::fs::create_dir_all(db.parent().expect("有父目录")).expect("建 data 目录");
+    std::fs::write(&db, NOT_A_DATABASE).expect("写坏库");
+    let cfg = write_config_with_sqlite(root.path(), "http://127.0.0.1:1/v1", DEFAULT_SQLITE_PATH);
+    let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    let (report, text, _) = run(&o, &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(
+        row_for(&text, "配置可加载").contains("storage.sqlite_path"),
+        "{text}"
+    );
+    assert!(!report.ok(), "{text}");
+}
+
+/// 好库不许误伤，**库还不在**也不许误伤 —— 而且第 1 组一个字节都不许落盘。
+///
+/// 后半句是选「折进第 ① 组」而不是「扩第 7 组」时立下的准入条件：`SqliteSessionStore::open`
+/// 会 `create_dir_all` 父目录并新建库文件，判据要是不先问「文件在不在」，光跑一次
+/// `aite preflight` 就能把 `data/aite.db` 建出来 —— 而「配置可加载」这一组凭什么建东西。
+/// （`src/preflight.rs` 的 `the_db_probe_never_writes_anything` 在纯函数那一层钉同一件事；
+/// 这条是端到端那一层，连第 7 组那个「真建一个目录再删」的探针一起算进来。）
+#[tokio::test]
+async fn a_healthy_or_absent_database_does_not_trip_the_first_row() {
+    // 1) 真库：`store.init()` 建完表的那种。
+    let root = tempfile::tempdir().expect("tempdir");
+    let db = root.path().join(DEFAULT_SQLITE_PATH);
+    std::fs::create_dir_all(db.parent().expect("有父目录")).expect("建 data 目录");
+    let store = SqliteSessionStore::open(&db).expect("建库");
+    store.init().await.expect("建表");
+    store.close().await.expect("关库");
+    let cfg = write_config_with_sqlite(root.path(), "http://127.0.0.1:1/v1", DEFAULT_SQLITE_PATH);
+    let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    let (report, text, _) = run(&o, &full_env()).await;
+
+    assert_eq!(
+        status_of(&report, "config"),
+        Status::Ok,
+        "好库被误伤了：{text}"
+    );
+
+    // 2) 库还不在：照样 OK，而且跑完之后它**仍然**不在（起飞时才建，见 `build_app` 注释）。
+    let fresh = tempfile::tempdir().expect("tempdir");
+    let cfg = write_config_with_sqlite(fresh.path(), "http://127.0.0.1:1/v1", DEFAULT_SQLITE_PATH);
+    let mut o = opts(fresh.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    let (report, text, _) = run(&o, &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Ok, "{text}");
+    assert!(
+        !fresh.path().join(DEFAULT_SQLITE_PATH).exists(),
+        "第 1 组把库文件建出来了 —— 它是「配置可加载」，不该有落盘副作用"
+    );
+    assert!(
+        !fresh.path().join("data").exists(),
+        "连 data/ 都建出来了：{}",
+        fresh.path().display()
+    );
+}
+
+/// **两边口径对拍**：第 1 组拒绝的那份库，起飞路径上那一步真的也炸。
+///
+/// 口径照 `build_app_really_refuses_what_the_first_check_refuses`（注入那条），但对的**不是**
+/// `build_app` —— 这一条炸在 `run.rs` 的 `takeoff` 里那句 `app.store.init()`。
+/// `SqliteSessionStore::open`（`app.rs` 第 6 步）只是 `Connection::open`，SQLite 在那一步
+/// 根本不读文件头，所以组装那一关是过得去的：**这里对拍 `open` 会得到一个恒真的绿**。
+/// 判据因此照着真正会炸的那一步来（逼它读一次文件头），这条测试就是那个对拍。
+#[tokio::test]
+async fn store_init_really_fails_on_what_the_first_check_refuses() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let db = root.path().join(DEFAULT_SQLITE_PATH);
+    std::fs::create_dir_all(db.parent().expect("有父目录")).expect("建 data 目录");
+    std::fs::write(&db, NOT_A_DATABASE).expect("写坏库");
+    let cfg = write_config_with_sqlite(root.path(), "http://127.0.0.1:1/v1", DEFAULT_SQLITE_PATH);
+    let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    // preflight 这一侧：第 1 组 FAIL。
+    let (report, text, _) = run(&o, &full_env()).await;
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+
+    // 起飞那一侧：`open` 照样是 Ok（这正是判据不能只 open 的理由），`init()` 才炸。
+    let store = SqliteSessionStore::open(&db).expect("open 这一步 SQLite 不读文件头，必过");
+    let err = store
+        .init()
+        .await
+        .expect_err("preflight 说这个库起不来，store.init() 却建表成功了");
+    assert!(
+        err.to_string().contains("not a database"),
+        "两边说的不是同一件事：{err}"
+    );
 }
 
 /// 对拍 Python 的 `test_every_check_still_runs_when_feishu_is_unreachable`：

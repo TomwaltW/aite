@@ -163,6 +163,17 @@ pub fn sandbox_spec_of(config: &AiteConfig) -> SandboxSpec {
 ///   每两次之间 `sleep(1s)`。所以 **edge 没起来时最坏在这里阻塞约 4s**，
 ///   然后记一行 `aite.edge_unreachable` 照常返回 `Ok`（§2.1「启动顺序无关」）；
 ///   答上来而版本不一致则是 `StartupError`，拒绝起飞。
+///
+/// **edge 完全没起时组装照样成功，而且起飞会一路走到 `serve()`** —— 这是既有行为、
+/// 是刻意的，不是漏判。整条路上只有 `platform.start()` 里的 `ingress.start()`（core 自己
+/// 监听 `core_socket`）是硬要求；能力表问不到只是一行 `edge.capabilities_unavailable` 的
+/// warn，上面那个 `check_contract_version` 等满 5 次也照常返回 `Ok`。依据是 §2.1
+/// 「启动顺序无关，连不上不退出」：两边都是懒连接 + 退避重连，edge 后起时探针拨通那一下
+/// 会补比一次版本（`edge-client/src/gate.rs` 的契约闸门）。
+/// 钉它的是 `tests/signals.rs::edge_absent_still_takes_off_to_ingress_listening`；
+/// 同一个文件里那条进程级停机回归（`sigterm_before_serve_still_exits_by_itself`）
+/// **就建在这条行为上** —— 哪天有人把「edge 不可达就拒绝起飞」当成改进加进来，
+/// 那条会莫名其妙地红，而红的理由跟它要测的事（信号）毫无关系。先看这一条。
 pub async fn build_app(
     config: AiteConfig,
     inject: Injections,
@@ -350,6 +361,12 @@ fn build_model(config: &AiteConfig) -> Result<OpenAiCompatModel, StartupError> {
 }
 
 /// 两边契约版本必须一致，不等就拒绝起飞（§2.1）。
+///
+/// **答不上来不是拒绝起飞的理由** —— 5 次都拨不通就记一行 `aite.edge_unreachable`
+/// 返回 `Ok`，起飞继续走完（`platform.start()` 里只有本地那个 `ingress.start()` 是硬要求），
+/// 依据同样是 §2.1「启动顺序无关，连不上不退出」。这条行为被
+/// `tests/signals.rs::edge_absent_still_takes_off_to_ingress_listening` 钉着，
+/// 那个文件里的进程级停机回归也建在它上面 —— 详见 [`build_app`] 文档注释末段。
 async fn check_contract_version(edge: &Arc<EdgeClient>) -> Result<(), StartupError> {
     let mut last: Option<String> = None;
     for attempt in 1..=EDGE_STATUS_ATTEMPTS {
