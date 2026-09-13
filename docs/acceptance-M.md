@@ -453,7 +453,7 @@ AITE_EDGE_CONFIG=config/aite.ci-edge.yaml docker compose up -d
 **日志轮转**：两个 service 都配了 `max-size: 10m` / `max-file: 5`。默认 json-file 驱动无上限，
 配上 `restart: unless-stopped`，崩溃循环时日志涨得很快。
 
-**下面四条是 2026-09-12（W1）在本机真起了一遍 compose 核过的，不是推断：**
+**下面五条都是实测、不是推断，但分两批**：前四条是 2026-09-12（W1）在本机真起了一遍 compose 核过的；**第五条（宿主机写得进）是 2026-09-13（AA1）容器降权那一轮补的** —— W1 那一轮两个进程还都以 root 跑，它当时不成立。
 
 | 判据 | 结论 |
 |---|---|
