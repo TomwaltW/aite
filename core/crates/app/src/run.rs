@@ -66,8 +66,29 @@ impl StopSignal {
         Self { tx: Arc::new(tx) }
     }
 
+    /// 置起来。**没有任何接收者时也必须算数** —— 这是 `send_replace` 而不是 `send` 的全部理由。
+    ///
+    /// `watch::Sender::send` 在一个活跃接收者都没有时返回 `Err`，**并且连内部那个值都不改**。
+    /// 而 [`Self::new`] 当场就把建出来的 `_rx` 丢了，唯一订阅它的地方是 `serve()`
+    /// （[`Self::wait`] 里的 `subscribe()`）—— 于是原来那句 `let _ = self.tx.send(true)`
+    /// 在 `run_app` 走到 `serve()` 之前是一次**彻底的 no-op**：信号被吃掉，不留痕迹，
+    /// `serve()` 此后永远等不到，收尾一步都不会走。
+    ///
+    /// **这不是测试专属问题**：[`install_signal_handlers`] 把 `SIGINT` / `SIGTERM` 都接到
+    /// 同一个 `StopSignal` 上。信号赶在 `serve()` 之前到达 —— compose 的
+    /// `stop_grace_period`、k8s 滚动更新、人手快按 Ctrl-C 都会 —— 进程就永远不退，
+    /// 只能 `SIGKILL`；而 `docker-compose.yml` 配的是 `restart: unless-stopped`，
+    /// 杀完还会被拉起来。
+    ///
+    /// `send_replace` 不管有没有接收者都更新值，并照常通知所有接收者，所以
+    /// [`Self::is_set`] 与 [`Self::wait`] 的早退分支这才真的能反映「置过了」。
+    /// 回执里记过另一条等价的走法（`new()` 自己留一个 `rx` 让接收者永不为零），
+    /// 没选它是因为那条的正确性全挂在一个「看起来完全没用」的字段上：
+    /// 谁顺手清理掉它，病就静默复活。这一条的正确性写在调用点本身。
+    ///
+    /// 回归在 `tests/signals.rs`（单元层四条 + 进程层一条）。
     pub fn set(&self) {
-        let _ = self.tx.send(true);
+        self.tx.send_replace(true);
     }
 
     pub fn is_set(&self) -> bool {
@@ -451,6 +472,16 @@ fn install_signal_handlers(stop: StopSignal) -> Option<JoinHandle<()>> {
             return None;
         }
     };
+
+    // 两个 `signal()` 都回了 Ok，就意味着**注册已经完成**：从这一刻起 SIGINT / SIGTERM
+    // 不再走默认处理（把进程直接打死），而是排进 tokio 的信号缓冲，等下面这条 task 来收。
+    // 所以这一行印的是「信号面从此刻起接管了」，不是「spawn 出去了」。
+    //
+    // 为什么值得占一行 INFO：装不上时打 `aite.signal_unavailable`，装上了却从头到尾不吭声 ——
+    // 于是真机上「进程收到 SIGTERM 不退」时，第一个该问的问题（handler 到底装上没有）
+    // 日志答不了。`aite.up` 在它之后，两条连起来才是完整的起飞现场。
+    // `tests/signals.rs` 的进程层那条也拿它当「窗口已经打开」的判据。
+    tracing::info!(target: "aite.app", "aite.signal_ready SIGINT / SIGTERM 已接管，走优雅退出");
 
     Some(tokio::spawn(async move {
         let mut hits = 0u32;

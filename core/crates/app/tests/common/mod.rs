@@ -34,9 +34,10 @@ pub const SENDER: &str = "ou_zhang";
 /// 它防的是「CI 永远挂着」，不是「收尾慢了」—— 后者归 `graceful_shutdown` 那组
 /// 2.0 / 5.0 的紧预算管（那一组验的就是收尾时序，紧是故意的）。
 ///
-/// 为什么还是 10s 而不是放大：本轨查清楚了，撞穿它的从来不是「慢」，而是
-/// [`RunningApp::shutdown`] 文档里那个丢信号的死锁 —— 放到 60s 照样撞穿且等满 60s
-/// （实测）。真挂死等多久都不返回，放大只是让每次假红多拖 50s。
+/// 为什么是 10s 而不是放大：收尾本身实测只要 0.1–0.4ms，两个数量级之外的余量已经够厚。
+/// 撞穿它的不可能是「慢」，只可能是**挂死**，而挂死等多久都不返回 —— 放大只是让每次
+/// 红都多拖几十秒。（X1 那一轮把它放到 60s 验过：照样撞穿且实际等满 60.0s。那一轮撞穿的
+/// 病因是 `StopSignal::set()` 丢信号，已经治好；结论本身与病因无关，所以留着不动。）
 pub const SHUTDOWN_FALLBACK_SEC: f64 = 10.0;
 
 pub const WAIT_TIMEOUT_SEC: f64 = 5.0;
@@ -504,53 +505,14 @@ impl RunningApp {
 
     /// 置停机信号并等 `run_app` 返回。
     ///
-    /// **为什么不是一句 `stop.set()` 就完事**：`StopSignal::set()`（`src/run.rs`）写的是
-    /// `let _ = self.tx.send(true)`，而 `tokio::sync::watch::Sender::send` 在**一个活跃
-    /// 接收者都没有**时返回 `Err` 且**连内部那个值都不改**。`StopSignal::new()` 当场就把
-    /// 建出来的 `_rx` 丢了，于是在 `run_app` 走到 `serve()`（那里才 `subscribe()`）之前，
-    /// `set()` 是一次**彻底的 no-op** —— 信号丢了，`serve()` 此后永远等不到，收尾一步都
-    /// 不会走。本轨实测（探针：`StopSignal::new()` → `set()` → `is_set()` 仍是 `false`）。
-    ///
-    /// 这就是 `orphans_are_closed_before_the_platform_starts` 那个偶发假红的真病根，
-    /// **不是**「机器太忙没排上调度」：
-    ///
-    /// * 8 路并发跑 24 遍红 3 遍（12.5%）；顺序跑不红 —— 越挤越容易让 `run_app` 那条
-    ///   task 晚一步走到 `serve()`，窗口就越大。
-    /// * 卡住时 `sample` 抓的三份栈**形状完全一致**：两个 tokio worker **全都 park**、
-    ///   栈上**一个 aite 帧都没有**。饥饿的话 worker 会在跑别的东西 —— 这是没有可运行
-    ///   task 的死锁。
-    /// * 把预算从 10s 放到 60s，照样撞穿且**实际等满 60.0s**。真挂死不是「慢一点」。
-    /// * 死锁那一遍的日志停在 `aite.orphans`，**`aite.stopping` 一次都没打** ——
-    ///   `shutdown()` 的第一行都没到，卡的是它前面的 `serve()`。
-    ///
-    /// **窗口在哪**：[`Self::start`] 等的是 `platform.start()` 被调（`inner.started()`），
-    /// 而 `takeoff()` 里 `start()` 之后还有 `spawn(run_forever)` 和 `serve()` 两步。
-    /// 测试在这两步之间 `set()`，就正好落进洞里。
-    ///
-    /// **真机也踩得到**：`aite run` 把 `SIGINT`/`SIGTERM` 接到同一个 `StopSignal` 上
-    /// （`install_signal_handlers`）。信号赶在 `serve()` 之前到达（compose 的
-    /// `stop_grace_period`、k8s 滚动更新都会），进程就永远不退，只能等 `SIGKILL`。
-    ///
-    /// **药在 `src/run.rs`**（本轨只读面，已记账）：`set()` 改用 `send_replace(true)`
-    /// —— 它不管有没有接收者都更新值；或者让 `StopSignal::new()` 自己留一个 `rx`。
-    /// 那边修好之后，下面这个循环就该删掉，直接写回一句 `self.stop.set()`。
-    ///
-    /// 在此之前这里**重试到它真的置起来**：`is_set()` 读的是 watch 里那个值，一旦
-    /// `run_app` 走到 `serve()` 订阅上，下一次 `set()` 就生效。这不是「把挂死咽掉」——
-    /// 真挂死（收尾里某一步死锁）照样会撞穿下面那个 [`SHUTDOWN_FALLBACK_SEC`]。
+    /// 一句 `set()` 就够，**不需要重试到 `is_set()` 为真**：`StopSignal::set()` 用的是
+    /// `send_replace`，没有任何接收者时也照样更新值。[`Self::start`] 只等到
+    /// `platform.start()` 被调，而 `takeoff()` 里 `start()` 之后还有 `spawn(run_forever)`
+    /// 和 `serve()` 两步 —— 落在这两步之间的 `set()` 以前会被整个吃掉（`send` 在零接收者时
+    /// 返回 `Err` 且连值都不改），`orphans_are_closed_before_the_platform_starts` 那个
+    /// 12.5% 的假红就是这么来的。药在 `src/run.rs` 的 `StopSignal::set()`，
+    /// 回归在 `tests/signals.rs`（单元层四条 + 进程层一条真 `SIGTERM`）。
     pub async fn shutdown(&mut self) -> Result<(), aite_app::StartupError> {
-        let deadline = std::time::Instant::now() + Duration::from_secs_f64(WAIT_TIMEOUT_SEC);
-        while !self.stop.is_set() {
-            self.stop.set();
-            if std::time::Instant::now() >= deadline {
-                panic!(
-                    "{WAIT_TIMEOUT_SEC}s 内 StopSignal 没置起来。它在没有接收者时是 no-op\
-                     （见本方法的文档），而 `run_app` 迟迟没走到 `serve()` 订阅上 ——\
-                     多半是起飞路径自己卡住了，去看最后一条 `aite.*` 日志停在哪儿。"
-                );
-            }
-            tokio::task::yield_now().await;
-        }
         self.shutdown_within(SHUTDOWN_FALLBACK_SEC).await
     }
 
@@ -565,9 +527,11 @@ impl RunningApp {
             // 把第一现场直接写进消息里，省得下一个人再查一轮。
             Err(_) => panic!(
                 "{secs}s 内 run_app 没有返回（实际等了 {:.1}s）。收尾本身实测只要 0.1–0.4ms，\
-                 所以这是挂死，不是「机器慢」——放大预算没用（60s 也照样等满，本轨实测）。\
+                 所以这是挂死，不是「机器慢」——放大预算没用，挂死等多久都不返回。\
                  第一现场：看最后一条 `aite.*` 日志。停在 `aite.stopping` 之前说明根本没进\
-                 收尾，卡的是 `serve()`；停在它之后才是收尾里某一步真卡住了。",
+                 收尾，卡的是 `serve()`；停在它之后才是收尾里某一步真卡住了。\
+                 前一种**不再可能是 `StopSignal` 丢信号**（`set()` 已改用 `send_replace`，\
+                 `tests/signals.rs` 五条钉着），所以该往 `takeoff()` 里 `serve()` 之前那几步查。",
                 began.elapsed().as_secs_f64()
             ),
         }
