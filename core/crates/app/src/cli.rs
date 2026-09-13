@@ -23,8 +23,11 @@ const USAGE: &str = "\
 /// 取一天：宽限期是「等在途任务收完」的上限，超过一天没有任何真实用途；而 86400 离
 /// `Duration` 的上限（`u64::MAX` 秒 ≈ 1.8e19）还差 14 个数量级，f64 怎么舍入都推不过去。
 ///
-/// **这是把炸弹挡在门口，不是拆弹**：`ServeOptions::shutdown_grace_sec` 仍然是个裸 `f64`，
-/// 测试和别的调用方还能直接构造出 1e300。真正的拆弹要动 `run.rs`（归 V5），见回执。
+/// **门口校验 + 里面兜底，两道都在**（2026-09-13 起）：这里挡住命令行那一路，
+/// 而 `run.rs` 的 `grace_duration()` 走 `Duration::try_from_secs_f64`，造不出来就退到默认
+/// 20s 并 warn `aite.grace_invalid` —— 所以 `ServeOptions::shutdown_grace_sec` 这个裸 `f64`
+/// 被别的调用方直接塞成 1e300 / NaN 时也不再 panic，收尾序列一步都不会少。
+/// （原注释写的是「这是把炸弹挡在门口，不是拆弹，真正的拆弹归 V5」—— W2 已经拆了。）
 const MAX_GRACE_SEC: f64 = 86_400.0;
 
 #[derive(Debug)]
@@ -38,11 +41,11 @@ struct Args {
 /// 前者是 stdout + 退出码 0（argparse 的 `-h` 就是这样，脚本里 `set -e` 不会被它带死），
 /// 后者是 stderr + 退出码 2。口径与 `aite evals run` 的 `ParseOutcome` 逐字对齐。
 ///
-/// **注意 `aite run --help` 够不着这里**：`main.rs` 把 `run` 声明成 `trailing_var_arg`
-/// 的 `Vec<String>`，clap 仍然把 `-h` / `--help` 截胡，打的是它自己那份不含任何真实选项的
-/// 帮助。要根治得在 `main.rs` 的 `Run` variant 上加 `#[command(disable_help_flag = true)]`，
-/// 而 `main.rs` 归 R0（`main.rs:1–2`：要改这个文件 → 停下报告）。现在够得着的是
-/// `aite run -- -h`。
+/// **`aite run --help` 现在够得着这里**（2026-09-13 起）：`main.rs` 的四个
+/// `trailing_var_arg` variant 各加了 `#[command(disable_help_flag = true)]`，clap 不再把
+/// `-h` / `--help` 截胡去打它自己那份不含任何真实选项的帮助。带不带 `--` 打出来逐字节相同，
+/// 都是 stdout + 退出码 0。钉住它的是 `tests/cli_smoke.rs`（进程级，走 `main.rs`——
+/// 单元测试直调 `run_capture` 看不见那一层，原来那条回归就是从那儿躲过去的）。
 enum ParseOutcome {
     /// `-h` / `--help`
     Help,

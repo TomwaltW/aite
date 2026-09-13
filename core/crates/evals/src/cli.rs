@@ -248,12 +248,12 @@ pub fn run_capture(args: Vec<String>, wiring: &Wiring) -> Captured {
                 ..Captured::default()
             },
         },
-        // 子命令位置上的 `-h` / `--help`（够得着的写法是 `aite evals -- --help`）：
-        // 跟 `run` / `demo-fixture` 一个口径，stdout + 退出码 0，不是「不认识的子命令」。
+        // 子命令位置上的 `-h` / `--help`：跟 `run` / `demo-fixture` 一个口径，
+        // stdout + 退出码 0，不是「不认识的子命令」。
         //
-        // **`aite evals --help`（不加 `--`）到不了这里**：它被 clap 截胡，打的是 clap 那份
-        // 不含任何真实选项的帮助（stdout + 0）。跟 `aite run --help` 是同一个病，根治要动
-        // `main.rs`，而 `main.rs` 归 R0。
+        // **`aite evals --help`（不加 `--`）现在也到得了这里**（2026-09-13 起）：
+        // `main.rs` 给四个 `trailing_var_arg` variant 加了
+        // `#[command(disable_help_flag = true)]`，clap 不再截胡。两种写法打出来逐字节相同。
         "-h" | "--help" => Captured {
             stdout: vec![USAGE.to_string()],
             code: 0,
