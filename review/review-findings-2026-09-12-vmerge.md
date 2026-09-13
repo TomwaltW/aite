@@ -145,6 +145,9 @@ V3 写这几段时，V5 还没并进来。V5 ③ 已经把「交付中的短任�
 
 ## 四、还剩的账
 
+> **2026-09-13 更新**：4.1（W2）与 4.2（W3）**已全部销掉**，回执见第六、七节。
+> 4.5 是这天新记的，**它不是记账，是当场咬到总管的一条** —— 归 X1。
+
 ### 4.1 W2 · `core/crates/app` 的拆弹与测试成色
 
 | 位置 | 病 |
@@ -168,6 +171,31 @@ V3 写这几段时，V5 还没并进来。V5 ③ 已经把「交付中的短任�
 | `edge/internal/sandbox/docker.go:381-397` | 注释写「Release 幂等：不认识的 id、已经没了的容器，都当成已经释放」，而 `Release("")` 走到 `ContainerRemove(ctx, "", …)` 拿回的不是 `IsErrNotFound`，于是返回 `SandboxInternal`。与自己的注释、与 `proto` 头注释三方矛盾 |
 | `edge/internal/sandbox/docker_pure_test.go` | RΩ 把 `clip` / `diffFiles` / `parseDockerTime` / `reapVictims` 纯化进了无 daemon 门禁，但 `orphans` 仍只在 `-tags docker` 下跑到，可纯化的 `inspectStamps` 一条没测 —— CI 上没 daemon，这两个在门禁里等于裸奔 |
 | `core/crates/app/src/main.rs` | `aite run --help` 被 clap 截胡（打的是不含任何真实选项的帮助）。V6 ④b 只修了 `aite run -- -h` 这一个写法，根治要动 `main.rs`，**归口 R0，至今没人接** |
+
+### 4.5 X1 · preflight 说「可以起飞」然后起不来（2026-09-13 新记，**不是记账**）
+
+总管 2026-09-13 想试机器，`aite preflight --offline` 报「**全部没红，可以起飞**」，
+紧接着 `aite run` 退出码 2：
+
+```
+aite 起不来：读不到 system prompt：system prompt 不存在：aite/worker/prompts/platform.md。
+配置项是 worker.system_prompt_path（当前值 aite/worker/prompts/platform.md），
+路径相对于进程的工作目录 —— 多半是没在仓库根起进程。
+```
+
+真因：他那份 `config/aite.yaml`（2026-09-10 写的）还指着 **2026-09-12 被删掉的 Python 树**
+（`aite/worker/prompts/` → 现在是 `core/crates/worker/prompts/`）。已就地修好他那份本地配置
+（不入库），但**两个代码面的问题原样还在**：
+
+| 位置 | 病 |
+|---|---|
+| `core/crates/app/src/preflight.rs` | **七组里没有一组管 `worker.system_prompt_path` 读不读得到**，而 `require_system_prompt` 只在 `build_app` 里（`app.rs:310`）。于是 preflight 给的「可以起飞」是假的。V3 记过同族的一条（「`--offline` 全绿 ≠ 起得来」，因为跳过第 5 组）——**这条更狠：去掉 `--offline` 全跑一遍也救不了你**。不许变成「八组」（`dev-spec-2026-09-11-rustgo.md:308` 冻结着「七组」，且这个说法散在 README 3 处 / acceptance-M 多处 / demo-3min / cli_smoke / preflight_e2e 的硬断言里），折进第 ① 组「配置可加载」 |
+| `core/crates/app/src/app.rs:314` | 那句「路径相对于进程的工作目录 —— **多半是没在仓库根起进程**」是**误诊**：总管撞上时 cwd 就是仓库根，真因是配置里的路径本身指着已删的树。`app.rs:195`（连不上 edge 那条）有同样措辞，待复核 |
+
+顺带一条**本地环境**的账（不入库、不算代码面）：`config/aite.yaml` 缺整个 `edge:` 节
+（它是 09-11 重写时加的，比那份配置晚一天）。契约默认值兜住了 ——
+实测日志里 `edge_socket=data/run/aite-edge.sock core_socket=data/run/aite-core.sock`
+与样例逐字一致，所以没改。
 
 ### 4.3 只有人能做的两件
 
