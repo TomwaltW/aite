@@ -2259,3 +2259,303 @@ python3 -c "yaml.safe_load(ci.yml)"   → ci.yml OK
 9. **`aite-core:p0` / `aite-edge:p0` 两个镜像标签现在指向本轨改过的 Dockerfile 建出来的
    镜像**（原来是 22 小时前的）。标签是全局的，从 `main` 跑 compose 的人会拿到本轨的镜像。
    不算残留（它们是本分支的正确产物），但合并前从别的 worktree 起 compose 要重 build。
+
+## 十五、AA2 回执 —— 2026-09-13
+
+**轨**：`!restart` 漏掉 `Answering` 的任务 —— 它防的那件事它自己没防住。
+**基线**：`76c62fd`（`fix(guard): 落地 Z2 的 hook 命令`），worktree `.worktrees/task-aa2`，分支 `task-aa2`。
+
+### 开场自检
+
+| 行 | 期望 | 实测 |
+|---|---|---|
+| `git log --oneline -1` | `76c62fd` | ✅ `76c62fd` |
+| `git status --short` | 空 | ✅ 空 |
+| A3/C2 契约锁 | `OK 25 files` | ✅ `OK 25 files` |
+| C1 契约测试 | `contracts passed=25 failed=0` | ✅ 同 |
+| B 全量 cargo test | `cargo passed=853 failed=0` | ✅ **`cargo passed=854 failed=0`** —— 多的那 1 条是我自己刚落盘的临时探针 `worker/tests/aa2_probe.rs`（写在 check 起跑之前），删掉即 853。不是回归 |
+| B 全量 go test（-race） | 六个包全 `ok` | ✅ aiteerr / config / feishu / ingress / sandbox / server 全 `ok` |
+| B8 评测 | `passed 10/10` | ✅ `passed 10/10` |
+| `scripts/check.sh` | 最后一行「全部通过」，退出码 0 | ✅ 两者都是 |
+
+**守卫实测有效**：`Read .claude/hooks/guard_bash.py` 被拦下，逐字：
+
+```
+PreToolUse:Read hook error: [...]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+三个抖动 target（`graceful_shutdown` / `reconnect_replay` / `startup_recovery`）**本轨两次全量 check 都没撞到**。
+
+---
+
+### ① 判定：`cancel_task` 打在一个 `Answering` 的任务上会发生什么
+
+> **结论：停不掉 —— 和 `!stop` 那一侧的 `Delivering` 是同一回事；而且真去停会造出一句假话。
+> 选三条路里的第二条：② 不是「换个列表」，而是像 `!stop` 那样分情况回话。**
+>
+> **W2 那句「按 ⑦ 的结论这不是缺陷」我判下来只对了一半。** 「交付中停不掉」这个**机理**确实
+> 同源、确实不是缺陷；但 `cmd_restart` 身上那处**自相矛盾**是缺陷 —— 它的注释逐字承诺要防两件事，
+> 而它取任务的口径让这两件事一件都防不住，还**一个字都不告诉用户**。W2 把它记成「值得记一笔」，
+> 低估了它：`!stop` 撞上 `Answering` 至少会回一句人话，`!restart` 是**静默漏掉**。
+
+两条证据都是跑出来的，不是读出来的。
+
+#### 证据 A —— worker 一侧（真产品代码 `AgentWorker`，临时探针 `worker/tests/aa2_probe.rs`）
+
+造法：`ScriptedModel` 单回合 `final_turn_with`（带一个 `/work/report.csv` 产物）→ 走的正是
+`answering = !ctx.card.sent()` 那一路；`with_on_call(step == 0)` 把取消旗标恰好置在
+「循环开头那次取消判定已经过掉、模型刚返回 final」的一刻，也就是**紧挨着进 `deliver()`**。
+
+```
+$ cargo test -p aite-worker --test aa2_probe -- --nocapture
+=== AA2 探针 · cancel 落在 deliver()/Answering 上 ===
+最终 task.status        = Delivered
+库里 saved_status       = Some(Delivered)
+模型被调次数            = 1
+发出去的文件            = ["report.csv"]
+发出去的文本            = ["算完了，见附件"]
+卡片张数                = 0
+artifact 证据条数       = 1
+delivered 证据条数      = 1
+cancelled 证据条数      = 0
+evidence_root_hash 有无 = true
+证据链 verify()         = true
+manifest 有无           = true
+沙箱 released           = []
+test probe_cancel_during_answering_deliver ... ok
+```
+
+逐条对上派单要问的四件事：
+
+- **状态最后落成什么**：`Delivered`。
+- **在途那几笔停没停**：**一笔都没停**。产物发了、答复发了、`artifact` 与 `delivered` 证据都写了。
+- **证据链完不完整**：完整。`finalize` 被调（`manifest` 有、`evidence_root_hash` 有），
+  链校验 `verify() == true`，而且**链上没有一条 `cancelled`** —— 链讲的是实话（它确实是交付掉的）。
+- **用户看到的**：文件 + 答复，一个字不少。
+
+#### 证据 B —— 控制面一侧（临时把 `cmd_restart` 换成朴素版：口径直接换成 `status_tasks`、不分情况）
+
+造法：`ScriptedWorker` 加一格临时动作 `AnsweringUntilReleased`，复刻 `deliver()` 的性质 ——
+先落 `Answering` 并一直挂在控制面的 `running` 上，等外部闸门放开后**不看取消旗标**照样发完、落 `Delivered`。
+这样三个阶段可以确定性地分开观察。
+
+```
+$ cargo test -p aite-control --test aa2_probe -- --nocapture
+=== 阶段 1：worker 停在 Answering ===
+  控制面 running       = ["dd7f227f-990a-4b48-af69-c62062d721c3"]
+  库里状态             = Answering
+  list_active_tasks    = 0（旧口径看不见它）
+=== 阶段 2：朴素版 cmd_restart（status_tasks + 无条件 cancel_task）走完 ===
+  库里状态             = Cancelled
+  用户看到的回帖        = ["已重开会话，终止了 1 个进行中的任务。"]
+  证据链 kinds         = [TaskCreated, EventReceived]
+  manifest（finalize） = false
+  卡片更新次数         = 0
+  沙箱 released        = []
+  旧会话状态           = Archived
+=== 阶段 3：worker 的 deliver()/finish() 落地之后 ===
+  库里状态             = Delivered
+  worker 见过取消旗标吗 = true
+  用户看到的全部回帖    = ["已重开会话，终止了 1 个进行中的任务。", "算完了，见附件"]
+  答复发进了哪条话题    = Some(Some("om_1"))
+  那条话题的会话状态    = Archived
+  证据链 kinds         = [TaskCreated, EventReceived]
+```
+
+净结果一句话：**用户被告知「终止了 1 个进行中的任务」，然后照样收到了完整答复 —— 发在一条
+已经被归档的会话的话题里。** 库里那一刀（`Cancelled`）在阶段 3 被 worker 的 `finish()` 盖回
+`Delivered`，自己愈合了；对用户唯一的净影响就是那句假话。
+
+#### 为什么**不是**第三条路（「停得掉但留下半截」）
+
+派单要我在「证据链断、卡片卡住」时停下报告。核过了，**没有半截**：
+
+- `cancel_task` 在 `running == true` 那一支**刻意**跳过写 `cancelled` 证据 / 收卡片 / `finalize`
+  （它把收尾让给「worker 下一步开头」）。`Answering` 没有下一步，所以这三件事**一件都没做** ——
+  但正因为没做，链上不会多出一条从没发生过的 `cancelled`；随后 worker 自己走完 `delivered` 那条
+  收尾，`finalize` 照调、链照样校验通过（证据 A 已实测）。
+- 卡片：`Answering` 那一路**从来没发过卡片**（`answering = !ctx.card.sent()` 就是这个意思），
+  没有卡片可卡。两个探针里 `卡片张数 = 0` / `卡片更新次数 = 0` 都印证了。
+- **顺带排掉一个我一开始怀疑的更坏结局**：`cancel_task` 会无条件 `sandbox.release(&sandbox_id)`，
+  我疑心它把 `deliver()` 正在用的沙箱抽走、让产物变成「取不到」。**够不着**：要有沙箱就得调过
+  非 final 工具，而 `agent.rs:202-204` 在任何非 final 调用之前先 `ensure_card()` ——
+  卡片一发，`answering` 就成 `false`，状态落的是 `Working` 不是 `Answering`。
+  `deliver()` 内部 `fetch_artifact` 现建的那个只写进内存 `ctx.task`，到 `finish()` 才落库，
+  控制面手上的快照里 `sandbox_id` 仍是 `None`。两个探针的 `沙箱 released = []` 与之一致。
+  **所以这条理由我没写进代码注释** —— 它是假的。
+
+---
+
+### ② 改了什么、为什么
+
+`core/crates/control/src/plane.rs`：
+
+1. **口径统一**：`cmd_restart` 的 `self.store.list_active_tasks(&ev.chat_id)` → `self.status_tasks(&ev.chat_id)`，
+   和 `!status` / `!stop` / 卡片按钮**同一份**列表。
+2. **分流复用同一条规则**：`StopTarget::of` 拆出 `of_existing(task: Task)`（「有」那一半），
+   `cmd_restart` 逐条走它。**没有新开第三种「什么算活跃」的判定** —— 两条命令意见不一致
+   正是这笔账的由来，不该再长一个。`of_existing` 给不出 `NotFound`，那一格在 `cmd_restart` 里是空臂
+   （不用 `unreachable!`，产品代码不放 panic）。
+3. **计数与文案对齐**：`Stoppable` 才 `stopped += 1`；`Delivering` 收进 `delivering: Vec<String>`，
+   拼成新文案 `restart_while_delivering_text`（`plane.rs:51`，`lib.rs` 导出给 `wording.rs` 逐字钉）。
+   漏算的不再被漏掉，停不掉的也不再被算进「终止了 N 个」。
+4. **`cmd_restart` 的文档注释重写**：原来那段说的两件事现在与代码真实行为对得上 ——
+   它们在「停不掉」那一半里**仍然会发生**，但不再是悄悄发生的，回帖会点名。
+   ①-证据 B 的那三行净结果直接写进了注释。
+5. **§9 第 3 条那条「`rest` 非空 + 没停掉任何任务 → 不回帖」保留**，只是判据从
+   「没停掉任何任务」收窄成「既没停掉任何、也没有停不掉的」。原用例
+   `restart_with_text_and_nothing_stopped_says_nothing` 用的是 `Delivered`（终态，被 `status_tasks` 滤掉），照常绿。
+
+新文案逐字：
+
+```
+任务 #A17 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。
+```
+
+多个任务时用顿号并成**一句**（`#A17、#A18`），不是一个任务一行。
+后半句是必要的：会话这时已归档，而那几笔照样落在旧话题里；不说的话用户只会看见
+「已重开会话」之后又从旧话题冒出一段答复，不知道它是哪来的。
+
+#### `!restart` 与 `!stop` 的差别，一句话
+
+**`!stop` 是指着一个任务问「停它」，`!restart` 是换一个会话、顺手把旧会话名下所有能停的都停掉；
+两者对「能不能停」的判定完全同源（`StopTarget::of_existing`），只是回话的口吻不同。**
+
+---
+
+### ③ 回归（3 条新测试，每条都做了变异验证）
+
+| # | 测试 | 钉的是什么 |
+|---|---|---|
+| 1 | `commands.rs::restart_names_the_task_it_could_not_stop_instead_of_dropping_it` | 口径那条：`Answering` 的任务 `!restart` 之后被**点名**、不被算进「终止了 N 个」、库里状态一个字没改、沙箱没被还、链上没多出 `cancelled` |
+| 2 | `commands.rs::restart_stops_what_it_can_and_names_what_it_cannot` | **反方向的那一半**：同一次 `!restart` 里，可停的照常落 `Cancelled`、交付中的没被碰，回帖是「终止了 **1** 个」+ 点名（不是 2 个） |
+| 3 | `wording.rs::restart_while_delivering_text_is_byte_exact` | 新文案逐字（单个 + 多个两种形状） |
+
+第 2 条是特意补的**双向断言**（范本是 Z2 那条 `the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session`）：
+第 1 条单独看，「什么都不做」也能过；第 2 条把 `stopped` 那个计数一起钉死，恒真断言就立不住了。
+
+#### 变异验证
+
+**变异 A —— 把口径换回 `list_active_tasks`（本轨核心那一行）**：两条全红。
+
+```
+test restart_names_the_task_it_could_not_stop_instead_of_dropping_it ... FAILED
+test restart_stops_what_it_can_and_names_what_it_cannot ... FAILED
+
+thread 'restart_names_the_task_it_could_not_stop_instead_of_dropping_it' panicked at crates/control/tests/commands.rs:598:39:
+该回帖
+
+thread 'restart_stops_what_it_can_and_names_what_it_cannot' panicked at crates/control/tests/commands.rs:676:5:
+assertion `left == right` failed: 两半各说各的，一句话里说清
+  left: "已重开会话，终止了 1 个进行中的任务。"
+ right: "已重开会话，终止了 1 个进行中的任务。任务 #A1 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。"
+
+test result: FAILED. 18 passed; 2 failed
+```
+
+第 1 条红在 `.expect("该回帖")` 上 —— 旧口径下 `stopped == 0` 且 `delivering` 空，
+`rest` 非空于是**一个字都不回**。那正是「静默漏掉」的原样。
+
+**变异 B —— 口径留着新的，但摘掉「分情况」那一半（= ①-证据 B 的朴素改法）**：两条全红，且红点不同。
+
+```
+thread 'restart_names_the_task_it_could_not_stop_instead_of_dropping_it' panicked at crates/control/tests/commands.rs:599:5:
+assertion `left == right` failed: 停不掉的那个必须被点名，不许悄悄漏掉
+  left: "已重开会话，终止了 1 个进行中的任务。"
+ right: "已重开会话，任务 #A1 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。"
+
+thread 'restart_stops_what_it_can_and_names_what_it_cannot' panicked at crates/control/tests/commands.rs:664:5:
+assertion `left == right` failed: 交付中的那一半不许被碰
+  left: Cancelled
+ right: Answering
+
+test result: FAILED. 18 passed; 2 failed
+```
+
+**变异 C —— 新文案改一个词（「那条话题」→「的话题」）**：
+
+```
+thread 'restart_while_delivering_text_is_byte_exact' panicked at crates/control/tests/wording.rs:389:5:
+  left: "任务 #A17 正在把答复发给你，停不了 —— 结果仍会回到原来的话题里。"
+ right: "任务 #A17 正在把答复发给你，停不了 —— 结果仍会回到原来那条话题里。"
+test result: FAILED. 11 passed; 1 failed
+```
+
+三次变异后都恢复了正确版本并复跑绿（恢复用的是 `cp` 到目标路径，不是 `copy2`，mtime 是新的，
+cargo 不会跳过重编）。
+
+---
+
+### ④ 顺手两件（都是纯注释）
+
+#### a. `edge-client/src/lib.rs` 的 `contract_state()` —— **留着**，在注释里写明它是测试观测口
+
+量出来的代价（这是我做决定的依据，不是感觉）：
+
+| 删它要付什么 | 具体 |
+|---|---|
+| `link` 是 `EdgeClient` 的**私有字段**，`Link::contract_state` 是 `pub(crate)` | `tests/contract_gate.rs` 是**外部 crate**（集成测试），删掉这个方法它就够不着闸门了 |
+| 路 1：放宽可见性 | `Link::contract_state` → `pub`，再新开一个 `pub fn link(&self) -> Arc<Link>` —— **暴露出去的面比删掉的这一个方法大得多**（整个 `Link` vs 一个只读枚举） |
+| 路 2：改测试判据 | 那 9 处分布在一个 **234 行**的文件里，且是它**整组的判据**（未验证 / 放行 / 落闸三态）。换成「发一发 RPC 看它失不失败」去间接推断，等于把一组直给的判据换成一组间接的 |
+| 删掉能省多少 | **3 行**（一个转发方法） |
+
+两条路都比留着贵，所以留着。注释改成写明「它是给测试当观测口的，产品代码不走这条路 ——
+零调用方是刻意的」，并把这次量的账写进去，省得下一轮再量一遍。
+（原注释「给 `!status` 的健康行」那句谎话一并去掉，与 W2 ③ 同源。）
+
+#### b. `app/src/app.rs:152` 的文档注释 —— 补「文件**在**而**不是库**」那一格
+
+原文只说了「库文件不在就建一个空的」。补的那段口径**以 `preflight.rs` 模块头那张表为准**
+（那里是唯一把四件事写全的地方），并当场复核过 `preflight.rs::sqlite_fault`（`:477-517`）的实现：
+
+- 文件在、但不是库 → `SqliteSessionStore::open` **照样成功**（SQLite 懒打开），
+  要到第一次真去读库头才认出来 —— 也就是起飞时 `run.rs` 的 `store.init()` 建表那一下，
+  退出码 2、`aite 起不来：建表失败（…）`。**所以这条边界不在 `build_app` 上。**
+- 例外：目录 / 坏符号链接 / 没读权限 —— `Connection::open` 当场就打不开（`sqlite_fault` 的注释逐字写着这条）。
+- 提前验出来的是 `aite preflight` 第 1 组第 4 件事（拿 `PRAGMA schema_version` 探一下就还回去）。
+
+这同时销掉了 Z1 转出来、X1 回执里还挂着的那条记账（`app.rs:152`，「待定（总管）」）。
+
+---
+
+### 测试数差额
+
+`853 → 856`（**+3**），逐条解释：
+
+| 文件 | 变化 | 多在哪 |
+|---|---|---|
+| `control/tests/commands.rs` | 18 → 20 | ③ 的第 1、2 条 |
+| `control/tests/wording.rs` | 11 → 12 | ③ 的第 3 条（新文案逐字） |
+
+两个临时探针（`worker/tests/aa2_probe.rs`、`control/tests/aa2_probe.rs`）与
+`ScriptedWorker` 那一格临时动作 `AnsweringUntilReleased` **全部删干净了**，
+`git status` 复核过只剩本轨该改的 7 个文件。
+
+---
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/control/src/plane.rs` 的 `cancel_task`，`running == true` 那一支 | 注释写着「证据、收卡片、还沙箱都交给它下一步开头做」—— 而 `Answering` **没有下一步**（`deliver()` 里一个取消点都没有）。本轨确认这在当前唯一到得了的路径上无害（worker 自己走完 delivered 收尾，链是对的），但**这句注释描述的前提在 `Answering` 上不成立**。真要收，得先想清楚「在跑但不会再看旗标」这一类该由谁收尾 | 下一轮（纯注释即可收；要动行为就不是小改） |
+| `!stop` 省略任务号 + 本群有多个任务 | 回「没有这个任务」，而列表里明明有好几个。W2 记过，**本轨没碰**（`!restart` 不走省略任务号那条路） | 下一轮（W2 已记，此处确认还没销） |
+| `edge/cmd/aite-edge/main.go:58`、`proto/aite/v1/edge.proto:151` | X1 转出的两条「`!status` 健康行」谎话，本轨只销了 `edge-client/src/lib.rs` 那一处（④a 点名的那个）。另两处一个在只读面、一个在冻结面 | 下一轮 / **总管**（`proto/**` 冻结） |
+
+### 没做的 / 拿不准的
+
+1. **没有把「`cancel_task` 打在 `Answering` 上会被盖回去」写成常驻测试。** 它钉的是一个
+   改完之后**产品里已经到不了**的假设路径，留着就是个恒真断言（派单明确警告过这一点）。
+   证据留在本回执 ①-证据 B 里，探针脚本已删。要复现的话：把 `cmd_restart` 的
+   `status_tasks` 换成无条件 `cancel_task`，再给 `ScriptedWorker` 加一格
+   「落 `Answering` → 等闸门 → 不看旗标照样 deliver」即可。
+2. **`!restart` 之后那个交付中的任务仍会出现在 `!status` 里**（`status_tasks` 按 `chat_id` 过滤，
+   不按会话状态）。我判定这是**对的**：它确实还在跑。但这意味着 `cmd_restart` 原注释里
+   「会继续出现在 `!status` 里」那半句，在停不掉的那一半上**永远成立** —— 注释已经按这个事实重写。
+   如果总管认为「归档会话名下的任务不该再进 `!status`」，那是另一条（要改 `status_tasks`，
+   影响 `!status`/`!stop`/卡片三条路），不在本轨口径内。
+3. **多个 `Answering` 任务同时撞上 `!restart` 的形状没有专门用例。** 文案函数的多任务形状
+   在 `wording.rs` 里逐字钉了（`#A17、#A18`），但端到端造两个同时在 `running` 里的
+   `Answering` 需要两个 worker 槽位，而 `dispatch_loop` 是串行的 —— 造不出来，也就说明
+   P0 下这个形状本来就到不了。如实记下。
+4. **`app.rs` 那处注释没有配套测试**（纯注释，每句都当场核过 `preflight.rs::sqlite_fault` 的实现）。
+   `edge-client` 那处同理。

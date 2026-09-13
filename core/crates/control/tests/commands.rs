@@ -4,13 +4,18 @@ mod support;
 
 use std::sync::Arc;
 
-use aite_contracts::{CardStatus, ControlPlane, SessionStatus, SessionStore, TaskStatus};
+use aite_contracts::{
+    CardStatus, ControlPlane, EvidenceKind, SessionStatus, SessionStore, TaskStatus,
+};
 use support::{
     CHAT, Harness, ROOT, RunningPlane, ScriptedWorker, WorkerAction, active_tasks, ev, turn_texts,
     within,
 };
 
-use aite_control::{InProcessControlPlane, UNKNOWN_COMMAND_TEXT, stop_while_delivering_text};
+use aite_control::{
+    InProcessControlPlane, UNKNOWN_COMMAND_TEXT, restart_while_delivering_text,
+    stop_while_delivering_text,
+};
 
 async fn cmd(plane: &Arc<InProcessControlPlane>, text: &str, message_id: &str) {
     plane
@@ -567,5 +572,115 @@ async fn stop_still_cancels_a_task_that_is_really_stoppable() {
             .text
             .contains("已停止"),
         "可停的任务还是走原来那条路"
+    );
+}
+
+// ---- `!restart` 与 `!stop` 的口径一致（AA2）--------------------------------
+
+/// AA2：`!restart` 归档会话时用的是 `list_active_tasks`，`Answering` 整个看不见 ——
+/// 而它那段注释点名要防的两件事（结果落进已归档的会话、继续出现在 `!status` 里），
+/// 一个正在交付的任务**恰好两条都中**。
+///
+/// **为什么不是「换个列表、照停不误」**：实测过两头。worker 那一侧，取消旗标在
+/// `deliver()` 全程一次都不被看，文件与答复照发、照落 `Delivered`、证据链照样
+/// `finalize` 且校验通过；控制面这一侧，`cancel_task` 只是把库写成 `Cancelled`，
+/// 随后被 worker 的 `finish()` 盖回 `Delivered`。净结果就是回一句
+/// 「终止了 1 个进行中的任务」，而用户手上答复一个字不少 —— 那是造假话。
+///
+/// 所以口径统一到 `status_tasks`（和 `!stop` 同一份），但停不掉的那一半
+/// **一个字都不碰**，改成在回帖里点名。
+#[tokio::test]
+async fn restart_names_the_task_it_could_not_stop_instead_of_dropping_it() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+
+    cmd_in_thread(&plane, "!restart 换个思路", "om_2").await;
+
+    let body = h.platform.last_text().expect("该回帖").text;
+    assert_eq!(
+        body,
+        format!(
+            "已重开会话，{}",
+            restart_while_delivering_text(std::slice::from_ref(&task.task_no))
+        ),
+        "停不掉的那个必须被点名，不许悄悄漏掉"
+    );
+    assert!(
+        !body.contains("终止了"),
+        "它根本没被停掉，不许被算进那个计数：{body}"
+    );
+
+    // 和 `!stop` 撞上 Answering 时同一条规矩：一个字都不改
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(
+        saved.status,
+        TaskStatus::Answering,
+        "交付中的任务不该被改写 —— worker 马上会用 finish() 落 Delivered"
+    );
+    assert!(h.sandbox.released().is_empty(), "也不该顺手把沙箱还了");
+    assert!(
+        !h.evidence
+            .kinds(&task.id)
+            .contains(&EvidenceKind::Cancelled),
+        "链上不许多出一条它从没发生过的 cancelled：{:?}",
+        h.evidence.kinds(&task.id)
+    );
+}
+
+/// 反方向的那一半没被弄丢：同一次 `!restart` 里，能停的照常停掉、停不掉的才点名。
+///
+/// 上一条单独看是「什么都别做」也能过的，这一条把它钉死：`stopped` 那个计数照样要准，
+/// 而且**恰好**不含交付中的那个。
+#[tokio::test]
+async fn restart_stops_what_it_can_and_names_what_it_cannot() {
+    let (h, plane, _running, answering) = a_task_stuck_in_answering().await;
+
+    // 同一个会话里再来一句：第一个任务已经不在活跃集里，没有 steer 目标，
+    // 于是按 R6 新建一个任务。派发是串行的（`dispatch_loop`），worker 正被第一个
+    // 按着，所以它停在 `created` —— 一个货真价实的「可停」。
+    plane
+        .handle_event(
+            ev().id("e2")
+                .text("顺手也查一下发票")
+                .mentioned(false)
+                .message_id("om_2")
+                .thread(ROOT)
+                .build(),
+        )
+        .await
+        .expect("追问该新建任务");
+    let stoppable = active_tasks(&h.store, CHAT).await.remove(0);
+    assert_ne!(stoppable.id, answering.id, "前提：这是第二个任务");
+
+    cmd_in_thread(&plane, "!restart 换个思路", "om_3").await;
+
+    assert_eq!(
+        h.store
+            .get_task(&stoppable.id)
+            .await
+            .expect("读")
+            .expect("有")
+            .status,
+        TaskStatus::Cancelled,
+        "可停的那一半不许被这次改动弄丢"
+    );
+    assert_eq!(
+        h.store
+            .get_task(&answering.id)
+            .await
+            .expect("读")
+            .expect("有")
+            .status,
+        TaskStatus::Answering,
+        "交付中的那一半不许被碰"
+    );
+
+    let body = h.platform.last_text().expect("该回帖").text;
+    assert_eq!(
+        body,
+        format!(
+            "已重开会话，终止了 1 个进行中的任务。{}",
+            restart_while_delivering_text(std::slice::from_ref(&answering.task_no))
+        ),
+        "两半各说各的，一句话里说清"
     );
 }
