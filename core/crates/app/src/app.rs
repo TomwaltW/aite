@@ -307,12 +307,29 @@ fn prepare_storage(cfg: &StorageConfig) -> Result<(), StartupError> {
     Ok(())
 }
 
+/// system prompt 必须读得到，读不到就拒绝起飞。
+///
+/// 报错文案按**真实病史**排序，别把人带反：2026-09-12 总管撞上这一条时 cwd 就是仓库根，
+/// 而原来那句话写的是「多半是没在仓库根起进程」—— 真因是他那份 2026-09-10 写的配置还
+/// 指着当天被删掉的 Python 树。所以现在先说配置里的路径本身不对，再说 cwd 那一种，
+/// 并且把**解析成的绝对路径**打出来，让人一眼看见它究竟去哪儿找了。
+///
+/// 同一条判据现在也在 `aite preflight` 第 1 组里（`preflight.rs` 的 `check_config`，
+/// 复用的就是下面这个 [`load_system_prompt`]）—— 两边同一条路径，不会一个说行一个说不行。
 fn require_system_prompt(config: &AiteConfig) -> Result<(), StartupError> {
-    load_system_prompt(&config.worker.system_prompt_path).map_err(|e| {
+    let raw = &config.worker.system_prompt_path;
+    load_system_prompt(raw).map_err(|e| {
+        let resolved = std::env::current_dir()
+            .map(|cwd| cwd.join(raw).display().to_string())
+            // cwd 都取不到时退回原值：这一行是给人拿去 `ls -l` 的，宁可少说也别编。
+            .unwrap_or_else(|_| raw.clone());
         StartupError::new(format!(
-            "读不到 system prompt：{e}。配置项是 worker.system_prompt_path（当前值 {}），\
-             路径相对于进程的工作目录 —— 多半是没在仓库根起进程。",
-            config.worker.system_prompt_path
+            "读不到 system prompt：{e}。配置项是 worker.system_prompt_path（当前值 {raw}），\
+             找的是 {resolved}。多半是配置里这一行本身不对 —— 2026-09-12 Python 树删了，\
+             旧配置里的 aite/worker/prompts/ 已经不存在，该改成 \
+             core/crates/worker/prompts/platform.md（config/aite.example.yaml 里就是这个值）；\
+             路径是相对进程工作目录算的，所以也可能是没在仓库根起进程。\
+             `aite preflight` 第 1 组现在会提前拦下这一条。"
         ))
     })?;
     Ok(())

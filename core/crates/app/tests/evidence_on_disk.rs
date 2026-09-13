@@ -61,7 +61,6 @@ async fn run_one_task(config: &aite_contracts::AiteConfig) -> (String, String) {
     platform
         .emit(&event("e1", "把这个 CSV 画成月度趋势图"))
         .await;
-    let task = app.store.list_active_tasks(CHAT).await.expect("list")[0].clone();
     let p = platform.clone();
     wait_until(|| p.inner.count("send_text") == 1, "任务交付").await;
     assert_eq!(
@@ -72,6 +71,11 @@ async fn run_one_task(config: &aite_contracts::AiteConfig) -> (String, String) {
     let a = app.clone();
     wait_until(|| a.worker.in_flight().is_empty(), "worker.run() 返回").await;
     run.shutdown().await.expect("run_app 正常收场");
+    // 任务跑完之后再从磁盘读。原来这里是 `emit` 之后立刻 `list_active_tasks(CHAT)[0]`，
+    // 而活跃口径不含 `Answering` / 终态 —— worker 抢在前面跑完就是
+    // `index out of bounds: the len is 0 but the index is 0`（插一句 settle() 撑开窗口
+    // 必现，本轨实测）。要的两个字段建出来就定死，等它跑完读反而稳。
+    let task = the_only_task_from_disk(config, "run_one_task").await;
     (task.id, task.session_id)
 }
 

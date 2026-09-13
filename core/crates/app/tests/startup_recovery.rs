@@ -255,8 +255,26 @@ async fn a_new_question_in_the_old_thread_still_lands() {
                 .build(),
         )
         .await;
-    // handle_event 在 emit 里同步走完，任务当场就在库里
-    let new_task = app.store.list_active_tasks(CHAT).await.expect("list")[0].clone();
+    // 先等交付完成，再从磁盘把新任务读回来 —— 判据跟「它这会儿还在不在活跃集里」脱钩。
+    //
+    // 原来这一行是 `list_active_tasks(CHAT).expect("list")[0]`，靠的是「handle_event 在
+    // emit 里同步走完，任务当场就在库里」。可这条脚本是单步 `final`：worker 一走完就落
+    // `Answering`，而 `Answering` 不在活跃口径里（`ACTIVE_TASK_STATUSES`）。worker 在别的
+    // task 上跑，只要它抢在这一行前面跑完，活跃列表就是空的 —— 报出来是
+    // `index out of bounds: the len is 0 but the index is 0`，一句都不像人话。
+    // 在这一行前面插一句 `settle().await` 把窗口撑开是**必现**的（W2 记的，本轨复现过）。
+    // 这是 `startup_recovery` 那个偶发假红的病根之一，不是理论风险。
+    //
+    // 换成 `first_active_task` 不够：实测撑开窗口之后它照样红，只是把越界换成一句人话
+    // （「5s 内没等到活跃任务 …… 要么它跑得比这句断言还快」）—— 抖动一点没少，还多等 5s。
+    // 要断的这三样（task_no / session_id）在任务建出来那一刻就定死了，终态时还是那两个值，
+    // 所以等它跑完再从磁盘读，跑多快都不影响结论。
+    wait_until(|| platform.inner.count("send_text") == 2, "新任务交付").await;
+    let new_task = tasks_from_disk(&config)
+        .await
+        .into_iter()
+        .find(|t| t.id != orphan.id)
+        .unwrap_or_else(|| panic!("除孤儿 {} 之外该还有一个新任务", orphan.id));
     assert_eq!(new_task.task_no, "#A2");
     assert_ne!(new_task.task_no, orphan.task_no);
     assert_eq!(
@@ -264,7 +282,6 @@ async fn a_new_question_in_the_old_thread_still_lands() {
         "同一会话，话题锚点没断"
     );
 
-    wait_until(|| platform.inner.count("send_text") == 2, "新任务交付").await;
     let prompts = model.prompt_texts();
     assert!(
         prompts

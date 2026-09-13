@@ -227,13 +227,32 @@ fn full_env() -> HashMap<String, String> {
     ])
 }
 
+/// 在 `root` 下真写一份 system prompt，返回**相对 root** 的路径。
+///
+/// 第 1 组现在连 `worker.system_prompt_path` 一起验（`src/preflight.rs` 的 `check_config`），
+/// 而契约默认值 `core/crates/worker/prompts/platform.md` 在 tempdir 里当然不存在 ——
+/// 不写这一份，每条用例的第 1 组都会 FAIL，而那不是被测行为，是脚手架没跟上。
+/// 内容无所谓，读得出来就行：第 1 组只问「在不在」，四条铁律的正文归 worker 那边管。
+fn write_prompt(root: &Path) -> String {
+    let rel = "prompts/platform.md";
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().expect("有父目录")).expect("建 prompts 目录");
+    std::fs::write(&path, "# 假 system prompt（第 1 组只问在不在）\n").expect("写 prompt");
+    rel.to_string()
+}
+
 /// 一份填得齐的 config，写进 `root`。
 ///
-/// 路径一律**相对** `repo_root`（= tempdir），于是 `storage.*` 与 `edge_socket` 都落在
-/// 临时目录里 —— 整轨硬约束「一个字节都不许写进仓库的 `data/`」
-/// （`tests/cold_start_to_delivery.rs:220`、`tests/evidence_on_disk.rs:340`）。
+/// 路径一律**相对** `repo_root`（= tempdir），于是 `storage.*`、`edge_socket` 和
+/// `worker.system_prompt_path` 都落在临时目录里 —— 整轨硬约束「一个字节都不许写进仓库的
+/// `data/`」（`tests/cold_start_to_delivery.rs:220`、`tests/evidence_on_disk.rs:340`）。
 /// 第 7 组的可写探测是真建一个目录再删掉，所以这条不是形式主义。
 fn write_config(root: &Path, model_base_url: &str) -> String {
+    write_config_with_prompt(root, model_base_url, &write_prompt(root))
+}
+
+/// 同上，但 `worker.system_prompt_path` 由调用方说了算 —— 第 1 组那条新判据要拿它造病。
+fn write_config_with_prompt(root: &Path, model_base_url: &str, prompt_path: &str) -> String {
     let path = root.join("aite.yaml");
     let text = format!(
         "platform: feishu\n\
@@ -241,6 +260,8 @@ fn write_config(root: &Path, model_base_url: &str) -> String {
            provider: openai_compat\n  \
            base_url: {model_base_url}\n  \
            model: fake-model\n\
+         worker:\n  \
+           system_prompt_path: {prompt_path}\n\
          storage:\n  \
            sqlite_path: data/aite.db\n  \
            evidence_dir: data/evidence\n  \
@@ -332,6 +353,108 @@ async fn every_row_but_the_sandbox_is_green_when_the_upstreams_answer() {
         "{:?}",
         stub.hits()
     );
+}
+
+/// 第 1 组现在连 `worker.system_prompt_path` 一起验：配置解析得出来、但它指着一个
+/// **不存在的文件**时，第 1 组必须 FAIL —— 不是 WARN、更不是 OK。
+///
+/// **病史（这条测试守的就是它）**：2026-09-12 `aite preflight --offline` 报「全部没红，
+/// 可以起飞」，紧接着 `aite run` 退出码 2 —— 那份 2026-09-10 写的 `config/aite.yaml`
+/// 还指着当天被删掉的 Python 树（`aite/worker/prompts/`）。当时七组里**没有一组**碰这个
+/// 字段，所以去掉 `--offline` 全跑一遍也救不了（实测第 1 组照样 OK）。
+///
+/// 四件事一起钉住，少一件这条判据就还是半残的：
+/// 1. **FAIL 而不是 WARN** —— 它是硬起飞前提（`build_app` 第 2 步读不到就拒绝起飞）。
+/// 2. `report.ok()` 为假 —— 那就是进程退出码 1 的判据（进程级那条在 `cli_smoke.rs`）。
+/// 3. 「怎么补」里有**正确路径**和**那条真实病史**，照着做真能修好。
+/// 4. **后面六组照跑**：第 1 组红了不阻断后面的（模块头第三条规矩）。
+#[tokio::test]
+async fn a_system_prompt_that_is_not_there_fails_the_first_row() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let stub = Stub::start(&happy_routes(FAKE_OPEN_ID)).await;
+    // 逐字用总管撞上的那个路径：`fix` 里那句病史只在认出旧 Python 树时才说得出口。
+    let cfg = write_config_with_prompt(
+        root.path(),
+        &format!("{}/v1", stub.base),
+        "aite/worker/prompts/platform.md",
+    );
+
+    let (report, text, raw_json) =
+        run(&opts(root.path(), cfg, stub.base.clone()), &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(!report.ok(), "第 1 组红了，退出码就该是 1：{text}");
+
+    let row = row_for(&text, "配置可加载");
+    assert!(
+        row.contains("worker.system_prompt_path"),
+        "没点名是哪个配置项：{row}"
+    );
+    // 解析成的绝对路径要打出来 —— 光说相对路径，人不知道它究竟去哪儿找了。
+    assert!(
+        row.contains(
+            &root
+                .path()
+                .join("aite/worker/prompts/platform.md")
+                .display()
+                .to_string()
+        ),
+        "没打出解析成的绝对路径：{row}"
+    );
+
+    let fix = text
+        .lines()
+        .find(|l| l.contains("怎么补") && l.contains("system_prompt_path"))
+        .unwrap_or_else(|| panic!("第 1 组没给「怎么补」：\n{text}"));
+    assert!(
+        fix.contains("core/crates/worker/prompts/platform.md"),
+        "「怎么补」里没有正确路径，照着做修不好：{fix}"
+    );
+    assert!(
+        fix.contains("2026-09-12") && fix.contains("Python 树"),
+        "「怎么补」里没说破那条病史（旧配置指着已删的 Python 树）：{fix}"
+    );
+
+    // 一项失败不阻断后面的：七行齐，且第 1 组之后确实还在干活。
+    assert_eq!(rows(&text).len(), 7, "{text}");
+    assert_eq!(status_of(&report, "env"), Status::Ok, "{text}");
+    assert_eq!(status_of(&report, "feishu_token"), Status::Ok, "{text}");
+    assert_eq!(status_of(&report, "storage"), Status::Ok, "{text}");
+
+    // `--json` 那一面也要看得见，脚本才判得出来。
+    let json: Value = serde_json::from_str(&raw_json).expect("--json 必须是 JSON");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["checks"][0]["status"], "fail");
+    assert_eq!(json["checks"][0]["extra"]["system_prompt_ok"], false);
+}
+
+/// 同一条判据在 `--offline` 下**照样跑**：它不碰网络也不碰 docker，没有理由跳。
+///
+/// 这条单列是因为总管撞上那次跑的就是 `--offline`（V3 记过的「`--offline` 全绿 ≠ 起得来」
+/// 是同一族）。要是哪天有人图省事把第 1 组的新判据挪进「非 offline 才跑」的那半边，
+/// 上面那条测试仍然全绿，只有这条会红。
+#[tokio::test]
+async fn the_system_prompt_row_still_runs_offline() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = write_config_with_prompt(
+        root.path(),
+        "http://127.0.0.1:1/v1",
+        "aite/worker/prompts/platform.md",
+    );
+    let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    let (report, text, _) = run(&o, &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(!report.ok(), "--offline 下也该是退出码 1：{text}");
+    assert!(
+        row_for(&text, "配置可加载").contains("worker.system_prompt_path"),
+        "{text}"
+    );
+    // 3/4/5/6 该跳的还跳 —— 这一项跑起来不是靠把 offline 那半边的 skip 拆了。
+    assert_eq!(status_of(&report, "model"), Status::Skip, "{text}");
+    assert_eq!(status_of(&report, "sandbox"), Status::Skip, "{text}");
 }
 
 /// 对拍 Python 的 `test_every_check_still_runs_when_feishu_is_unreachable`：
@@ -548,10 +671,14 @@ async fn a_custom_env_var_name_is_still_redacted() {
     let custom = "AITE_E2E_FAKE_CUSTOM_KEY_ENV";
     let root = tempfile::tempdir().expect("tempdir");
     let path = root.path().join("aite.yaml");
+    // 这条用例关心的是脱敏，不是第 1 组；prompt 得真写一份，否则第 1 组会因为
+    // `worker.system_prompt_path` 指不到而 FAIL，把下面那条前置断言打红。
+    let prompt = write_prompt(root.path());
     std::fs::write(
         &path,
         format!(
-            "model:\n  api_key_env: {custom}\nstorage:\n  sqlite_path: data/aite.db\n  \
+            "model:\n  api_key_env: {custom}\nworker:\n  system_prompt_path: {prompt}\n\
+             storage:\n  sqlite_path: data/aite.db\n  \
              evidence_dir: data/evidence\n  artifacts_dir: data/artifacts\n"
         ),
     )

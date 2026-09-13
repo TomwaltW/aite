@@ -115,6 +115,11 @@ core/target/debug/aite preflight            # 七组全跑，FAIL 必须是 0
 > **`--offline` 那一档不算过。** 它跳过第 5 组（模型端点通），而
 > `config/aite.example.yaml` 里 `model.base_url` / `model.model` 是空的 ——
 > 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2。这里必须不带 `--offline`。
+>
+> 手上那份 `config/aite.yaml` 要是 2026-09-12 之前写的，**第 1 组会当场拦住你**：
+> 它现在连 `worker.system_prompt_path` 一起验，旧配置指着已删的 Python 树
+> （`aite/worker/prompts/`）就是 FAIL，「怎么补」那行直接给出该改成的路径。
+> 照着改完再往下走 —— 这一条在镜头前炸的话，`aite run` 根本起不来。
 
 **①b 加演那段（§5）演不演，现在就能定**（C 窗口）
 

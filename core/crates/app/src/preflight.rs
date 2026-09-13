@@ -4,13 +4,25 @@
 //!
 //! | # | 组 | 判据 |
 //! |---|---|---|
-//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来（不存在退到样例，算 WARN） |
+//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且 `worker.system_prompt_path` 指到的文件真的在**（配置不存在退到样例，算 WARN；prompt 读不到是 FAIL） |
 //! | 2 | 环境变量齐 | config 里所有 `*_env` 点到的变量**在不在**（取值一个字都不打） |
 //! | 3 | 飞书凭证有效 | 换得到 `tenant_access_token` |
 //! | 4 | 飞书身份对得上 | `GET /open-apis/bot/v3/info` 的 `bot.open_id` == `FEISHU_BOT_OPEN_ID` |
 //! | 5 | 模型端点通 | 一次最小 chat（`ping`，`max_tokens=16`） |
 //! | 6 | 沙箱可用 | 经 edge：daemon 可达 → 起容器 → 四个 import → **一定收掉** |
 //! | 7 | 落盘目录可写 | 三个路径的「最近的已存在祖先」写得进去 |
+//!
+//! **第 1 组为什么连 `system_prompt_path` 一起验**：2026-09-12 总管撞上过一次
+//! 「preflight 说可以起飞、`aite run` 退出码 2」—— 他那份 `config/aite.yaml` 还指着
+//! 当天被删掉的 Python 树（`aite/worker/prompts/`），而七组里**没有一组**碰
+//! `worker.system_prompt_path`，于是 `require_system_prompt`（`app.rs`）在起飞时才拦下来。
+//! 配置解析成功却指着一个不存在的文件，本来就不该叫「配置可加载」，所以判据扩到这里，
+//! 而不是新开第 8 组（`docs/dev-spec-2026-09-11-rustgo.md:308` 的「七组自检」是冻结面）。
+//!
+//! 判据直接复用 `aite run` 走的那个 [`load_system_prompt`]，两边是**逐字同一条路径**；
+//! 相对路径按 `Options.repo_root` 解析，而它就是进程 cwd（见 [`run`]），
+//! 与 `require_system_prompt` 相对 cwd 的口径对得上 —— 不会出现「这边说行、那边说不行」。
+//! 它不碰网络也不碰 docker，所以 `--offline` 下照样跑。
 //!
 //! **红线：任何输出都不得出现密钥取值。** 第一道是代码里根本不去打它们；第二道是
 //! [`Redactor`] —— 所有 detail / fix / extra 在渲染前都过一遍，把已知的取值抹掉。
@@ -36,9 +48,18 @@ use aite_edge_client::{EdgeClient, EdgeStatus};
 use aite_models::{OpenAiCompatModel, cost_of, env_snapshot, resolve_api_key};
 use serde_json::{Map, Value, json};
 
+use aite_worker::context::load_system_prompt;
+
 use crate::app::{DEFAULT_CONFIG_PATH, load_config, sandbox_spec_of};
 
 const EXAMPLE_CONFIG_PATH: &str = "config/aite.example.yaml";
+/// `worker.system_prompt_path` 该长什么样。与 `AiteConfig::default()`（契约）
+/// 和 `config/aite.example.yaml` 里那一行同值 —— 三处同时改才会一致，
+/// 所以 `prompt_default_matches_the_contract` 拿契约默认值把这个常量钉住了。
+const DEFAULT_SYSTEM_PROMPT_PATH: &str = "core/crates/worker/prompts/platform.md";
+/// 2026-09-12 删掉的 Python 树里 prompt 的位置。旧配置十有八九还指着它 ——
+/// 认出来就能在「怎么补」里直接说破病史，而不是让人自己去猜路径为什么不对。
+const DELETED_PYTHON_PROMPT_DIR: &str = "aite/worker/prompts/";
 
 /// 飞书开放平台默认域（与 `edge/internal/feishu` 同值）。
 const DEFAULT_DOMAIN: &str = "https://open.feishu.cn";
@@ -296,6 +317,41 @@ fn tail(text: &str, limit: usize) -> String {
     }
 }
 
+/// 把 config 里的相对路径按 `repo_root` 解析成绝对路径。
+///
+/// `repo_root` 在真跑时就是进程 cwd（[`run`] 里 `current_dir()`），所以这条和
+/// `require_system_prompt` / `load_config` 那边「相对进程工作目录」的口径是同一条。
+fn resolve_under(repo_root: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        repo_root.join(p)
+    }
+}
+
+/// 第 1 组因为 system prompt 而 FAIL 时那句「怎么补」。
+///
+/// 三件事必须都在里面：**当前值**是什么、**应该是**什么、以及 2026-09-12 那条真实病史。
+/// 总管撞上的就是「旧配置还指着已删的 Python 树」那一种 —— 不说破的话他只看见一个
+/// 路径不存在，猜不到是哪次改动把它搬走的，更猜不到该往哪儿改。
+fn system_prompt_fix(raw: &str, abs: &Path) -> String {
+    let mut out = format!(
+        "把配置里的 worker.system_prompt_path 改成 {DEFAULT_SYSTEM_PROMPT_PATH}\
+         （{EXAMPLE_CONFIG_PATH} 里就是这个值）；当前值 {raw} 解析成 {}，那儿没有这个文件",
+        abs.display()
+    );
+    if raw.contains(DELETED_PYTHON_PROMPT_DIR) {
+        out.push_str(
+            " —— 它指的是 2026-09-12 删掉的 Python 树，\
+             aite/worker/prompts/ 现在已经不存在了，2026-09-10 之前写的配置都要改这一行",
+        );
+    } else {
+        out.push_str("；相对路径按进程的工作目录算，顺带确认一下起进程时的 cwd");
+    }
+    out
+}
+
 fn display_width(text: &str) -> usize {
     text.chars()
         .map(|c| if (c as u32) > 0x2e80 { 2 } else { 1 })
@@ -360,7 +416,11 @@ fn arm_redactor(
 // 1 配置可加载
 // --------------------------------------------------------------------------
 
-fn check_config(path: &Path, fell_back: bool) -> (CheckResult, Option<AiteConfig>) {
+fn check_config(
+    path: &Path,
+    fell_back: bool,
+    repo_root: &Path,
+) -> (CheckResult, Option<AiteConfig>) {
     let cfg = match load_config(path) {
         Ok(c) => c,
         Err(e) => {
@@ -382,6 +442,44 @@ fn check_config(path: &Path, fell_back: bool) -> (CheckResult, Option<AiteConfig
     extra.insert("model_provider".into(), json!(cfg.model.provider.as_str()));
     extra.insert("sandbox_image".into(), json!(cfg.sandbox.image));
     extra.insert("config_path".into(), json!(path.display().to_string()));
+
+    // 配置解析成功 ≠ 它指到的东西在。`worker.system_prompt_path` 是硬起飞前提
+    // （`build_app` 第 2 步 `require_system_prompt` 读不到就拒绝起飞），所以这里
+    // 是 FAIL 不是 WARN —— 见模块头「第 1 组为什么连 system_prompt_path 一起验」。
+    let prompt_raw = cfg.worker.system_prompt_path.clone();
+    let prompt_abs = resolve_under(repo_root, &prompt_raw);
+    extra.insert("system_prompt_path".into(), json!(prompt_raw));
+    extra.insert(
+        "system_prompt_resolved".into(),
+        json!(prompt_abs.display().to_string()),
+    );
+    if let Err(e) = load_system_prompt(&prompt_abs) {
+        extra.insert("system_prompt_ok".into(), json!(false));
+        // 上一句已经把绝对路径打全了，`WorkerError` 的消息里还会再带一遍 —— 不存在这种
+        // 最常见的形态只说两个字，把版面留给「怎么补」。别的（是个目录、没读权限）
+        // 才需要上游的原文，那时候绝对路径重复一次也认了。
+        let why = if prompt_abs.exists() {
+            tail(&e.to_string(), 120)
+        } else {
+            "不存在".to_string()
+        };
+        return (
+            fail(
+                "config",
+                "配置可加载",
+                format!(
+                    "{detail} · 但 worker.system_prompt_path 指不到文件：{prompt_raw} → {}（{why}）",
+                    prompt_abs.display(),
+                ),
+            )
+            .with_fix(system_prompt_fix(&prompt_raw, &prompt_abs))
+            // FAIL 也把 cfg 交出去：「一项失败不阻断后面的」，后面六组照常跑完。
+            .with_extra(extra),
+            Some(cfg),
+        );
+    }
+    extra.insert("system_prompt_ok".into(), json!(true));
+
     if fell_back {
         // 样例配置能过形状校验，但 base_url / model 是空的，真机起飞用它必炸。
         // 不算 FAIL（CI 和这台机器上本来就只有样例），但必须显式说出来。
@@ -1427,7 +1525,7 @@ pub async fn run_checks(
     arm_redactor(redactor, &env_var_names(&AiteConfig::default()), env);
 
     let mut notes: Vec<Note> = Vec::new();
-    let (cfg_result, cfg) = check_config(&config_path, fell_back);
+    let (cfg_result, cfg) = check_config(&config_path, fell_back, &opts.repo_root);
     let mut checks = vec![cfg_result];
 
     let Some(cfg) = cfg else {
@@ -2125,7 +2223,7 @@ mod tests {
         let bad = root.path().join("bad.yaml");
         std::fs::write(&bad, "platform: 不存在的平台\n").expect("write");
 
-        let (r, cfg) = check_config(&bad, false);
+        let (r, cfg) = check_config(&bad, false, root.path());
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_none(), "读不出来就不该交出 config");
@@ -2134,6 +2232,136 @@ mod tests {
             "「怎么补」要把红线说出来：{}",
             r.fix
         );
+    }
+
+    /// [`DEFAULT_SYSTEM_PROMPT_PATH`] 必须和契约默认值对得上。
+    ///
+    /// 这个常量只在「怎么补」里露面 —— 它就是那句「该改成什么」。契约哪天把 prompt 挪了窝
+    /// 而这里没跟上，自检会一脸笃定地把人指到一个不存在的路径上，**而且没有任何别的测试
+    /// 会红**（第 1 组照样 FAIL、照样给 fix，只是那句 fix 是错的）。所以拿契约当唯一真值源
+    /// 钉一次。`config/aite.example.yaml` 里那一行由 `check_config_points_at_the_example`
+    /// 一起验，三处同源。
+    #[test]
+    fn prompt_default_matches_the_contract() {
+        assert_eq!(
+            DEFAULT_SYSTEM_PROMPT_PATH,
+            AiteConfig::default().worker.system_prompt_path,
+            "「怎么补」里那句「该改成什么」和契约默认值分家了"
+        );
+    }
+
+    /// 样例配置里那一行也得是同一个值 —— 「怎么补」把人指向样例，指错了就白指。
+    ///
+    /// 读的是仓库里的真文件（`CARGO_MANIFEST_DIR` 往上三层）。有人动了样例里的
+    /// `worker.system_prompt_path` 而没动这边，这条会红。
+    #[test]
+    fn check_config_points_at_the_example() {
+        let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join(EXAMPLE_CONFIG_PATH);
+        let text = std::fs::read_to_string(&example)
+            .unwrap_or_else(|e| panic!("读不到 {}：{e}", example.display()));
+        assert!(
+            text.contains(&format!("system_prompt_path: {DEFAULT_SYSTEM_PROMPT_PATH}")),
+            "{EXAMPLE_CONFIG_PATH} 里的 worker.system_prompt_path 和「怎么补」指的不是同一个值"
+        );
+    }
+
+    /// 第 1 组的新判据，纯函数这一层：prompt 指不到就是 FAIL，**但 config 要照常交出去**。
+    ///
+    /// 最后那半句才是容易写错的地方：yaml 读不懂时不交 config（后面六组没判据可谈），
+    /// 而这里配置本身是好的 —— 交不出去的话后面六组会全变成「第 1 组没过，配置读不出来」，
+    /// 「一项失败不阻断后面的」当场破功。端到端那一面钉在 `tests/preflight_e2e.rs`。
+    #[test]
+    fn check_config_fails_but_still_hands_over_the_config_when_the_prompt_is_missing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("aite.yaml");
+        std::fs::write(
+            &path,
+            "worker:\n  system_prompt_path: aite/worker/prompts/platform.md\n",
+        )
+        .expect("write");
+
+        let (r, cfg) = check_config(&path, false, root.path());
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
+        assert!(
+            r.detail.contains("worker.system_prompt_path"),
+            "{}",
+            r.detail
+        );
+        assert!(
+            r.fix.contains(DEFAULT_SYSTEM_PROMPT_PATH),
+            "「怎么补」里没有正确路径：{}",
+            r.fix
+        );
+        assert_eq!(r.extra["system_prompt_ok"], json!(false));
+    }
+
+    /// 相对路径按 `repo_root` 解析 —— 这条钉的是「两边口径一致」的那个接缝。
+    ///
+    /// `repo_root` 在真跑时就是进程 cwd（[`run`] 里 `current_dir()`），而
+    /// `require_system_prompt` 也是相对 cwd 读的。这里改成按别的什么解析（比如相对
+    /// 配置文件所在目录），preflight 就会在总管那台机器上说「行」而 `aite run` 说「不行」，
+    /// 或者反过来 —— 正是这一轨要根治的那个病。
+    #[test]
+    fn check_config_resolves_the_prompt_under_the_repo_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // 配置文件搁在子目录里：相对配置文件解析的话，下面这份 prompt 就找不到了。
+        let sub = root.path().join("etc");
+        std::fs::create_dir_all(&sub).expect("mkdir");
+        let path = sub.join("aite.yaml");
+        std::fs::write(
+            &path,
+            "worker:\n  system_prompt_path: prompts/platform.md\n",
+        )
+        .expect("write");
+        std::fs::create_dir_all(root.path().join("prompts")).expect("mkdir");
+        std::fs::write(root.path().join("prompts/platform.md"), "# 假 prompt\n").expect("write");
+
+        let (r, _cfg) = check_config(&path, false, root.path());
+
+        assert_eq!(r.status, Status::Ok, "{} / {}", r.detail, r.fix);
+        assert_eq!(
+            r.extra["system_prompt_resolved"],
+            json!(
+                root.path()
+                    .join("prompts/platform.md")
+                    .display()
+                    .to_string()
+            )
+        );
+    }
+
+    /// 「怎么补」要说破那条真实病史 —— 只有认出旧 Python 树时才说，别处不说。
+    ///
+    /// 两半都得钉：说破的那一半是给总管看的（他撞上的就是这一种，不说破他只看见一个
+    /// 路径不存在）；不说的那一半是防噪音 —— 路径明明不是那个还硬贴一段 2026-09-12 的
+    /// 病史，只会让人往错的方向查。
+    #[test]
+    fn the_fix_only_blames_the_deleted_python_tree_when_it_is_actually_to_blame() {
+        let stale = system_prompt_fix(
+            "aite/worker/prompts/platform.md",
+            Path::new("/repo/aite/worker/prompts/platform.md"),
+        );
+        assert!(stale.contains("2026-09-12"), "{stale}");
+        assert!(stale.contains(DELETED_PYTHON_PROMPT_DIR), "{stale}");
+
+        let typo = system_prompt_fix(
+            "prompts/platfrom.md",
+            Path::new("/repo/prompts/platfrom.md"),
+        );
+        assert!(
+            !typo.contains("2026-09-12"),
+            "路径不是旧 Python 树，不该往那儿带：{typo}"
+        );
+        assert!(typo.contains("工作目录"), "别的病因也得给一句：{typo}");
+        // 两种情况都要说清「该改成什么」，那是「怎么补」的本分。
+        for fix in [&stale, &typo] {
+            assert!(fix.contains(DEFAULT_SYSTEM_PROMPT_PATH), "{fix}");
+            assert!(fix.contains(EXAMPLE_CONFIG_PATH), "{fix}");
+        }
     }
 
     /// 对拍 Python 的 `test_missing_env_var_fails_and_names_it`：非 offline 下缺变量就是

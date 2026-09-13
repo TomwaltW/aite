@@ -133,12 +133,19 @@ aite contracts lock --check
 
 `aite preflight` 的七组：配置可加载 / 环境变量齐 / 飞书凭证有效 / 机器人身份对得上 /
 模型端点通 / 沙箱可用 / 落盘目录可写。任一 FAIL → 退出 1，**一项失败不阻断后面的**；
+第 1 组除了「yaml 解析得出来」，还验 `worker.system_prompt_path` **指到的文件真的在**
+（读不到是 FAIL —— 它是硬起飞前提，`aite run` 读不到就拒绝起飞）；
 `--offline` 只跑 1、2、7（不碰网络也不碰 docker，适合没凭证的机器；**CI 用的就是这一档**）。
 `--chat-id <测试群 chat_id>` 会顺带真调一次群历史，回答 spec §3.7(b) 那条待核实项。
 
 > ⚠️ **`--offline` 全绿不等于起得来**：它跳过第 5 组，而配置样例里 `model.base_url` /
 > `model.model` 是空的 —— 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2。
 > 真机起飞前那一遍必须不带 `--offline`。
+>
+> 另一个同族的口子 2026-09-12 当场咬过人，**现在补上了**：配置里的
+> `worker.system_prompt_path` 指着 2026-09-12 删掉的 Python 树（`aite/worker/prompts/`）时，
+> 七组当时没有一组碰它 —— preflight 报「可以起飞」，`aite run` 退出码 2。
+> 现在这一项归第 1 组，**`--offline` 下照样跑**（它不碰网络也不碰 docker）。
 >
 > ℹ️ **CI 里跑的是 `--offline` 这一档，而且只在 `compose-smoke` 那个 job 里**
 > （`.github/workflows/ci.yml:115-118`，命令是 `docker compose run --rm core preflight --offline`
