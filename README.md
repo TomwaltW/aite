@@ -114,6 +114,37 @@ make compose-config  # 只校验编排能不能解析，不打印取值
 两个 service 都配了日志轮转 `max-size 10m` / `max-file 5`：默认 json-file 驱动无上限，
 配上 `restart: unless-stopped`，崩溃循环时日志涨得很快。
 
+**两个容器以非 root 跑（2026-09-13 起）。Linux 上起飞前要多做两件事：**
+
+```bash
+mkdir -p data                                              # ① 先建出来，别让 dockerd 建
+AITE_UID=$(id -u) AITE_GID=$(id -g) \
+AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) \
+  docker compose up -d                                     # ② 三个变量传进去
+```
+
+- **① `mkdir -p data`** —— `data/` 不入库，不先建的话 bind mount 时由 dockerd 建成
+  `root:root 0755`，非 root 的容器当场写不进去（症状：`aite 起不来：建不出目录
+  data/evidence：Permission denied`，配 `restart: unless-stopped` 就是崩溃循环）。
+  先建出来它就归当前用户，与 `user:` 的取值对得上。
+- **② `AITE_UID` / `AITE_GID`** —— 镜像里的默认身份是 `1001:1001`，而 `./data` 是
+  bind mount、宿主机那边归**当前用户**，uid 每台机器都不一样，只能从宿主机传进来。
+  **两个 service 必须是同一个 uid**：它们互相 connect 对方的 unix socket，而 connect
+  要 socket 文件的写权限，socket 是 `srwxr-xr-x`、只有属主有写位。
+- **② `AITE_DOCKER_GID`** —— 只有 edge 用：它要读 `/var/run/docker.sock`。这个 gid
+  每台宿主机不一样（Linux 上一般是 `docker` 组，Docker Desktop 上是 0），**默认值 0
+  在 Linux 上是错的**。传错不是静默失败：`aite preflight` 第 6 组会 FAIL 并点名沙箱不可用。
+- **macOS 上这三条都不用管**：Docker Desktop 的 bind mount 过 VirtioFS，会双向翻译 uid
+  （容器里看见的是它自己的 uid，宿主机看见的是当前用户），`make compose-up` 照旧。
+  也正因为翻译，**macOS 上验不出这套东西对不对** —— 判据在 CI（Linux runner）那一侧。
+- 换了 `AITE_UID` 之后要 `docker compose down -v`：`run:` 那个命名卷是 sticky 的
+  （`1777`），上一个 uid 留下的残留 socket 新 uid 删不掉。会响，不是静默。
+
+> ℹ️ `make compose-up` **不传这三个变量**（`Makefile` 里那条 target 就是
+> `docker compose up -d`）。macOS 上没影响；Linux 上要么按上面那样手敲，要么先
+> `export AITE_UID=$(id -u) AITE_GID=$(id -g) AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)`
+> 再 `make compose-up`。
+
 > ⚠️ `docker compose config` 会把 `${VAR}` **解析成取值**再打出来，它的完整输出是带密钥的。
 > 要贴给别人用 `docker compose config --services`；要校验语法用 `make compose-config`，
 > 它已经是 `env -u` 清掉四个密钥变量之后再跑 `config -q` 的口径（与 CI 同源）。
@@ -171,8 +202,12 @@ yaml 解析得出来、`worker.system_prompt_path` **指到的文件真的在**�
 >   那一组问的是三个路径的最近已存在祖先**目录**写不写得进去，不是这个**文件**是不是个库。
 >
 > ℹ️ **CI 里跑的是 `--offline` 这一档，而且只在 `compose-smoke` 那个 job 里**
-> （`.github/workflows/ci.yml:115-118`，命令是 `docker compose run --rm core preflight --offline`
-> —— 在真镜像里跑，不是在 runner 上）。`checks` 那个 job 从 A1 到 B8 **没有 preflight**。
+> （`.github/workflows/ci.yml` 里那一步就叫「preflight --offline」，命令是
+> `docker compose run --rm core preflight --offline` —— 在真镜像里跑，不是在 runner 上）。
+> **刻意不写行号**：这两份文件已经在互指，再钉一个行号只会把「漂了不会红」的面翻倍
+> （同一条理由见 `ci.yml` 里引 README 那句的注释）。2026-09-13 这个行号就漂了一次
+> ——`compose-smoke` 前面插了「容器身份」那一步。
+> `checks` 那个 job 从 A1 到 B8 **没有 preflight**。
 > 原因是 `config/aite.yaml` 不入库，CI 得自己造一份，而造配置那一步本来就只有
 > `compose-smoke` 需要。
 
@@ -280,7 +315,7 @@ stdout 是「一份 JSON 摘要 + 最后一行 `passed k/10`」；全过退出 0
 A4 lint → A5 测试可编译 → C1 契约测试 → B 全量测试 → B go test `-race` →
 **B8 评测（硬门禁，要 `passed 10/10`）**。
 
-**`compose-smoke`**（timeout 25 分钟）—— 真把两个容器起起来，六步：
+**`compose-smoke`**（timeout 25 分钟）—— 真把两个容器起起来，九步：
 
 1. **双 service 可解析** —— `env -u` 清掉四个密钥变量再 `docker compose config --services`，
    断言正好是 `core edge`（沙箱那个 service 在 `images` profile 里，这里看不见它）。
@@ -289,24 +324,38 @@ A4 lint → A5 测试可编译 → C1 契约测试 → B 全量测试 → B go t
    一份：core 与 edge 读的是**同一个 `platform` 字段**，含义却相反 —— core 配 `fake` 直接
    拒绝起飞（所以 core 必须 `feishu`，且要把 example 里空着的 `base_url` / `model` 填上），
    edge 配 `feishu` + 假凭证会崩溃循环（所以 edge 必须 `fake`）。
-3. **两个镜像真编出来** —— `docker compose build`。这一步就是「rust 镜像里没 protoc」那条
+3. **容器身份** —— 两个容器以非 root 跑，所以 `AITE_UID` / `AITE_GID` 问 runner 自己
+   （`id -u` / `id -g`）、`AITE_DOCKER_GID` 问 `/var/run/docker.sock` 自己
+   （`stat -c '%g'`），**三个都是问出来的、不写死**；再 `mkdir -p data`，
+   否则 bind mount 时由 dockerd 建成 `root:root`，非 root 的容器写不进去。
+4. **两个镜像真编出来** —— `docker compose build`。这一步就是「rust 镜像里没 protoc」那条
    blocker 的门禁：protoc 缺了 `build.rs` 当场炸。沙箱镜像刻意不建（起飞与冒烟都不需要它）。
-4. **`preflight --offline`** —— `docker compose run --rm core preflight --offline`，
+5. **`preflight --offline`** —— `docker compose run --rm core preflight --offline`，
    在真镜像里跑（镜像的 `ENTRYPOINT` 就是 `aite`，命令里不用再写一遍）。
-5. **起飞冒烟：两个 socket 真连上** —— `up -d` 之后轮询两边 healthcheck 转 `healthy`
+6. **起飞冒烟：两个 socket 真连上** —— `up -d` 之后轮询两边 healthcheck 转 `healthy`
    （上限 40 × 3s），然后逐条断言：两个 socket 都在共享卷 `/app/data/run` 里、
    两个进程 cwd 都是 `/app`、运行层里**压根没有工具链**（`cargo` / `protoc` / `go` 都不在）、
    core 侧四行起飞日志（`edge.connected` / `aite.edge_status` / `ingress.listening` / `aite.up`，
    先剥 ANSI 再 grep —— `--no-color` 只关 compose 自己的行前缀，管不到应用吐的字节）、
    两个容器的 `RestartCount` 都是 0。
-6. **收干净** —— `always()` 跑 `down -v`，并断言 `label=aite.task` 的容器数是 0。
+7. **⑤ `./data` 的产物宿主机读得动** —— 打印每个产物的 `%u:%g %a`，**硬断言每个文件
+   `head -c1` 得动**。守的是权限位与 umask，跟 owner 是谁无关。
+8. **⑥ 宿主机往 `./data` 里写得进** —— 降权之后新增的承诺。两条硬判据：产物的 owner
+   必须是 runner 自己；宿主机真做得了「直跑 `aite run`」要做的三件事（建目录、建文件、
+   往 `data/aite.db` 里写）。
+9. **收干净** —— `always()` 跑 `down -v`，并断言 `label=aite.task` 的容器数是 0。
    （另有一条 `failure()` 才跑的步骤，把两边日志、`ps -a`、退出码与 `RestartCount`
    都打出来 —— 它不是判据，是红了之后不用重跑就能看现场。）
 
-> 第 5 步为什么值得单列：到 RΩ 合并前 compose 的门禁只有第 1 步那条纯解析，
+> 第 6 步为什么值得单列：到 RΩ 合并前 compose 的门禁只有第 1 步那条纯解析，
 > 而那次真 `up` 一撞就是四条 blocker（登录 shell 洗掉 PATH、rust 镜像里没 protoc、
 > cwd 不是仓库根、socket 落到非共享卷），**纯解析一条都抓不到** ——
 > 实测把 compose 退回坏的那一份，第 1 步退出码照样 0。
+>
+> 第 7、8 两步为什么不合并：它们守的是两件会**各自单独退化**的事。实测把两个 `user:`
+> 改回 `"0:0"`（= 容器退回 root）：第 8 步红并点名 `data/aite.db` / `data/evidence` /
+> `data/artifacts`，而**第 7 步照样绿**（0644 + 0755 对任何用户仍然开着读）。
+> 反过来把 `data/aite.db` 改成 0600：第 7 步红，第 8 步的 owner 那一半照样过。
 
 ## 已知边界
 

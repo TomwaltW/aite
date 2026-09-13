@@ -59,6 +59,14 @@
 >
 > **`<!-- 台账 -->` 的约定改了一条**：V5 那种「只修一半」的情形下，注释不删，改成
 > **只指仍未修的那一半**并写明归哪轨。整段删掉会把 V5 修对的那一半一起删了。
+>
+> **2026-09-13（AA1）：两个容器降权到非 root，只动 §0.2.5。**
+> compose 起飞多了三个环境变量与一个 `mkdir -p data`（Linux 上必须做，macOS 上不用），
+> W1 那张四行实测表加了第五行「宿主机写得进 `./data` 吗」。
+> **这一条修掉的是 §0.2 那条路上的一个真坑**：在这之前，Linux 上 compose 跑过一次
+> 之后宿主机直跑 `aite run` 会因为落盘目录归 root 而起不来
+> （实测 `preflight --offline` 第 `[7/7]` 组 `FAIL`、退出码 1）。
+> §0.1 / §0.3 与 M1–M6 的判据一个字没动。
 
 ---
 
@@ -390,7 +398,39 @@ AITE_EDGE_CONFIG=config/aite.ci-edge.yaml docker compose up -d
 > `git status` 里** —— 它是冒烟用的临时件，用完删掉。CI 那边同样是现造两份
 > （`.github/workflows/ci.yml:97-104`），checkout 里本来就没有配置。
 
-**healthcheck 两边判据不一样**（`docker-compose.yml:88-102` / `:131-149`）：
+**两个容器以非 root 跑（2026-09-13 起）。Linux 上起飞前要多做两件事：**
+
+```bash
+mkdir -p data                                              # ① 先建出来，别让 dockerd 建
+AITE_UID=$(id -u) AITE_GID=$(id -g) \
+AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) \
+AITE_EDGE_CONFIG=config/aite.ci-edge.yaml docker compose up -d
+```
+
+- **① `mkdir -p data`**：`data/` 不入库，不先建的话 bind mount 时由 dockerd 建成
+  `root:root 0755`，非 root 的容器写不进去 —— 实测症状是
+  `aite 起不来：建不出目录 data/evidence：Permission denied`，配 `restart: unless-stopped`
+  就是崩溃循环。先建出来它就归当前用户，与 `user:` 的取值对得上。
+- **② `AITE_UID` / `AITE_GID`**：镜像里的默认身份是 `1001:1001`（GitHub runner 的取值），
+  但 `./data` 是 bind mount、宿主机那边归当前用户，uid 每台机器都不一样，只能传进去。
+  **两个 service 必须解析出同一个 uid** —— 它们互相 `connect` 对方的 unix socket，而
+  `connect` 要 socket 文件的**写权限**，socket 是 `srwxr-xr-x`、只有属主有写位。
+  只降一个的形态**看着是健康的**（两边 healthcheck 都转 `healthy`）但实际是聋的：
+  实测 `edge.connected` / `aite.edge_status` 两行日志消失，core 打
+  `aite.edge_unreachable … Permission denied (os error 13)`。
+- **② `AITE_DOCKER_GID`**：只有 edge 用，它要读 `/var/run/docker.sock`。这个 gid 每台
+  宿主机不一样（Docker Desktop 上是 0，Linux 上一般是 `docker` 组），**默认值 0 在 Linux
+  上是错的**。传错不是静默失败：`aite preflight` 第 6 组 FAIL 并点名沙箱不可用。
+- **macOS 上这三条都不用管**，也**验不出来**：Docker Desktop 的 bind mount 过 VirtioFS，
+  会双向翻译 uid（本机实测：容器里看见的是它自己的 uid、宿主机看见的是当前用户），
+  换什么身份跑都写得进。判据在 CI（Linux runner）那一侧。
+- 换了 `AITE_UID` 之后要 `docker compose down -v`：`run:` 那个命名卷是 `1777`（sticky），
+  上一个 uid 留下的残留 socket 新 uid 删不掉。会响，不是静默。
+
+> `make compose-up` **不传这三个变量**。macOS 上没影响；Linux 上先 `export` 再 `make`。
+
+**healthcheck 两边判据不一样**（`docker-compose.yml` 里两个 `healthcheck:` 小节；
+**刻意不写行号** —— 2026-09-13 加 `user:` / `group_add:` 时这两个数就漂了一次）：
 
 - **edge** 探标准 gRPC health（`grpc-health-probe`，探针二进制烤在镜像里），
   与三个业务服务同一个 socket；
@@ -410,6 +450,7 @@ AITE_EDGE_CONFIG=config/aite.ci-edge.yaml docker compose up -d
 | 两个 socket | 都在命名卷 `run:` 里。**实测**：容器内 `/app/data/run/` 有 `aite-core.sock` + `aite-edge.sock`，宿主机 `data/run/` 是**空目录**（命名卷比 `./data` 那层 bind mount 更深，盖住了它）。**§0.2.3 那条 `ls data/run` 的判据在 compose 下不适用** |
 | 仓库还挂不挂 | **不挂了。** 挂载表只有两条 bind：`./config → /app/config`（ro）与 `./data → /app/data`（rw），外加 `run:` 命名卷。容器里 `/app` 只有 `config` / `core` / `data` / `evals` 四项，**没有 `README.md`、没有 `docs/`** —— `core/crates`（取 `platform.md`）和 `evals`（取场景 yaml）是镜像 build 时 `COPY` 进去的，**冻在镜像里**，改宿主机的仓库不会改到容器里跑的那份 |
 | `aite evidence show` 还在不在宿主机跑得了 | **照跑，结论没变，但理由换了** —— 靠的是 `./data:/app/data` 这条 bind mount，不是原来那条 `./:/app`。实测：容器写的 `data/aite.db` / `data/evidence` / `data/artifacts` 在宿主机上直接看得见，宿主机 `core/target/debug/aite evidence show --list` 读得到 |
+| 宿主机**写得进** `./data` 吗 | **2026-09-13 起写得进；在那之前写不进。** 容器降权之前两个进程都以 root 跑，Linux 上产物是 `root:root`（0755/0644）—— 读得动，但写不进、删不掉、也没法在 `./data` 里新建。真后果在 §0.2 那条路上：**compose 跑过一次之后，宿主机直跑 `aite run` 起不来**，实测 `aite preflight --offline` 第 `[7/7]` 组 `FAIL 落盘目录可写`、退出码 1。降权之后同一发是 `[7/7] OK`、退出码 0。两条都是 CI 的硬门禁（`compose-smoke` 的第 7、8 步），不是承诺 |
 
 ⚠️ **`docker compose exec` 不过 ENTRYPOINT。** 镜像的 `ENTRYPOINT` 是 `aite`，但那只对
 `run` 生效：`docker compose run --rm core preflight --offline` 能跑，而

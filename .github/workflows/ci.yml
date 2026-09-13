@@ -103,6 +103,30 @@ jobs:
           grep -E '^platform:|^  base_url:|^  model:' config/aite.yaml
           grep -E '^platform:' config/aite.ci-edge.yaml
 
+      # 2026-09-13（AA1）降权之后多出来的一步：把**宿主机这一侧**准备成跟容器身份对得上。
+      # 三个变量一个都不能省，而且**都是问出来的、不是写死的**：
+      #   · AITE_UID / AITE_GID —— 两个 service 的 `user:`。写死 1001 在今天的 runner 上
+      #     碰巧是对的，但 runner 换一版就漂了，而且这份 workflow 也该能在 self-hosted 上跑。
+      #   · AITE_DOCKER_GID —— 只有 edge 用：它要读 /var/run/docker.sock，那个 socket
+      #     在 Linux 上归 root:docker，docker 组的 gid 各机器不同。从 socket 自己问最准。
+      #     传错的后果：Ping 失败 → EdgeStatus.sandbox_ok false → preflight 第 6 组 FAIL。
+      # `mkdir -p data` 也不能省：data/ 不入库（.gitignore:11），checkout 里没有它，
+      # 不先建的话 bind mount 时由 dockerd 建成 **root:root 0755**，非 root 的容器当场
+      # 写不进去 —— 实测症状是 `aite 起不来：建不出目录 data/evidence：Permission denied`，
+      # 而且配 restart: unless-stopped 就是崩溃循环。先建出来它就归 runner，与 `user:` 对上。
+      - name: "容器身份：uid/gid 问 runner，docker 组 gid 问 socket，并把 ./data 先建出来"
+        run: |
+          set -euo pipefail
+          echo "runner: uid=$(id -u) gid=$(id -g) user=$(id -un)"
+          echo "docker.sock: $(stat -c '%u:%g %a' /var/run/docker.sock)"
+          {
+            echo "AITE_UID=$(id -u)"
+            echo "AITE_GID=$(id -g)"
+            echo "AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)"
+          } >> "$GITHUB_ENV"
+          mkdir -p data
+          stat -c '%u:%g %a %F %n' data
+
       # 这一步就是 blocker 2 的门禁：protoc 缺了 core/crates/proto/build.rs 当场炸。
       # 沙箱镜像（aite-sandbox:p0）刻意不建 —— 它是 R2 的验收面，而且 edge 只在真起任务时
       # 才 ImageInspect（docker.go:168-172），起飞与冒烟都不需要它。
@@ -161,26 +185,21 @@ jobs:
           test "$(docker inspect --format '{{.RestartCount}}' aite-core-1)" = 0
           test "$(docker inspect --format '{{.RestartCount}}' aite-edge-1)" = 0
 
-      # ⑤ 两个 Dockerfile 的运行层都没有 USER，两个进程都以 root 跑。这一步是那条账的
-      # **判据本身**，不是顺手加的一道校验 —— 它只在 Linux 上说得清：
-      #   · macOS 上验不出来：Docker Desktop 的 bind mount 过 VirtioFS，会把 uid 映射
-      #     回宿主用户（本机实测 owner 是当前用户 501:0，容器里明明是 root 建的）。
-      #     W1 报这条账时看的就是那一档，所以它只能写「Linux 未验证」。
-      #   · Linux 不映射，而 ./data 不入库（.gitignore 挡着 /data/）—— checkout 里
-      #     压根没有这个目录，bind mount 时由 dockerd 自己建，于是连挂载点都是
-      #     root:root 0755，core 落的 data/aite.db 是 root:root 0644。
+      # ⑤ 宿主机**读得动** ./data 里的产物。这一步是 W3 立的，**降权之后它没有变成
+      # 恒真断言**：它守的是权限位与 umask，跟 owner 是谁无关 —— 0644+0755 对任何用户
+      # 都开着读，0600 就不是了。本机实跑验过：把 data/aite.db 改成 0600，这一步红并点名它。
       #
-      # **该守的那条是「读得动」**：data/aite.db 就是证据链的主存
-      # （config 的 storage.sqlite_path），宿主机那条 `aite evidence show` 只需要读它。
-      # 0644 + 0755 对任何用户都开着读，所以这一步在现状下是绿的 —— 它红的那天说明
-      # 权限位或 umask 真的变了，那才是「宿主机拿不到自己的证据文件」。
+      # 它只在 Linux 上说得清：macOS 验不出来，Docker Desktop 的 bind mount 过 VirtioFS，
+      # 会把 uid **双向翻译**（本机实测：容器里看见的是它自己的 uid，宿主机看见的是当前
+      # 用户），换什么身份跑都写得进。W1 报这条账时看的就是那一档，所以它只能写
+      # 「Linux 未验证」。Linux 不翻译，这一步与下面的 ⑥ 才有判别力。
       #
-      # 写和删是另一回事：root 拥有 → 非 root 写不进、删不掉、也没法在 ./data 里新建。
-      # 只打印不判死（这一步不是安全基线门禁），那笔账连后果一起记在
-      # review/review-findings-2026-09-12-vmerge.md 的 W3 回执里。
+      # **owner 那一半归 ⑥**（2026-09-13 AA1）：两个 service 现在以 `user:` 里那个非 root
+      # 身份跑，产物应该归 runner 自己。⑤ 与 ⑥ 守的是两件事，别合并 ——
+      # 「读得动」是权限位的事，「写得进」是 owner 的事，各自能单独退化。
       #
       # ./data/run 要排掉：它是命名卷的挂载点，比 ./data 这条 bind 更深、盖住了它，
-      # 在 runner 上看是空目录，两个 socket 只在容器里看得见。
+      # 在 runner 上看是空目录（而且归 root —— 它由 dockerd 建），两个 socket 只在容器里看得见。
       - name: "⑤ ./data 的产物宿主机读得动（Linux 的 uid 不映射）"
         run: |
           set -euo pipefail
@@ -195,9 +214,54 @@ jobs:
             else echo "READ DENIED  $f"; bad=1; fi
           done
           test "$bad" = 0 || { echo "宿主机读不到自己的证据文件 —— ⑤ 那条账成真了"; exit 1; }
-          echo "---- 只记录不判死：宿主机往 ./data 里写得进去吗"
-          touch ./data/.w3-write-probe 2>/dev/null && echo "WRITE OK" || echo "WRITE DENIED（./data 归 root，见上面注释）"
-          mkdir -p ./data/.w3-mkdir-probe 2>/dev/null && echo "MKDIR OK" || echo "MKDIR DENIED（./data 归 root，见上面注释）"
+
+      # ⑥ 宿主机**写得进** ./data —— 2026-09-13（AA1）降权之后新增的承诺，配一道门禁。
+      #
+      # 为什么值得单列一步：W3 那一轮量出来的真后果不在读侧而在写侧 ——
+      # **Linux 上 compose 跑过一次之后，宿主机直跑 `aite run`（docs/acceptance-M.md §0.2
+      # 的口径）会因为落盘目录不可写起不来**。AA1 实测过那个形态：以非 root 身份对着
+      # root 拥有的 ./data 跑 `preflight --offline`，`[7/7] FAIL 落盘目录可写`、退出码 1。
+      # 降权把它修成了 `[7/7] OK`。没有门禁的承诺过两轮就会悄悄退回去，所以钉在这儿。
+      #
+      # 两条判据守的是两件不同的事，**都能被证伪，且证伪方式不一样**：
+      #   · OWNER —— 产物归不归 runner 自己。它直接钉「降权真的生效了」。
+      #     证伪：把 docker-compose.yml 里两个 `user:` 拿掉（或改成 "0:0"），容器退回
+      #     root，data/aite.db 就是 0:0，这一条当场红并点名那个文件。本机实跑验过。
+      #   · WRITE / MKDIR / APPEND —— 承诺本身。注意 **WRITE 与 MKDIR 单独挡不住退化**：
+      #     ./data 是上面那一步 `mkdir -p` 建的、本来就归 runner，容器退回 root 之后
+      #     在里面新建照样成功。真正接得住的是 **APPEND data/aite.db** —— 那个文件是
+      #     容器落的，root 落的就是 0644 root:root，runner 写不进去。三条都留着是因为
+      #     它们对应「宿主机直跑 aite run」要做的三件事：建目录、建文件、往库里写。
+      #
+      # ./data/run 同样排掉（命名卷挂载点，归 dockerd，不在这条承诺范围内）。
+      - name: "⑥ 宿主机往 ./data 里写得进（降权之后的新承诺）"
+        run: |
+          set -euo pipefail
+          me=$(id -u)
+          fail=0
+          echo "runner: uid=$me gid=$(id -g)"
+          echo "---- 硬判据 1：容器落的产物必须归 runner 自己"
+          for p in $(find ./data -not -path './data/run' -not -path './data/run/*'); do
+            o=$(stat -c '%u' "$p")
+            if [ "$o" = "$me" ]; then echo "OWNER  OK      $o  $p"
+            else echo "OWNER  WRONG   $o（期望 $me）  $p"; fail=1; fi
+          done
+          echo "---- 硬判据 2：宿主机真做得了「直跑 aite run」要做的三件事"
+          # aite.db 必须是 core 真落下来的那个文件 —— 不先确认它在，下面那条 `>>` 会
+          # 自己把它建出来，判据就成了恒真的（在 ./data 里建文件），接不住任何退化。
+          test -f ./data/aite.db \
+            || { echo "data/aite.db 不在 —— 起飞冒烟那一步没真跑起来，这一条无从判起"; exit 1; }
+          mkdir ./data/.aa1-mkdir-probe 2>/dev/null \
+            && echo "MKDIR  OK" || { echo "MKDIR  DENIED   在 ./data 里建不出目录"; fail=1; }
+          touch ./data/.aa1-write-probe 2>/dev/null \
+            && echo "WRITE  OK" || { echo "WRITE  DENIED   在 ./data 里建不出文件"; fail=1; }
+          (printf '' >> ./data/aite.db) 2>/dev/null \
+            && echo "APPEND OK      data/aite.db" \
+            || { echo "APPEND DENIED  data/aite.db —— 宿主机直跑 aite run 会死在建表那一步"; fail=1; }
+          rm -f ./data/.aa1-write-probe
+          rmdir ./data/.aa1-mkdir-probe 2>/dev/null || true
+          # 刻意不 fail-fast：两条判据接的是不同的退化，红了要一次看全
+          test "$fail" = 0 || { echo "降权那条承诺退回去了 —— 见上面 WRONG / DENIED 的行"; exit 1; }
 
       - name: "红了把两边日志都打出来"
         if: failure()
