@@ -802,3 +802,187 @@ k8s 滚动更新都会），进程就永远不退，只能等 `SIGKILL`。**这�
 5. **`platform: fake` / `provider: scripted` 那两个口子没补。** 它们和 ① 同形状，本来可以顺手
    一起折进第 ① 组，但那超出派单点名的范围，且要重新想「注入」这件事在 preflight 里怎么表达
    （preflight 没有 `Injections`）。记账，不自作主张。
+
+---
+
+## 九、Y1 回执 —— 2026-09-13
+
+第八节 ④ 那条记账**销了**：`StopSignal::set()` 的丢信号已上药，绷带拆掉，
+外加一条站在进程层的回归。
+
+### 基线与开场自检
+
+worktree 的 HEAD 是 `e733a2c`，不是派单抬头写的 `18f30b6`。差的那一格就是**出这两份派单本身**
+（`review/paste-Y1.md` + `paste-Y2.md`，575 行文档，零代码改动），`e733a2c^` 正是 `18f30b6`。
+当基线用，不是回归。
+
+`scripts/check.sh` 开场：`OK 25 files`、`contracts passed=25 failed=0`、go 六个包全 `ok`、
+`passed 10/10` 都对上；**`cargo passed=817 failed=1`**，退出码 1。
+Read `.claude/hooks/guard_bash.py` 被守卫拦下 ✅。
+
+### 开场那条假红是新信息 —— 而且就是本轨要治的那条病
+
+派单说这三个抖动 target「现在应该是不抖的」。撞到了 `graceful_shutdown`，查清楚了：
+
+* 红的是 `stop_with_nothing_running_returns_at_once`，panic 在当时的 `common/mod.rs:566`
+  （`shutdown_within` 的超时分支），**实际等满 2.0s** —— 挂死，不是慢。
+* 病根同一条，但**绷带没盖到它**：X1 那个重试循环加在 `RunningApp::shutdown()` 里，
+  而这条用例走的是 `shutdown_within(2.0)`，那条路上是**裸的一句 `self.stop.set()`**。
+* 单独跑 5 遍全绿（按判据算假红）；8 路并发 48 遍复现 1 遍。
+* ① 上药之后：8 路并发 **120 遍红 0**。
+
+也就是说 X1 报的「startup_recovery 已兜住」是真的，但同一条病还从第二个入口漏着。
+
+### ① 选了 `send_replace`，为什么
+
+两条都写出来跑过 `tests/signals.rs` 那四条单元断言，**结果逐字相同**（4 passed，0.00s）：
+`is_set()` / `wait()` 在「`set()` 早于订阅」和「`set()` 晚于订阅」两种时序下行为一致，
+`send_replace` 不会把「后到的 `set()` 叫醒等待者」那条弄坏。所以分辨依据不在行为上。
+
+分的是**这条正确性挂在哪儿**，而且这条有实证：路 (b)（`new()` 里留一个 `rx`）的全部效力
+都来自那个 `_keepalive` 字段 —— 把它删掉、`rx` 改回 `_rx`，代码**逐字回到基线**，
+也就是同样那 3 条红。一个「看起来完全没用、review 时最容易被顺手清理掉」的字段扛着
+整条真机退出路径，而且删掉之后是**静默**复活。路 (a) 的正确性写在调用点本身，没有这种东西。
+
+顺带核的三处（改完口径一致）：
+
+* `is_set()` 读 `*self.tx.borrow()` —— 上药之后它才真的能反映「置过了」（基线上它恒为 false）。
+* `wait()` 的 `borrow_and_update()` 早退分支 —— `set()` 先发生时实测立刻返回（0.00s）。
+* `install_signal_handlers` 第二次信号硬退那条路 —— `stop.set(); continue;` 之后直接
+  `eprintln!` + `std::process::exit`，**不读 `set()` 的返回值**，与这次改动无关。
+
+### ② 两层回归（`core/crates/app/tests/signals.rs`，新建，+5）
+
+**(a) 单元层四条**：`set()` 在任何订阅者出现之前必须算数；`set()` 先发生时 `wait()` 必须立刻返回；
+`set()` 后到时 `wait()` 必须被叫醒；`Clone` 的各份共用一个开关。
+「等的那条已经进去了」用 oneshot 报告，不睡固定时长。
+
+**(b) 进程层一条** `sigterm_before_serve_still_exits_by_itself`：起真 `aite` 二进制
+（`CARGO_BIN_EXE_aite`），在它走到 `serve()` 之前发 `SIGTERM`，断言它**自己**退出、退出码 0。
+
+时序钩子（这是这条最难的部分，没用任何固定 sleep）：窗口 `install_signal_handlers` → `serve()`
+真机上只有 ~25ms，所以拿一把**外部 SQLite 写锁**把它撑开 ——
+
+```text
+父：BEGIN EXCLUSIVE 持住 sqlite_path        ← 窗口撑开
+子：build_app → install_signal_handlers → 打 aite.signal_ready
+子：store.init() 建表撞 SQLITE_BUSY，卡在 busy_timeout 的重试里（aite.up 打不出来）
+父：等到 aite.signal_ready → SIGTERM → 等到 aite.signal（handler 已跑完 set()）
+父：ROLLBACK 放锁                            ← 窗口关上
+子：init 成功 → aite.up → … → serve()
+```
+
+为此在 `install_signal_handlers` 里补了一行 `aite.signal_ready`（`run.rs:484`）。
+它不是只为测试加的：装不上时打 `aite.signal_unavailable`，**装上了却从头到尾不吭声** ——
+真机上「进程收到 SIGTERM 不退」时第一个该问的问题（handler 到底装上没有），
+日志原来答不了。
+
+测试自带一条**防假绿**的自检：`aite.signal` 必须出现在 `aite.up` **之前**，
+两处断言 + 末尾再核一次顺序。信号来晚了就报「测了个寂寞」，不会悄悄通过。
+
+**两条都做了「改坏 → 必须红」**（把 `set()` 退回 `let _ = self.tx.send(true)`）：
+
+```text
+test set_counts_even_with_no_subscriber_yet ... FAILED
+test clones_share_one_switch ... FAILED
+test wait_returns_at_once_when_set_happened_first ... FAILED
+test sigterm_before_serve_still_exits_by_itself ... FAILED
+test wait_wakes_up_when_set_happens_later ... ok        ← 有订阅者那条本来就不受影响
+test result: FAILED. 1 passed; 4 failed; finished in 25.78s
+```
+
+(b) 退回去时**真的挂住**了，撞穿 20s 死线而不是通过。那一遍的子进程日志原样：
+
+```text
+aite.signal_ready SIGINT / SIGTERM 已接管，走优雅退出
+aite.signal 收到，开始优雅退出（再来一次立即硬退）  signal="SIGTERM"
+aite.up  platform=feishu model=signals-e2e …
+ingress.listening socket=…/run/c.sock
+edge.capabilities_unavailable …
+（到此为止。aite.stopping 一个字都没有）
+```
+
+`aite.stopping` 没打 = `shutdown()` 第一行都没到 = 卡在 `serve()`，
+和 X1 抓到的死锁特征逐字吻合，也就是真机上那个「只能 `SIGKILL`」。
+
+新测试自身不抖：8 路并发 24 遍红 0。单条 5.73s，其中约 4s 是 `build_app` 在 edge 不可达时
+那 5 次 `GetStatus` 重试，既有行为。
+
+### ③ 拆绷带之后的数
+
+`RunningApp::shutdown()` 里那个「重试 `set()` 直到 `is_set()`」的循环连同指向病根的
+34 行注释一起删掉，现在就是一句 `self.shutdown_within(SHUTDOWN_FALLBACK_SEC).await`。
+
+`orphans_are_closed_before_the_platform_starts`，**8 路并发 120 遍**：
+
+| 状态 | 红几遍 |
+|---|---|
+| 拆绷带 + 病还在（把 ① 退回去） | **4 / 120（3.3%）**，全部是 `shutdown_within` 撞穿 10s |
+| 拆绷带 + 上药 | **0 / 120** |
+| `stop_with_nothing_running_returns_at_once`（开场那条）+ 上药 | **0 / 120** |
+
+对照组这一栏是特意跑的：不跑它，「红 0」就只是「今天没撞上」。
+抖动率比 X1 报的 12.5% 低（同样 24 遍那一轮我这边红 0，跑满 120 遍才见到 4 遍），
+机器负载不同，**病的存在与否是确定的，频率不是**。
+
+另两处按派单复核：
+
+* `SHUTDOWN_FALLBACK_SEC` **维持 10s**，同意 X1 不放大。理由改写过：原文把「放大没用」
+  挂在丢信号那条病上，那条已经没了；现在的理由与病因无关 —— 收尾实测 0.1–0.4ms，
+  10s 已是两个数量级的余量，撞穿只可能是挂死，而挂死等多久都不返回。
+* `shutdown_within` 那句 panic 的**位置判据仍然成立**（停在 `aite.stopping` 之前 = 卡在
+  `serve()`，之后 = 收尾里某一步），它与病因无关，留着。但删掉了「60s 也照样等满，本轨实测」
+  那半句（那是有病时测的，现在没有依据），并补了一句**新的排障信息**：这一种
+  不再可能是 `StopSignal` 丢信号，该往 `takeoff()` 里 `serve()` 之前那几步查。
+
+### ④ `watch` 的 send 家族全仓清单
+
+| 位置 | 有接收者保证？ | 丢返回值会怎样 | 改了没 |
+|---|---|---|---|
+| `core/crates/app/src/run.rs:91` `StopSignal::set()` | **没有** —— `new()` 当场丢 `_rx`，唯一订阅在 `serve()` | 信号被吃、值都不改 → 进程收到 SIGTERM 永不退出 | **改了**（`send_replace`） |
+| `core/crates/control/tests/support/mod.rs:258` `ParkedSleep` 的 `parked.send(true)` | **没有** —— `new()` 里同样是 `let (tx, _rx) = watch::channel(false)`，**与病根同一个形状** | `as_sleep` 的闭包先跑到 `send(true)` 时值不更新，后到的 `wait_until_parked()` 的 `wait_for` 永远等 → 用例挂死 | **没改，记账**（`core/crates/control/**` 只读面） |
+| `core/crates/edge-client/src/ingress.rs:121` `running.shutdown.send(())` | 是 `oneshot` 不是 `watch`；接收者是 `serve_with_incoming_shutdown` 里的 `wait.await` | server 已自行结束时才会 `Err`，那时本来就该停 —— **忽略是对的** | 不用改 |
+| `core/crates/edge-client/tests/common/mod.rs:150` 同形状 | 同上 | 同上 | 不用改 |
+
+判断依据：**`watch` 才有「零接收者时连值都不改」这条陷阱**，`oneshot` 的 `Err` 只说明对端没了。
+所以分界不是「返回值有没有被丢」，而是「这个 channel 的值本身是不是要被别人事后读」——
+`watch` + 有人读 `borrow()` / `wait_for()` = 必须保证写进去，`oneshot` 的一次性通知不吃这条。
+`preflight.rs` / `models/src/lib.rs` 里那几个 `.send()` 是 `reqwest` 的，无关。
+
+### 测试数
+
+`cargo passed=818 → 823`（+5，全在新建的 `tests/signals.rs`），`failed=0`。
+`OK 25 files`、`contracts passed=25 failed=0`、go 六包全 `ok`、`passed 10/10`，
+`scripts/check.sh` **全部通过，退出码 0**。冻结面一个字没动。
+
+### 要总管 / Y2 落的文档改动（本轨没改，文档面归 Y2）
+
+两处都**不是错字**，是「病治好之后才配这么写」的边界补充：改之前那两句在起飞半路收到信号时
+是假的（第一次 `SIGTERM` 什么也不会发生），现在才成立。
+
+| 文件 | 现在的原文 | 建议改成 |
+|---|---|---|
+| `README.md:119` | 停机：`SIGTERM` 走优雅退出（停投递 → 等在跑的任务善终，宽限 20s → 还沙箱 → 关库），退出码 0；**再来一次**信号立刻硬退，退出码 130。 | 同前，句末加一句：**起飞还没走完时收到也算数**（compose 的 `stop_grace_period`、k8s 滚动更新都会这么来）—— 信号会被记住，起飞一走完立刻进收尾。回归见 `core/crates/app/tests/signals.rs`。 |
+| `docs/acceptance-M.md` M6 第 2 步 | **停掉要重启的那个**（Ctrl-C，或 `kill <pid>`；SIGTERM 走同一条优雅退出路径）。 | 同前，补一句：**刚起飞就按也可以**，不必等 `aite.up` 出来 —— 信号落在起飞半路照样走优雅退出（2026-09-13 之前不是这样：那时会卡住，第 3 步的 `pgrep` 一直能看到它）。 |
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/control/tests/support/mod.rs:229`+`:258` `ParkedSleep` | 与本轨病根**同一个形状**的 `watch` 丢信号：`new()` 丢 `_rx` + `let _ = parked.send(true)`。闭包先于 `wait_until_parked()` 跑到时，`wait_for` 永远等，用例挂死。目前没见它抖，但窗口是真的 | 下一轮（`core/crates/control/**` 只读面）。药同样是 `send_replace(true)` |
+| `.claude/hooks/guard_bash.py` 的 `PROBES` | X1 记过、**本轨又撞两次**：正文里带 `**`（markdown 加粗）的 heredoc 会被反向匹配成已删的 `aite/contracts/__init__.py`；带中文引号的 `python3 -c` 被判「引号配不平」。两次都换写法绕开了。`review/v6-guard-patch.py` 只有人能跑，至今没跑 | 总管（跑一次那个补丁） |
+
+### 没做的 / 拿不准的
+
+1. **`aite run` 在 edge 完全没起来时也能起飞到 `serve()`** —— 这是做 ②(b) 时实测出来的，
+   本来以为要起假 edge：`platform.start()` 里只有 `ingress.start()`（本地监听）是硬要求，
+   能力表问不到只 warn 一行，`check_contract_version` 等满 5 次也照常返回 `Ok`。
+   合 §2.1「启动顺序无关」，**不是 bug**，但没有任何文档或测试写过这件事，
+   而进程层这条回归现在**依赖**它。值得让总管确认是不是要把它写进 spec 的既有行为里。
+2. **`SUN_LEN` 是这条进程层回归的隐性前提。** socket 路径超过 104 字符时
+   `EdgeClient::connect` 会失败。`tempfile::tempdir()` 在 macOS 的 `TMPDIR` 下实测 65 字符，
+   够用；换到 CI 上某些长 `TMPDIR` 会炸在那里（症状明确，不会静默变味）。
+3. **两条路的等价性只验到行为层，没验到 `receiver_count` 那一层** —— `tx` 是私有的，
+   测试拿不到计数。结论「两条行为一致」立在四条单元断言 + 全量 823 条上，
+   不是立在对 tokio 内部实现的推理上。
+4. **没碰 `core/crates/app/src/cli.rs`**（两轨都只读，归总管）。本轨没有要改它的地方。
