@@ -251,13 +251,35 @@ fn write_config(root: &Path, model_base_url: &str) -> String {
     write_config_with_prompt(root, model_base_url, &write_prompt(root))
 }
 
-/// 同上，但 `worker.system_prompt_path` 由调用方说了算 —— 第 1 组那条新判据要拿它造病。
+/// 同上，但 `worker.system_prompt_path` 由调用方说了算 —— 第 1 组那条 prompt 判据要拿它造病。
 fn write_config_with_prompt(root: &Path, model_base_url: &str, prompt_path: &str) -> String {
+    write_config_full(root, model_base_url, prompt_path, "feishu", "openai_compat")
+}
+
+/// 同上，但 `platform` / `model.provider` 由调用方说了算 —— 第 1 组那条**注入**判据
+/// （`platform: fake` / `provider: scripted` 只能被注入着用）要拿它造病。
+fn write_config_with_choices(
+    root: &Path,
+    model_base_url: &str,
+    platform: &str,
+    provider: &str,
+) -> String {
+    let prompt = write_prompt(root);
+    write_config_full(root, model_base_url, &prompt, platform, provider)
+}
+
+fn write_config_full(
+    root: &Path,
+    model_base_url: &str,
+    prompt_path: &str,
+    platform: &str,
+    provider: &str,
+) -> String {
     let path = root.join("aite.yaml");
     let text = format!(
-        "platform: feishu\n\
+        "platform: {platform}\n\
          model:\n  \
-           provider: openai_compat\n  \
+           provider: {provider}\n  \
            base_url: {model_base_url}\n  \
            model: fake-model\n\
          worker:\n  \
@@ -268,6 +290,41 @@ fn write_config_with_prompt(root: &Path, model_base_url: &str, prompt_path: &str
            artifacts_dir: data/artifacts\n\
          edge:\n  \
            edge_socket: run/nowhere-aite-edge.sock\n"
+    );
+    std::fs::write(&path, text).expect("写 config");
+    path.display().to_string()
+}
+
+/// 对拍专用：`storage.*` 与 `worker.system_prompt_path` 全写**绝对路径**。
+///
+/// 上面那几个 helper 写的是相对路径，preflight 按 `Options.repo_root`（= tempdir）解析，
+/// 落点干净。但 `build_app` 那一侧不一样：`prepare_storage` 拿的是**裸相对路径**
+/// （`Path::new(&cfg.evidence_dir)`，相对进程 cwd），`require_system_prompt` 也是相对 cwd ——
+/// 直接把上面那份喂给 `build_app`，`data/` 会建到 `core/crates/app/` 底下去，
+/// 撞上整轨那条硬约束「一个字节都不许写进仓库的 `data/`」。所以对拍这一档全用绝对路径。
+fn write_config_absolute(root: &Path, platform: &str, provider: &str) -> String {
+    let prompt = root.join("prompts/platform.md");
+    std::fs::create_dir_all(prompt.parent().expect("有父目录")).expect("建 prompts 目录");
+    std::fs::write(&prompt, "# 假 system prompt\n").expect("写 prompt");
+    let path = root.join("aite.yaml");
+    let text = format!(
+        "platform: {platform}\n\
+         model:\n  \
+           provider: {provider}\n  \
+           base_url: http://127.0.0.1:1/v1\n  \
+           model: fake-model\n\
+         worker:\n  \
+           system_prompt_path: {}\n\
+         storage:\n  \
+           sqlite_path: {}\n  \
+           evidence_dir: {}\n  \
+           artifacts_dir: {}\n\
+         edge:\n  \
+           edge_socket: run/nowhere-aite-edge.sock\n",
+        prompt.display(),
+        root.join("data/aite.db").display(),
+        root.join("data/evidence").display(),
+        root.join("data/artifacts").display(),
     );
     std::fs::write(&path, text).expect("写 config");
     path.display().to_string()
@@ -455,6 +512,252 @@ async fn the_system_prompt_row_still_runs_offline() {
     // 3/4/5/6 该跳的还跳 —— 这一项跑起来不是靠把 offline 那半边的 skip 拆了。
     assert_eq!(status_of(&report, "model"), Status::Skip, "{text}");
     assert_eq!(status_of(&report, "sandbox"), Status::Skip, "{text}");
+}
+
+// ===========================================================================
+// 第 1 组的注入判据（`platform: fake` / `model.provider: scripted`）
+// ===========================================================================
+
+/// `platform: fake` → 第 1 组 FAIL，第 2/3/4 组 SKIP，后面照跑。
+///
+/// **病史（这条测试守的就是它）**：2026-09-13 总管拿一份 `platform: fake` 的配置跑
+/// `aite preflight --offline`，得到「全部没红，可以起飞。」退出码 0；紧接着 `aite run`
+/// 退出码 2（`build_app` 明文拒绝：fake 必须由调用方注入平台实现）。与 prompt 那条
+/// **同形状**：七组里没有一组问「这个取值自己起得来吗」。
+///
+/// 同一份配置还暴露了第二件事：它照样在要飞书凭证（第 2/3/4 组全红），而 **fake 平台
+/// 压根不连飞书** —— 判据对它毫无意义。所以这一档下那三组 SKIP。
+///
+/// 五件事一起钉住：
+/// 1. **FAIL 而不是 WARN** —— `aite run` 那边是硬拒绝，退出码 2，不是「能飞但有风险」。
+/// 2. `report.ok()` 为假 —— 退出码 1 的判据（进程级那条在 `cli_smoke.rs`）。
+/// 3. **2/3/4 组 SKIP，且理由写在那一行里**（不是默默跳过，口径照 `--offline：不碰网络`）。
+/// 4. 「怎么补」三件事齐：当前值、该改成什么、以及 fake 是留给谁用的。
+/// 5. **后面几组照跑**：第 1 组红了不阻断后面的（模块头第三条规矩）。
+#[tokio::test]
+async fn a_fake_platform_fails_the_first_row_and_skips_the_feishu_rows() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let stub = Stub::start(&happy_routes(FAKE_OPEN_ID)).await;
+    let cfg = write_config_with_choices(
+        root.path(),
+        &format!("{}/v1", stub.base),
+        "fake",
+        "openai_compat",
+    );
+
+    let (report, text, raw_json) =
+        run(&opts(root.path(), cfg, stub.base.clone()), &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(!report.ok(), "fake 起不来，退出码就该是 1：{text}");
+
+    let row = row_for(&text, "配置可加载");
+    assert!(row.contains("platform=fake"), "没点名是哪个取值：{row}");
+    assert!(
+        row.contains("注入") && row.contains("aite run"),
+        "没说清病在哪（要注入，而 aite run 不注入）：{row}"
+    );
+
+    let fix = text
+        .lines()
+        .find(|l| l.contains("怎么补") && l.contains("platform"))
+        .unwrap_or_else(|| panic!("第 1 组没给「怎么补」：\n{text}"));
+    // 连右括号一起断：光断 `contains("feishu")` 的话，把常量敲成 `feishuu` 也照样绿。
+    assert!(
+        fix.contains("改成 feishu（"),
+        "「怎么补」里没说该改成什么，照着做修不好：{fix}"
+    );
+    assert!(
+        fix.contains("评测") && fix.contains("§3.1"),
+        "「怎么补」里没说 fake 是留给谁用的：{fix}"
+    );
+
+    // 2/3/4 组：SKIP，且各自那一行要说得出为什么。
+    for (name, title) in [
+        ("env", "环境变量齐"),
+        ("feishu_token", "飞书凭证有效"),
+        ("feishu_identity", "飞书身份对得上"),
+    ] {
+        assert_eq!(status_of(&report, name), Status::Skip, "{title}：{text}");
+        assert!(
+            row_for(&text, title).contains("platform=fake"),
+            "{title} 默默跳过了，没说为什么：{text}"
+        );
+    }
+
+    // 一项失败不阻断后面的：七行齐，第 5/7 组照跑（第 6 组连的是不存在的 socket，必红）。
+    assert_eq!(rows(&text).len(), 7, "{text}");
+    assert_eq!(status_of(&report, "model"), Status::Ok, "{text}");
+    assert_eq!(status_of(&report, "storage"), Status::Ok, "{text}");
+
+    // 飞书那三组是 SKIP 而不是「查了没查出问题」：飞书那几个端点一发都不许出去。
+    // （第 5 组的 `/v1/chat/completions` 不在此列 —— 模型跟 platform 取值无关，照跑。）
+    let feishu_hits: Vec<String> = stub
+        .hits()
+        .into_iter()
+        .filter(|p| p.starts_with("/open-apis/"))
+        .collect();
+    assert!(
+        feishu_hits.is_empty(),
+        "fake 平台不该碰飞书，却发了：{feishu_hits:?}"
+    );
+
+    let json: Value = serde_json::from_str(&raw_json).expect("--json 必须是 JSON");
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["checks"][0]["status"], "fail");
+    assert_eq!(json["checks"][0]["extra"]["needs_injection"], true);
+}
+
+/// `model.provider: scripted` → 同一处判断、同一种收场，但**不碰飞书那三组**。
+///
+/// 分两半钉：scripted 是模型那一侧的事，`platform` 还是 `feishu`，所以第 2/3/4 组
+/// 该跑照跑 —— 把 SKIP 的条件写成「第 1 组红了就跳」会让这条红。
+///
+/// 第 5 组那句 WARN（`provider=scripted，没有真端点可探`）是**另一件事**、不冲突：
+/// 它管「端点通不通」，第 1 组管「这份配置起不起得来」。两条并存，各说各的本分。
+#[tokio::test]
+async fn a_scripted_model_provider_fails_the_first_row_but_leaves_feishu_alone() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let stub = Stub::start(&happy_routes(FAKE_OPEN_ID)).await;
+    let cfg = write_config_with_choices(
+        root.path(),
+        &format!("{}/v1", stub.base),
+        "feishu",
+        "scripted",
+    );
+
+    let (report, text, _) = run(&opts(root.path(), cfg, stub.base.clone()), &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(!report.ok(), "{text}");
+    let row = row_for(&text, "配置可加载");
+    assert!(
+        row.contains("model.provider=scripted") && row.contains("注入"),
+        "{row}"
+    );
+    let fix = text
+        .lines()
+        .find(|l| l.contains("怎么补") && l.contains("model.provider"))
+        .unwrap_or_else(|| panic!("第 1 组没给「怎么补」：\n{text}"));
+    assert!(
+        fix.contains("改成 openai_compat（") && fix.contains("§3.1"),
+        "「怎么补」缺「该改成什么」或「留给谁用的」：{fix}"
+    );
+
+    // platform 还是 feishu：那三组照跑，一组都不许跳。
+    assert_eq!(status_of(&report, "env"), Status::Ok, "{text}");
+    assert_eq!(status_of(&report, "feishu_token"), Status::Ok, "{text}");
+    assert_eq!(status_of(&report, "feishu_identity"), Status::Ok, "{text}");
+    // 第 5 组照旧给它那句 WARN，不被第 1 组抢走。
+    assert_eq!(status_of(&report, "model"), Status::Warn, "{text}");
+    assert_eq!(rows(&text).len(), 7, "{text}");
+}
+
+/// 两个取值都正常时**一个字都不变** —— 新判据不许误伤好配置。
+///
+/// `every_row_but_the_sandbox_is_green_when_the_upstreams_answer` 已经覆盖了全绿这一档，
+/// 这条单钉那个 `extra` 字段：判据写成「只要有 platform 字段就 FAIL」之类的蠢样子，
+/// 上面那条也会红，但这条能一眼指出病在注入判据上。
+#[tokio::test]
+async fn a_normal_config_does_not_trip_the_injection_check() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let stub = Stub::start(&happy_routes(FAKE_OPEN_ID)).await;
+    let cfg = write_config_with_choices(
+        root.path(),
+        &format!("{}/v1", stub.base),
+        "feishu",
+        "openai_compat",
+    );
+
+    let (report, text, raw_json) =
+        run(&opts(root.path(), cfg, stub.base.clone()), &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Ok, "{text}");
+    let json: Value = serde_json::from_str(&raw_json).expect("--json 必须是 JSON");
+    assert_eq!(json["checks"][0]["extra"]["needs_injection"], false);
+}
+
+/// 注入判据在 `--offline` 下**照样跑** —— 这是它最要紧的地方。
+///
+/// 总管两次撞上「全绿而起不来」跑的都是 `--offline`。第 5 组那句 WARN 救不了 scripted
+/// 这一档（`--offline` 把第 5 组整个跳了），所以判据必须落在第 1 组、且与 offline 无关。
+/// 谁哪天图省事把它挪进「非 offline 才跑」的那半边，上面两条仍然全绿，只有这条会红。
+#[tokio::test]
+async fn the_injection_rows_still_run_offline() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = write_config_with_choices(root.path(), "http://127.0.0.1:1/v1", "fake", "scripted");
+    let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    let (report, text, _) = run(&o, &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(!report.ok(), "--offline 下也该是退出码 1：{text}");
+    // 两条都犯了就**一次报齐**，别让人改完一条重跑才发现还有一条。
+    let row = row_for(&text, "配置可加载");
+    assert!(
+        row.contains("platform=fake") && row.contains("model.provider=scripted"),
+        "两条只报了一条：{row}"
+    );
+    assert_eq!(rows(&text).len(), 7, "{text}");
+}
+
+/// **两边口径对拍**：第 1 组拒绝的那份配置，真 `build_app` 也必须拒绝。
+///
+/// prompt 那条判据是靠**复用同一个函数**（`load_system_prompt`）保证两边一致的；注入这条
+/// 没有函数可复用（判据是两个不等式），所以改用**行为对拍**：同一份 yaml，preflight 读它
+/// 说 FAIL，`build_app` 读它必须 `StartupError`。哪天 `app.rs` 那两条改了口径而
+/// `preflight.rs` 没跟上，这条会红。
+///
+/// 顺带钉住 [`injection_fault`] 依赖的那条前提：**`aite run` 不注入任何实现**。这里传的
+/// 就是 `Injections::default()`（`cli.rs` 里那个唯一的 `build_app` 调用点传的也是它），
+/// 哪天真给 `aite run` 加了注入开关，preflight 这条判据的地基就塌了 —— 那时候该红的是这条。
+///
+/// `scripted` 那一档会先去连 edge（`check_contract_version` 最多 5 次、每次隔 1s），
+/// 所以它比别的测试慢几秒 —— 那是产品代码的重试预算，不是这里在 sleep。
+#[tokio::test]
+async fn build_app_really_refuses_what_the_first_check_refuses() {
+    for (platform, provider, keyword) in [
+        ("fake", "openai_compat", "platform=fake"),
+        ("feishu", "scripted", "model.provider=scripted"),
+    ] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg_path = write_config_absolute(root.path(), platform, provider);
+
+        // preflight 这一侧：第 1 组 FAIL。
+        let mut o = opts(
+            root.path(),
+            cfg_path.clone(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        o.offline = true;
+        let (report, text, _) = run(&o, &full_env()).await;
+        assert_eq!(
+            status_of(&report, "config"),
+            Status::Fail,
+            "preflight 放行了 {platform}/{provider}：{text}"
+        );
+        assert!(row_for(&text, "配置可加载").contains(keyword), "{text}");
+
+        // build_app 那一侧：同一份配置，必须拒绝起飞。
+        let config = aite_app::load_config(&cfg_path).expect("配置本身是好的");
+        let outcome = aite_app::build_app(
+            config,
+            aite_app::Injections {
+                repo_root: Some(root.path().to_path_buf()),
+                ..aite_app::Injections::default()
+            },
+        )
+        .await;
+        let err = match outcome {
+            Ok(_) => panic!("preflight 说 {platform}/{provider} 起不来，build_app 却放行了"),
+            Err(e) => e,
+        };
+        assert!(
+            err.0.contains(keyword) && err.0.contains("注入"),
+            "两边说的不是同一件事：{err}"
+        );
+    }
 }
 
 /// 对拍 Python 的 `test_every_check_still_runs_when_feishu_is_unreachable`：

@@ -986,3 +986,211 @@ edge.capabilities_unavailable …
    测试拿不到计数。结论「两条行为一致」立在四条单元断言 + 全量 823 条上，
    不是立在对 tokio 内部实现的推理上。
 4. **没碰 `core/crates/app/src/cli.rs`**（两轨都只读，归总管）。本轨没有要改它的地方。
+
+## 十、Y2 回执 —— 2026-09-13
+
+基线 `e733a2c`（= `18f30b6` 的代码面 + 一个只加 Y1/Y2 两份派单文件的 commit）。派单写的基线是
+`18f30b6`，对不上是因为它写的是**它自己被提交之前**那一格；`git diff --stat 18f30b6..e733a2c`
+只有 `review/paste-Y1.md` / `review/paste-Y2.md` 两个文件、575 行全是新增，代码面逐字同格，
+所以 check.sh 的期望值照样适用。没停机。
+
+开场自检与收尾 `scripts/check.sh` 的五行关键值：
+
+```
+契约锁 ............ OK 25 files                 （开场 / 收尾一致）
+C1 契约测试 ....... contracts passed=25 failed=0（开场 / 收尾一致）
+B 全量 cargo ...... 开场 818 failed=0 → 收尾 829 failed=0
+B go test（-race）. 六个包全 ok                  （开场 / 收尾一致）
+B8 评测 ........... passed 10/10                （开场 / 收尾一致）
+全部通过，退出码 0
+```
+
+**开场自检没撞到假红**（一次跑过，818/0）。守卫实测有效：Read `.claude/hooks/guard_bash.py`
+被拦下。中途撞到两次守卫误拦，都是 heredoc 正文被扫：一次「命令无法解析」（正文里有配不平的
+引号），一次「不透明载荷」（正文太长）。换 Edit 工具 / 临时文件绕开，没碰守卫本身。
+
+### ① 判断题：选了 (a) —— fake / scripted 直接 FAIL
+
+**两个入口都查了，结论是「没有别的入口理应拿 fake 配置通过 preflight」，所以 (a) 成立**：
+
+| 查什么 | 结论 |
+|---|---|
+| `aite_app::preflight::run` 的产品调用方 | **只有 `main.rs:122`（`Cmd::Preflight`）一个。**七组自检只从 CLI 进来，没有第二个入口 |
+| `wiring.rs` 的评测接线会不会调 preflight | **不会 —— 同名不同物。**`Wiring.preflight` 那个字段是 `DockerProbe`，走 `evals::cli` 的 `docker_preflight`（`evals/src/real_stack.rs:327`，只问 SDK / daemon / 镜像在不在）。它跟七组自检没有任何代码共享 |
+| `aite evals --sandbox docker` 那条路会不会 | **不会。**`aite evals` 从头到尾不经过 `build_app`，它走自己的 `Deps` / `Wiring` 注入替身（B8 那档 `--platform fake --model scripted --sandbox fake` 就是这么跑的） |
+| `build_app` 的产品调用方 | **只有 `cli.rs:134`，而且传的是 `Injections::default()`** —— `aite run` 那条路**永远零注入**，也没有任何开关能往里塞东西 |
+
+最后一行是 (a) 的地基：在 preflight 的语境里「有没有注入」不是未知数，是定值（没有，且不可能有），
+所以 `platform: fake` **确定**起不来 —— 给 WARN 等于让人自己去猜。这条地基由
+`build_app_really_refuses_what_the_first_check_refuses`（e2e）拿真 `build_app` 对拍钉着，
+哪天真给 `aite run` 加了注入开关，那条会红。
+
+**改前的实证**（派单那两条都复现了，并补了全跑那一档）：`platform: fake` 与
+`provider: scripted` 两份配置，`preflight --offline` 都是「全部没红，可以起飞。」退出码 0，
+而 `aite run` 都是退出码 2。
+
+### ② 落地的五条口径（逐条对齐 X1）
+
+1. **FAIL 也把 `cfg` 交出去** —— `check_config` 的 return 里 `Some(cfg)` 原样保留，
+   `check_config_fails_but_still_hands_over_the_config_when_the_platform_is_fake` 钉着。
+2. **第 ① 组仍然只有一行结论 + 一句「怎么补」**。它现在管三件事，写法是**收集式**而不是
+   撞上第一条就早退（口径照第 5 组那句「缺什么一次报齐，别让人补完 base_url 重跑一遍才发现还缺
+   key」）：`faults` / `fixes` 两个 `Vec` 收完再拼，连接词统一用「；另外，」。
+   **只命中一条时这一行与 X1 那天逐字相同**，涟漪最小。
+3. **「怎么补」三件事齐**：当前值、该改成什么、以及 fake / scripted 是留给谁用的（§3.1 +
+   `aite evals --platform fake` 那条路）。「该改成什么」不写字面量，走
+   `REAL_PLATFORM` / `REAL_MODEL_PROVIDER` 两个常量，由
+   `injection_fix_matches_the_contract_defaults` 拿**契约默认值 + 样例配置**两头钉住（三处同源）。
+4. **2/3/4 组 SKIP 且理由写在那一行里**：`platform=fake：不连飞书，这一组的判据不适用`
+   （常量 `FAKE_PLATFORM_SKIP`，口径照 `--offline：不碰网络`）。`--offline` 与 fake 同时成立时
+   **说 fake** —— 说 offline 会让人以为去掉那个开关就查得了。
+5. **红线照旧**：新的 detail / fix 都是 `CheckResult` 的字段，渲染前统一过 `Redactor`，
+   没有新的直写路径。`arm_redactor` 那两遍装料**与第 2 组跑不跑无关**（fake 档把第 2 组 SKIP 了，
+   但 `check_config` 的 FAIL detail 照样回显 yaml 标量，脱敏一步不能省）。
+
+第 ① 组那一行最后长这样（原样贴，`platform: fake` 那一档）：
+
+```
+[1/7] FAIL 配置可加载       platform=fake · model.provider=openai_compat · sandbox.image=aite-sandbox:p0 · 但 platform=fake 要由调用方注入平台实现 —— aite run 不注入任何实现，起飞会被拒（退出码 2）
+           └ 怎么补：真机起飞把配置里的 platform 改成 feishu（config/aite.example.yaml 里就是这个值）；当前值 fake 是留给评测 / 回放的取值（§3.1），不会去连真实飞书 —— 评测走 `aite evals --platform fake`，那条路自己注入替身，不经过 aite run
+[2/7] SKIP 环境变量齐       platform=fake：不连飞书，这一组的判据不适用
+[3/7] SKIP 飞书凭证有效     platform=fake：不连飞书，这一组的判据不适用
+[4/7] SKIP 飞书身份对得上   platform=fake：不连飞书，这一组的判据不适用
+```
+
+两条都犯的配置（`fake` + `scripted`）一次报齐，一行里两条并列：
+
+```
+· 但 platform=fake 要由调用方注入平台实现、model.provider=scripted 要由调用方注入模型实现 —— aite run 不注入任何实现，起飞会被拒（退出码 2）
+```
+
+**`check_env` / `check_model` 一个字没动**：第 5 组那句 `provider=scripted，没有真端点可探`
+的 WARN 保留 —— 它管「端点通不通」，第 ① 组管「这份配置起不起得来」，两条各说各的本分。
+（`--offline` 把第 5 组整个跳过，所以 scripted 这一档**只有**第 ① 组救得了。）
+
+### ③ 两边口径对照（六格，全部实跑）
+
+| 配置 | `preflight --offline` | `preflight`（全跑） | `aite run` |
+|---|---|---|---|
+| `platform: fake` **改前** | `OK 2 · WARN 1 · FAIL 0 · SKIP 4`，**「全部没红，可以起飞。」退出码 0** | `FAIL 5`（2/3/4 全红要飞书凭证、5/6 也红），退出 1 —— **红得不是地方**：真正拦住起飞的那条一组都没管 | 退出码 2：`config.platform=fake 时必须由调用方注入平台实现` |
+| `platform: fake` **改后** | `[1/7] FAIL` + 2/3/4 SKIP，退出码 **1** | 同上，第 1 组与 offline 无关；2/3/4 照样 SKIP，5/6 各报各的 | 不变（退出码 2，本轨没动 `app.rs`） |
+| `provider: scripted` **改前** | `FAIL 0`，**「全部没红，可以起飞。」退出码 0** | `FAIL 4`（飞书那几组，机器没凭证）；第 5 组给 **WARN** `没有真端点可探` —— 不拦起飞，且 `--offline` 下连这句都没有 | 退出码 2：`config.model.provider=scripted 时必须由调用方注入模型实现` |
+| `provider: scripted` **改后** | `[1/7] FAIL`，退出码 **1**；2/3/4 照跑（platform 还是 feishu） | 同上；第 5 组那句 WARN 保留 | 不变（退出码 2） |
+
+> X1 记的「全跑那一档没实证」这一半，本轨**补上了**：`provider: scripted` 全跑时第 5 组给的是
+> **WARN 不是 FAIL**，所以「七组里一组都没管」这句话对 `--offline` 成立、对全跑只是「管了但不拦」。
+> `platform: fake` 那一档全跑时 2/3/4 会红，但红的理由是「这台机器没飞书凭证」，
+> 与 fake 起不起得来无关 —— 在一台凭证配齐的机器上那三组会转绿，于是**改前的全跑也是全绿而起不来**。
+> 这一点仍然没有真机实证（本机没凭证），但 (a) 做掉之后不需要了：第 ① 组先拦。
+
+**照「怎么补」改完真能修好**（两份都实测）：`platform` 改回 `feishu` / `provider` 改回
+`openai_compat` 之后，`preflight --offline` 第 1 组转 `OK`、退出码 0；`aite run` **不再死在注入这一步**，
+它走过去了，死在 `ModelConfig.base_url 是空的`（样例配置本来就空 —— 那正是下面那张表第 1 行那个口子）。
+两边口径一致。
+
+### ③ 变异验证（五组，每组都被抓到）
+
+| 改坏什么 | 谁红了 |
+|---|---|
+| 整段判据摘掉（退回今天之前：`injection_fault` 恒 `None` + `fake_platform` 恒 `false`） | lib 3 条 + e2e 4 条 + cli_smoke 1 条 |
+| FAIL 降成 WARN（不拦起飞了） | lib 3 条 + e2e 6 条 + cli_smoke 2 条（X1 那条 prompt 判据一起红，同一个分支） |
+| 2/3/4 忘了 SKIP（照样跑） | e2e 1 条（`a_fake_platform_fails_the_first_row_and_skips_the_feishu_rows`） |
+| 「怎么补」里指错（`feishu` → `feishuu`、`openai_compat` → `openai-compat`） | lib 1 条 + e2e 2 条 |
+| 「一次报齐」退回早退（prompt 撞上就 return） | lib 1 条 |
+
+> 第四组第一遍只抓到 lib 1 + e2e 1：e2e 里写的是 `fix.contains("feishu")`，而 `feishuu`
+> **包含** `feishu`，放过去了。把两处断言改成连右括号一起断（`contains("改成 feishu（")`）之后
+> 才是上表那个数。**自己的断言也得变异一遍**，不然就是第五条恒真断言。
+
+### ④ `link.rs:83`、`:136` 的两条谎话副本
+
+全仓 grep 核实（**只改注释，代码一个字没动**）：
+
+* **`!status` 这条命令是真的**（`control/src/plane.rs:587` 的 `cmd_status`），假的是「健康行」
+  那半句：它走 `status_tasks(&ev.chat_id)`，**只从 store 列活跃任务，从头到尾不碰 edge**，
+  没有任何一行报 edge 健康。
+* `link.rs:83`（`note_ok`）原话是「RΩ 拿它出健康行或做起飞门禁就会误判成『edge 不在』」——
+  **两件都不对**：`Link::connected()` 在产品代码里**零调用方**（`EdgeClient::connected()`
+  只是一层转发，唯一使用者是 `tests/edge_client.rs`；`wiring.rs:230` 那个 `edge.connected()?`
+  是 `LazyEdge` 的同名方法、另一回事），起飞门禁走的是 `status()`（`app.rs` 的
+  `check_contract_version`）。改后把这两件说准，并留一句「这一行照样该留 —— 它是
+  `connected()` 的语义本身」，免得下一轮有人照着注释把代码删了。
+* `link.rs:136`（`status_client`）删掉「`!status` 的健康行也还得问得出来」，换成真调用方
+  （本 crate 内两个：`EdgeClient::status()` 与 `verify_contract`）+ 闸门那条真理由。
+
+两处都点名了 `app.rs:83`（W2 改）与 `lib.rs`（X1 改）是同源副本，口径一致。
+
+**还剩第 5 个副本**：`core/crates/edge-client/tests/contract_gate.rs:214` 同一句话，
+那个文件不在本轨可写面（见下面记账）。
+
+### ⑤ 涟漪清单
+
+| 文件 | 改了什么 | 「七组」动了没 |
+|---|---|---|
+| `core/crates/app/src/preflight.rs` 模块头 | 表格第 1 行改成「且它起得来」（三件事）、2/3/4 行各加「`platform: fake` 时 SKIP」；「第 1 组为什么不只验解析」那段重写成三条，加了 2026-09-13 这条病史 | **没动**（「七组」「不是新开第 8 / 9 组」原样） |
+| `README.md`（3 处出现） | 第 134 行那段第 1 组的描述改成三件事 + fake 档 SKIP；第 147 行那条病史块扩成两条（2026-09-12 / 2026-09-13）。另外两处（`# 七项各一行结论`、`# 起飞前自检（七组）`）**本来就准确，没改** | **没动** |
+| `docs/acceptance-M.md` §0.1 | 「七组分别是：① 配置可加载（含 …）」那句改成三件事 + fake 档 SKIP 的括注；末尾 ⚠️ 块加第三条（2026-09-13）。**那份逐行实测输出重跑过，逐字一致，没改** | **没动** |
+| `docs/demo-3min.md` | 第 1 组那段 ⚠️ 加一句「拿评测那份配置上台同理会被第 1 组拦下」 | **没动** |
+| `review/inventory-gateway-evals.md` | 第 142 行第 1 组的逐条描述加第三件事 + 病史；2/3/4 各加「`platform: fake` 时 SKIP」 | **没动** |
+
+**`acceptance-M.md` §0.1 那份实测输出重跑了，结论是「不用改」**：`config/aite.yaml` 由样例复制
+（`platform: feishu` + `provider: openai_compat`），注入判据不命中，第 1 组照旧 `OK`，
+七行逐字比对一致（只有时间戳不同）。跑完 `config/aite.yaml` 删掉、`data/` 没留下、
+`git status` 干净。
+
+`core/crates/app/src/cli.rs` 两轨都只读，本轨**一个字没动**（也不需要动）。
+
+### 改完之后 `--offline` 还剩哪些「全绿 ≠ 起得来」
+
+**重列一遍，全部实跑对拍**（每种坏配置各跑 `preflight --offline` / `preflight` / `aite run`）。
+**没有补全**：
+
+| 坏配置 | `preflight --offline` | `preflight` 全跑 | `aite run` | 归哪一组管 |
+|---|---|---|---|---|
+| `model.base_url` 空 | 全绿，退出 0 | FAIL（第 5 组） | 退出 2 | 第 5 组，**被 `--offline` 跳过**（V3 记的那条，仍在） |
+| `model.model` 空 | 全绿，退出 0 | FAIL（第 5 组） | 退出 2 | 同上 |
+| **`storage.sqlite_path` 指着一个不是 SQLite 的文件** | **全绿，退出 0** | **全绿（第 7 组 OK）** | **退出 2：`建表失败（…）`** | **七组里没有一组管** ← 本轨新挖出来的，与 fake / scripted 同形状 |
+| 两边 `contract_version` 不一致 | 查不了（不碰网络） | 第 6 组会红（要 edge 在跑） | 退出 2 | 第 6 组，`--offline` 跳过。**本机没起 edge，这一条没实证** |
+| `platform: fake` 而没注入平台 | **FAIL，退出 1** | FAIL | 退出 2 | 第 1 组（本轨补的） |
+| `model.provider: scripted` 而没注入模型 | **FAIL，退出 1** | FAIL | 退出 2 | 第 1 组（本轨补的） |
+| `system_prompt_path` 指着已删的 Python 树 | FAIL，退出 1 | FAIL | 退出 2 | 第 1 组（X1 补的） |
+
+> **新挖出来那条的实证**：`sqlite_path` 指到一个内容是 `this is definitely not a sqlite database`
+> 的文件，第 7 组照样 `OK 落盘目录可写` —— 它验的是「三个路径的最近已存在祖先写得进去」，
+> 而 `SqliteSessionStore::open`（`app.rs:227`，`build_app` 第 6 步）要的是「这个文件真能当库打开」。
+> 两件事。`aite run` 退出码 2、`aite 起不来：建表失败（…）`。
+> 隔离它花了一步：`build_app` 第 5 步（模型）在第 6 步（SQLite）**前面**，所以得先把
+> `base_url` / `model` 填上才够得着这条判据。归下一轮，见记账。
+
+### 测试数
+
+818 → **829**（+11）：
+
+* `src/preflight.rs` 的 `mod tests` **+5**（36 → 41）：「怎么补」的两个取值与契约默认值 + 样例配置
+  三处同源、能飞的配置不误伤、只放行 `OpenaiCompat` 那一个 provider、FAIL 但仍交出 config、
+  prompt 与注入两件事一次报齐。
+* `tests/preflight_e2e.rs` **+5**（17 → 22）：fake → 第 1 组 FAIL + 2/3/4 SKIP + 飞书端点零请求；
+  scripted → 第 1 组 FAIL 但 2/3/4 照跑、第 5 组那句 WARN 还在；好配置不误伤（`needs_injection=false`）；
+  `--offline` 下照跑且两条一次报齐；**与真 `build_app` 行为对拍**。
+* `tests/cli_smoke.rs` **+1**（21 → 22）：进程级，真二进制，`platform: fake` 退出码 1、七行不少。
+
+④ 是纯注释，不加条数。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/app/src/app.rs:227`（`SqliteSessionStore::open`） | **第 3 个「七组一组都没管」的口子**：`sqlite_path` 指着一个不是 SQLite 的文件时 preflight 全绿（`--offline` 与全跑都是），`aite run` 退出码 2 `建表失败`。本轨实证在案。补法与本轨同形：折进第 ① 组（试着打开一次、跑完就关），或扩第 7 组的判据。**别新开第 8 组** | 下一轮 |
+| `core/crates/edge-client/tests/contract_gate.rs:214` | 「`!status` 的健康行」那句谎话的**第 5 个副本**（W2 改 `app.rs`、X1 改 `lib.rs` 两处、本轨改 `link.rs` 两处）。那个文件不在本轨可写面 | 下一轮（顺手带掉） |
+| 第 2 组在 `platform: fake` 下整组 SKIP | 第 2 组是**泛化**扫 `*_env` 的，整组跳过连 `model.api_key_env` 一起跳了。fake 配置注定在第 1 组 FAIL、必须改回 feishu 重跑，那一轮四个变量全查，所以只是推迟一轮、不会静默放行。更准的做法是按字段路径前缀只跳 `feishu.*` 那几个 —— 但那要在泛化扫描通道里插一条「platform=fake ⟺ feishu.* 不适用」的耦合，收益不抵代价。**如实记账，不自作主张** | 待定（总管） |
+| `core/crates/app/src/run.rs` 的 `StopSignal::set()` | X1 记的那条（丢信号）**本轨没碰** —— 归 Y1，它同时在跑 | Y1 |
+
+### 没做的 / 拿不准的
+
+1. **「七组全绿而起不来」仍然没有真机实证** —— 本机没有飞书凭证，不带 `--offline` 跑第 2/3/4 组
+   必红。但 (a) 做掉之后这件事不需要实证了：fake 那一档现在在第 ① 组就被拦下，不存在「全绿」这种状态。
+2. **`aite run` 那一侧一个字没动**（`app.rs` 两轨都只读）。所以「两边口径一致」是靠 preflight
+   这一侧追上 `build_app` 达成的，判据是**照抄的不等式**而不是共享的函数 —— 这一点与 X1 那条
+   （复用同一个 `load_system_prompt`）不同，所以专门加了行为对拍那条测试兜住。
+3. **第 2 组那条取舍见上面记账第 3 行**，照派单做的整组 SKIP，代价写在 `run_checks` 的注释里。
+4. **`contract_version` 不一致那条没实证**（要一台版本不同的 `aite-edge` 在跑），表里如实标了。

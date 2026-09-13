@@ -120,6 +120,10 @@ core/target/debug/aite preflight            # 七组全跑，FAIL 必须是 0
 > 它现在连 `worker.system_prompt_path` 一起验，旧配置指着已删的 Python 树
 > （`aite/worker/prompts/`）就是 FAIL，「怎么补」那行直接给出该改成的路径。
 > 照着改完再往下走 —— 这一条在镜头前炸的话，`aite run` 根本起不来。
+>
+> **拿评测那份配置上台同理会被第 1 组拦下**：`platform: fake` / `model.provider: scripted`
+> 只能被注入着用（那是 `aite evals` 走的路），`aite run` 不注入任何实现、当场退出码 2。
+> 演示要的是 `platform: feishu` + `model.provider: openai_compat`。
 
 **①b 加演那段（§5）演不演，现在就能定**（C 窗口）
 

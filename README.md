@@ -133,8 +133,11 @@ aite contracts lock --check
 
 `aite preflight` 的七组：配置可加载 / 环境变量齐 / 飞书凭证有效 / 机器人身份对得上 /
 模型端点通 / 沙箱可用 / 落盘目录可写。任一 FAIL → 退出 1，**一项失败不阻断后面的**；
-第 1 组除了「yaml 解析得出来」，还验 `worker.system_prompt_path` **指到的文件真的在**
-（读不到是 FAIL —— 它是硬起飞前提，`aite run` 读不到就拒绝起飞）；
+第 1 组问的是「这份配置**起得来**吗」而不只是「yaml 解析得出来吗」，三件事一次报齐：
+yaml 解析得出来、`worker.system_prompt_path` **指到的文件真的在**、
+`platform` / `model.provider` 的取值**不需要注入**（后两件读不到 / 要注入都是 FAIL ——
+它们是硬起飞前提，`aite run` 遇上就拒绝起飞，退出码 2）；
+`platform: fake` 那一档下第 2/3/4 组 SKIP（fake 平台不连飞书，那三组的判据不适用）。
 `--offline` 只跑 1、2、7（不碰网络也不碰 docker，适合没凭证的机器；**CI 用的就是这一档**）。
 `--chat-id <测试群 chat_id>` 会顺带真调一次群历史，回答 spec §3.7(b) 那条待核实项。
 
@@ -142,10 +145,17 @@ aite contracts lock --check
 > `model.model` 是空的 —— 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2。
 > 真机起飞前那一遍必须不带 `--offline`。
 >
-> 另一个同族的口子 2026-09-12 当场咬过人，**现在补上了**：配置里的
-> `worker.system_prompt_path` 指着 2026-09-12 删掉的 Python 树（`aite/worker/prompts/`）时，
-> 七组当时没有一组碰它 —— preflight 报「可以起飞」，`aite run` 退出码 2。
-> 现在这一项归第 1 组，**`--offline` 下照样跑**（它不碰网络也不碰 docker）。
+> 同族的口子当场咬过人两次，**现在都补上了**，两次都归第 1 组、**`--offline` 下照样跑**
+> （它不碰网络也不碰 docker）：
+>
+> * 2026-09-12：配置里的 `worker.system_prompt_path` 指着当天删掉的 Python 树
+>   （`aite/worker/prompts/`），七组当时没有一组碰它 —— preflight 报「可以起飞」，
+>   `aite run` 退出码 2。
+> * 2026-09-13：配置是 `platform: fake`（或 `model.provider: scripted`）。这两个取值
+>   **只能被注入着用**，而 `aite run` 不注入任何实现，`build_app` 明文拒绝 —— 当时七组
+>   一样没有一组问「这个取值自己起得来吗」，`--offline` 报「全部没红，可以起飞」退出 0，
+>   `aite run` 退出码 2。同一份配置还在要飞书凭证（fake 平台压根不连飞书），
+>   所以那一档下第 2/3/4 组现在一并 SKIP。
 >
 > ℹ️ **CI 里跑的是 `--offline` 这一档，而且只在 `compose-smoke` 那个 job 里**
 > （`.github/workflows/ci.yml:115-118`，命令是 `docker compose run --rm core preflight --offline`
