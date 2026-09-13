@@ -251,3 +251,149 @@ V3 写这几段时，V5 还没并进来。V5 ③ 已经把「交付中的短任�
 排除过一个混淆项：当时 `config/aite.yaml` 因 compose 实证而存在（平时不存在），
 但单跑复现时它仍在、照样全绿，**不是它**。
 `graceful_shutdown` 本身有本文 §4.1 记着的计时区间量错（`:237,249`），是天然的抖动源。
+
+---
+
+## 六、W3 回执 —— 2026-09-12
+
+基线 `0ac0b58`。改动面七处：`edge/internal/sandbox/{docker.go,docker_pure_test.go}`（①②）、
+`core/crates/app/{src/main.rs,tests/cli_smoke.rs}`（③）、`.github/workflows/ci.yml`（④⑤）、
+`docker/{core,edge}/Dockerfile`（⑤，**只加注释，没加 `USER`**）、
+`docs/acceptance-M.md` §0.1 那张表（③）、本文追加这一节。`README.md` 零处波及。
+
+### ① `Release("")` 的三方矛盾 —— 改实现
+
+**判据是契约，不是注释**：`proto/aite/v1/edge.proto:95` 那一行写着
+`rpc Release(ReleaseRequest) returns (ReleaseResponse);           // 幂等`。
+它**盖掉**头注释里那条通用的「`sandbox_id` 不存在 → NOT_FOUND」—— 否则「幂等」两个字
+没有任何含义（重复释放同一个 id 必然拿到 NOT_FOUND）。契约、包头注释（`docker.go:19`）、
+函数注释（`:381`）三处说的本来就是同一件事，**只有实现不是**。所以改实现。
+
+改法：`Release` 开头 `strings.TrimSpace(sandboxID) == ""` 就早返回 `nil`，
+**放在 `dockerClient()` 之前**。只特判空串，不特判「不在 `d.boxes` 里的 id」——
+`ReapIdle` 捡上一次进程留下的孤儿时那些 id 本进程压根没记账，却必须真去 daemon 删
+（B4「reap 之后 `docker ps -a` 必须为空」的兜底）。理由连边界一起写进函数注释了。
+
+钉它的测试：`TestReleaseOnAnEmptyIdIsANoop`，在**无 daemon 档**（早返回在
+`dockerClient()` 前面，所以这条测试根本走不到 daemon）。变异验过：把早返回删掉就红。
+
+### ② `inspectStamps` / `orphans` —— 抽两个纯函数进无 daemon 门禁
+
+`orphans` 的判定逻辑抽成了两个纯函数，`orphans` 自己只剩「问 daemon + known 过滤 +
+出错整趟放弃」：
+
+- `newestStamp(insp) (time.Time, bool)` —— 三个时间戳里挑最新的一个解析得出来的
+- `isOrphanIdle(insp, now, idle) bool` —— `!seen || now.Sub(newest) >= idle`
+
+`inspectStamps` 原样保留（补了一段注释说明它**只搬运不解析**：零值哨兵与格式非法的值
+都要原样带出去，否则 `newestStamp` 再也分不清「没有这个字段」与「这个字段是坏的」）。
+
+`docker_pure_test.go` 13 → 23 条。`inspectStamps` 四种入参全覆盖（正常三个、字段缺失
+两档、零值哨兵、格式非法），外加 `>=` 边界（正好等于 idle 收、差 1ns 不收）与
+「取最新不取最旧」。**七条变异逐个验过，全部有判别力**：删早返回、`>=`→`>`、
+`After`→`Before`、去掉 `!seen` 兜底、`inspectStamps` 顺序反转 / 自己过滤哨兵 / 返回 nil。
+
+### ③ `--help` 被 clap 吞掉 —— 病比台账记的大一倍
+
+**实测发现四个子命令都坏，不是两个**：`run` / `preflight` / `evals` / `evidence`
+（`main.rs` 的 `:23` / `:33` / `:38` / `:43`，四个都带 `trailing_var_arg`）。
+`contracts` 的参数是真 clap 子命令，本来就没这个病。
+（派单正文把 `:38` / `:43` 写成「evals / contracts」，按行号那是 Evidence / Preflight ——
+按病灶实际范围做了，四个一视同仁。）
+
+病的机理比「`--help` 被当成位置参数收进 `ARGS`」更绕一层：clap **仍然处理** `--help`，
+只是它打的是**它自己知道的那份**帮助 —— 参数由手写解析器处理，clap 一个真实选项都不
+知道，于是那份帮助里只有一句 `[ARGS]...`，**而退出码是 0**。
+
+改法：四个 variant 各加 `#[command(disable_help_flag = true)]`，`--help` / `-h` 跟着
+`allow_hyphen_values` 落进 `args`，由各自的手写解析器打真用法。**没动
+`trailing_var_arg`**，`cli.rs` / `wiring.rs`（归 W2）一个字节没碰。边界写进了 `Cmd`
+的注释：这四个子命令下 `--help` 一律是求助，将来真要透传得加显式分隔符，不是摘掉这个属性。
+
+**踩到一个坑**：那段说明一开始写成 `///` 挂在 `enum Cmd` 上，被 clap derive 当成**顶层
+命令的 about**，`aite --help` 的第一行从「Aite core（Rust）」变成了那段说明。降级成 `//`
+才修掉，并且补了一条 `top_level_and_contracts_help_are_untouched` 钉住它。
+
+硬约束 1（`-- --help` 一个字节都不许变）**逐字节验过**：拿改动前后的两个二进制，对 26 个
+写法各存 stdout / stderr / 退出码再 `cmp`。**变化面精确等于那八个坏写法（且只有 stdout
+变）**，其余 18 个逐字节相同 —— 含 `run`/`preflight` 的 `-- --help` 与 `-- -h`、
+`contracts` 四个写法、顶层 `--help`/`-h`、四条业务路径。
+
+`cli_smoke.rs` 16 → 20 条。变异验过：去掉全部四个属性 / 只去掉 `Run` 那一个（「只修一半」）
+/ 把注释改回 `///`，三种都红。顺带修掉两处**因为这次改动而失真**的旧注释
+（`cli_smoke.rs:377` 与 `:428` 还写着「仍然被 clap 截胡……归 R0」）。
+
+### ④ `ci.yml` 引的 `README.md:90` —— 换成引措辞，不写行号
+
+`--offline` 那句话现在在 `README.md:136`，漂了 46 行。**决定不写行号**，改成引那句话的
+措辞（可 grep）。理由三条：这两份文件已经在**互指**（README 反过来引 `ci.yml:115-118`），
+再写一个行号只会把「漂了不会红」的面翻倍；本轮 W1 刚逐个 `sed -n` 核过 15 处漂掉的行号；
+措辞比行号耐改。**注释保持两行，`preflight` 那一步仍在 `ci.yml:115`** —— README 反向
+引的 `115-118` 没跟着漂（⑤ 的新步骤加在起飞冒烟之后，就是为了不推动它）。
+
+### ⑤ 两个 Dockerfile 没有 `USER` —— 原来那条担心**证伪**，但暴露了另一半
+
+**第 1 步（证实/证伪）拿到的 Linux 实测**。macOS 上这条验不出来：Docker Desktop 的
+bind mount 过 VirtioFS，把 uid 映射回宿主用户（本机对照组实测 `501:0`，容器里明明是
+root 建的）—— W1 看的就是那一档。绕法是把 `./data` 换成命名卷（Docker Desktop 的
+Linux VM 里是原生 ext4，uid 不翻译，与 Linux runner 上 bind mount 一个宿主目录同构），
+**真镜像真起飞**（两个 service 都转 healthy）之后量真产物：
+
+```
+0:0 755 directory    data/            ← ./data 不入库，bind mount 时由 dockerd 建
+0:0 644 regular file data/aite.db     ← 证据链主存（storage.sqlite_path）
+0:0 755 directory    data/evidence/
+0:0 755 directory    data/artifacts/
+```
+
+以宿主用户（GitHub runner 是 uid 1001）碰同一批文件：**READ OK** /
+WRITE DENIED / MKDIR DENIED。
+
+- **「宿主机那条 `aite evidence show` 可能读不了」不成立 —— 证伪。** 0644 + 0755 对任何
+  用户都开着读。W1 那条担心停在 owner 上，而**决定读不读得动的是权限位**，不是 owner。
+- **但写不进、删不掉、也没法在 `./data` 里新建** —— 这是真后果，见下面记账那一条。
+
+**第 2 步：不加 `USER`。** 派单口径是「目标是宿主机拿得到自己的证据文件，不是容器安全
+基线」——读得动就是拿得到。加 `USER` 要顺带解决命名卷 `run:` 的挂载点属主（两个 socket
+要建得出来）与 `./data` 两侧的 uid 不一致，而 edge 还要读 `/var/run/docker.sock`
+（归 `root:docker`，换非 root 就得把 docker 组 gid 传进容器，否则 `Ping` 失败 →
+`sandbox_ok` false → preflight 第 6 组 FAIL）。**两个 service 不必一视同仁**：真要降权
+core 先降。这些连实测输出一起写进两个 Dockerfile 的「以谁的身份跑」小节了。
+
+**第 3 步：判据落进 CI。** `compose-smoke` 加了一步「⑤ `./data` 的产物宿主机读得动」，
+打印 runner 的 uid 与每个产物的 `%u:%g %a`，**硬断言每个文件读得动**，写/删只打印不判死。
+这一步本机在 Linux 容器里实跑过两档：现状绿（exit 0）、把 `data/aite.db` 改成 0600 就红
+并点名那个文件（exit 1）—— 不是恒真断言。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/app/src/cli.rs:42` | 注释还写着「clap 仍然把 `-h` / `--help` 截胡，打的是它自己那份不含任何真实选项的…」—— W3 ③ 修完之后这句话反了。`cli.rs` 是 W3 的只读面 | **W2** |
+| `core/crates/evals/src/cli.rs:254` | 同病：「**`aite evals --help`（不加 `--`）到不了这里**：它被 clap 截胡」—— 现在到得了。`core/crates/evals/**` 不在 W3 的可写面里 | 顺手改（W2 / 总管） |
+| `docs/acceptance-M.md:42` | 抬头的变更日志写着「§0.1 的 `--help` …… 是 V6 ④a/④b/④c 的实际结果」，而 §0.1 那张表现在是 W3 ③ 的结果。派单限定 W3 只许改 §0.1 那张表，没碰抬头 | 总管 |
+| `docker/{core,edge}/Dockerfile` + `docker-compose.yml` | 容器以 root 跑 → Linux 上 `./data` 与产物归 `root:root`，宿主机**写不进、删不掉、没法在里面新建**。后果不在读侧而在写侧：**Linux 上 compose 跑过一次之后，宿主机直跑 `aite run`（`acceptance-M.md` §0.2 的口径）会因为落盘目录不可写起不来**，`preflight` 第 7 组会 FAIL。W3 量清楚了但没修（派单口径是 low，且改法牵动三处属主） | 待定（比 W1 报的那条**换了后果**，不是同一条） |
+
+### 假红：收尾四轮 `check.sh` 撞了三次，第四轮全绿
+
+| 轮次 | `cargo passed/failed` | 点名的 target | 单独跑 |
+|---|---|---|---|
+| 开场自检 | 793 / 0 | —— | 一次就绿 |
+| 收尾第 1 轮 | 796 / 1 | `graceful_shutdown` | 7 passed 全绿 |
+| 收尾第 2 轮 | 795 / 2 | `reconnect_replay`、`startup_recovery` | 10 passed / 9 passed 全绿 |
+| 收尾第 3 轮 | 795 / 2 | `graceful_shutdown`、`reconnect_replay` | （同上，已复现过） |
+| 收尾第 4 轮 | **797 / 0** | —— | **「全部通过」，退出码 0** |
+
+三次加起来把本文 §4.1 点名的三个 target 全撞了一遍，**没有一次碰到 W3 改的任何东西**，
+`passed + failed` 恒等于 797（= 基线 793 + W3 新增 4 条）。
+撞的频率明显高于 W1 那次 —— 本机当时有 6 个会话在 busy（W2 + 另一批五轨）。
+
+> 顺带一条给后面写脚本的：`scripts/check.sh > log 2>&1; echo "EXIT=$?"` 这个写法在
+> **后台任务**里会骗人 —— 任务通知报的是整条命令（最后那个 `echo`）的退出码，永远是 0。
+> 要拿真退出码得 `rc=$?; …; exit $rc`。本轮因此误读过一次「第三轮绿了」。
+
+### 测试数
+
+793 → **797**（Rust，全在 `cli_smoke.rs`：16 → 20）；
+Go 侧 `internal/sandbox` 无 daemon 档 **19 → 29** 条（其中 `docker_pure_test.go` 13 → 23），
+docker 档 50 条不变。

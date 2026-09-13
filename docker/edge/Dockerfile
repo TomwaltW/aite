@@ -48,6 +48,20 @@ WORKDIR /app
 COPY --from=builder /out/aite-edge /usr/local/bin/aite-edge
 COPY --from=builder /out/grpc-health-probe /usr/local/bin/grpc-health-probe
 
+# ---------------------------------------------------------------- 以谁的身份跑
+#
+# **刻意没有 `USER`：edge 以 root 跑。** 与 core 那份同一笔账（W3 ⑤），
+# 完整的实测输出与判据写在 docker/core/Dockerfile 的同名小节里，这里只记不一样的那半。
+#
+# 结论那一半是共享的：Linux 上 `./data` 与里面的产物都是 `root:root`（0755 / 0644），
+# 宿主机**读得动**（`aite evidence show` 照常），但写不进、删不掉。
+#
+# 不一样的是**降权代价**：edge 要读 `/var/run/docker.sock`（沙箱是它按任务起的兄弟容器）。
+# 那个 socket 在宿主机上归 `root:docker`，容器里换成非 root uid 之后要么加进 docker 组
+# （组 gid 在不同宿主机上不一样，得在 compose 里传进来），要么压根连不上 daemon ——
+# 而 daemon 连不上 = `Ping` 失败 = `EdgeStatus.sandbox_ok` false = preflight 第 6 组 FAIL。
+# 所以**两个 service 不必一视同仁**：真要降权，core 先降，edge 这一侧得单独算一遍。
+
 # 直接 exec 二进制，不过 shell。
 ENTRYPOINT ["aite-edge"]
 CMD ["--config", "config/aite.yaml"]

@@ -379,7 +379,24 @@ func (d *Docker) Touch(_ context.Context, sandboxID string) error {
 }
 
 // Release 幂等：不认识的 id、已经没了的容器，都当成已经释放。
+//
+// 判据是契约：`proto/aite/v1/edge.proto` 的 `rpc Release` 那一行标着「幂等」。
+// 它**盖掉**头注释里那条通用的「sandbox_id 不存在 → NOT_FOUND」—— 否则「幂等」
+// 两个字就没有任何含义（重复释放同一个 id 必然拿到 NOT_FOUND）。
+//
+// 空 id 必须在这一层自己拦住：`ContainerRemove(ctx, "", …)` 从 daemon 拿回的
+// **不是** IsErrNotFound（空引用连查都查不动），下面那个分支收不住，会报成
+// SandboxInternal —— 与「幂等」正相反。空串（以及只有空白的串）不可能是任何真
+// 容器的 id 或 name，早返回不会误伤一次真删除。
+//
+// **只特判空串，不特判「不在 d.boxes 里的 id」**：ReapIdle 捡上一次进程留下的
+// 孤儿时（见 orphans），那些 id 本进程压根没记账，却必须真去 daemon 删 ——
+// 那是 B4「reap 之后 docker ps -a 必须为空」的兜底。
 func (d *Docker) Release(ctx context.Context, sandboxID string) error {
+	if strings.TrimSpace(sandboxID) == "" {
+		return nil
+	}
+
 	d.mu.Lock()
 	_, known := d.boxes[sandboxID]
 	delete(d.boxes, sandboxID)
@@ -745,23 +762,44 @@ func (d *Docker) orphans(ctx context.Context, idle time.Duration, known map[stri
 		if err != nil {
 			return nil
 		}
-		var newest time.Time
-		seen := false
-		for _, raw := range inspectStamps(insp) {
-			if t, ok := parseDockerTime(raw); ok {
-				if !seen || t.After(newest) {
-					newest, seen = t, true
-				}
-			}
-		}
-		// 三个时间戳都解析不出也收 —— 宁可多收一个孤儿，也别把它永远留在机器上。
-		if !seen || now.Sub(newest) >= idle {
+		if isOrphanIdle(insp, now, idle) {
 			out = append(out, c.ID)
 		}
 	}
 	return out
 }
 
+// isOrphanIdle 是 orphans 的判据本体，**纯函数**：一个本进程没记账的带标签容器，
+// 算不算空闲够久该收的孤儿。
+//
+// 三个时间戳一个都解析不出来也收 —— 宁可多收一个孤儿，也别把它永远留在机器上。
+//
+// 抽出来是为了**能在无 daemon 门禁里跑到**：orphans 自己要问 daemon
+// （list + 逐个 inspect，任一趟出错就整趟放弃），只能留在 `docker` tag 下；
+// 「哪些算孤儿、idle 怎么算」这半边不该跟着一起从门禁里消失。
+func isOrphanIdle(insp container.InspectResponse, now time.Time, idle time.Duration) bool {
+	newest, seen := newestStamp(insp)
+	return !seen || now.Sub(newest) >= idle
+}
+
+// newestStamp 从 inspect 的三个时间戳里挑**最新的一个解析得出来的**。
+// 三个都解析不出（字段缺失、零值哨兵、格式非法）就 ok=false。
+func newestStamp(insp container.InspectResponse) (time.Time, bool) {
+	var newest time.Time
+	seen := false
+	for _, raw := range inspectStamps(insp) {
+		if t, ok := parseDockerTime(raw); ok {
+			if !seen || t.After(newest) {
+				newest, seen = t, true
+			}
+		}
+	}
+	return newest, seen
+}
+
+// inspectStamps 按 Created / StartedAt / FinishedAt 的顺序取出三个**原始**时间戳
+// 字符串，不做任何解析 —— 零值哨兵和格式非法的值都原样带出来，判死是
+// parseDockerTime 的活。`ContainerJSONBase` / `State` 是指针，缺一个就少一截。
 func inspectStamps(insp container.InspectResponse) []string {
 	stamps := make([]string, 0, 3)
 	if insp.ContainerJSONBase != nil {

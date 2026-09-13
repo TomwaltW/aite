@@ -14,7 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/container"
+
 	pb "aite/edge/gen/aitepb"
+	"aite/edge/internal/config"
 )
 
 // ---- clip ---------------------------------------------------------------
@@ -219,5 +222,167 @@ func TestShortTrimsLongIdsAndLeavesShortOnes(t *testing.T) {
 	}
 	if got := short("abc"); got != "abc" {
 		t.Fatalf("短 id 原样返回：%q", got)
+	}
+}
+
+// ---- inspectStamps / newestStamp / isOrphanIdle --------------------------
+//
+// 这三个是 orphans 的判据本体（W3 ②）。orphans 自己要问 daemon，只能留在 `docker`
+// tag 下；判定这半边抽出来之后就归这个门禁管了 —— 它决定 reaper 收不收一个上一次
+// 进程留下的容器，判错的两个方向都很贵：收早了把别人正在用的容器删掉，收不动就把
+// 容器永远留在机器上（B4 那条「reap 之后 docker ps -a 必须为空」就是它兜的）。
+
+// inspectOf 造一个 inspect 结果。三个时间戳按 Created / StartedAt / FinishedAt 给。
+func inspectOf(created, startedAt, finishedAt string) container.InspectResponse {
+	return container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			Created: created,
+			State:   &container.State{StartedAt: startedAt, FinishedAt: finishedAt},
+		},
+	}
+}
+
+func TestInspectStampsTakesAllThreeInOrder(t *testing.T) {
+	got := inspectStamps(inspectOf("c", "s", "f"))
+	want := []string{"c", "s", "f"}
+	if len(got) != len(want) {
+		t.Fatalf("该取三个：%q", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("顺序该是 Created/StartedAt/FinishedAt，实际 %q", got)
+		}
+	}
+}
+
+func TestInspectStampsOnMissingFieldsTakesWhatIsThere(t *testing.T) {
+	// ContainerJSONBase 缺了：一个都取不到，且返回的是空切片不是 nil
+	// （下游 range 都能扛 nil，但别让「空」和「nil」在断言里混着看）。
+	empty := inspectStamps(container.InspectResponse{})
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("ContainerJSONBase 缺失时该是空切片：%#v", empty)
+	}
+	// State 缺了（容器刚建、inspect 里没 State）：只剩 Created 那一个。
+	only := inspectStamps(container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{Created: "2026-09-11T10:00:00Z"},
+	})
+	if len(only) != 1 || only[0] != "2026-09-11T10:00:00Z" {
+		t.Fatalf("State 缺失时只该剩 Created：%q", only)
+	}
+}
+
+func TestInspectStampsPassesSentinelAndGarbageThroughVerbatim(t *testing.T) {
+	// inspectStamps 不解析，只搬运：零值哨兵与非法格式都要原样带出去，
+	// 判死归 parseDockerTime。它要是自己动手过滤，newestStamp 就再也分不清
+	// 「没有这个字段」和「这个字段是坏的」。
+	got := inspectStamps(inspectOf("0001-01-01T00:00:00Z", "不是时间", ""))
+	want := []string{"0001-01-01T00:00:00Z", "不是时间", ""}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("第 %d 个该原样带出 %q，实际 %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestNewestStampPicksTheLatestNotTheFirst(t *testing.T) {
+	// 顺序刻意反着给：Created 最新、FinishedAt 最旧。挑错方向这条就红。
+	got, ok := newestStamp(inspectOf(
+		"2026-09-11T12:00:00Z",
+		"2026-09-11T10:00:00Z",
+		"2026-09-11T08:00:00Z",
+	))
+	if !ok {
+		t.Fatal("三个都是合法时间，该 ok")
+	}
+	if got.Hour() != 12 {
+		t.Fatalf("该挑最新那个（12:00），实际 %v", got)
+	}
+}
+
+func TestNewestStampSkipsTheUnparsableOnes(t *testing.T) {
+	// 唯一一个能解析的排在最后，且前两个分别是零值哨兵和垃圾。
+	got, ok := newestStamp(inspectOf("0001-01-01T00:00:00Z", "garbage", "2026-09-11T09:30:00Z"))
+	if !ok {
+		t.Fatal("有一个合法时间就该 ok")
+	}
+	if got.Hour() != 9 || got.Minute() != 30 {
+		t.Fatalf("该落在那个合法时间上，实际 %v", got)
+	}
+}
+
+func TestNewestStampSaysSoWhenNothingParses(t *testing.T) {
+	for name, insp := range map[string]container.InspectResponse{
+		"字段全缺": container.InspectResponse{},
+		"全是哨兵": inspectOf("0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z", "0001-01-01T00:00:00Z"),
+		"全是垃圾": inspectOf("x", "y", "z"),
+		"全是空串": inspectOf("", "", ""),
+	} {
+		if _, ok := newestStamp(insp); ok {
+			t.Fatalf("%s：一个都解析不出时该 ok=false", name)
+		}
+	}
+}
+
+func TestIsOrphanIdleCollectsAContainerWithNoUsableStamps(t *testing.T) {
+	// 时间戳一个都读不出来 → 收。宁可多收一个，也别把它永远留在机器上。
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	if !isOrphanIdle(container.InspectResponse{}, now, time.Hour) {
+		t.Fatal("时间戳读不出来的容器该收")
+	}
+}
+
+func TestIsOrphanIdleGoesByTheNewestStamp(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	idle := 30 * time.Minute
+
+	// Created 是 4 小时前（早就超了），但 FinishedAt 是 1 分钟前 —— 刚活动过，不该收。
+	// 按最旧的判就会把它误收掉。
+	busy := inspectOf("2026-09-11T08:00:00Z", "2026-09-11T08:00:01Z", "2026-09-11T11:59:00Z")
+	if isOrphanIdle(busy, now, idle) {
+		t.Fatal("最新时间戳在 idle 之内的容器不该收")
+	}
+
+	// 三个都在 idle 之外 → 收。
+	stale := inspectOf("2026-09-11T08:00:00Z", "2026-09-11T08:00:01Z", "2026-09-11T09:00:00Z")
+	if !isOrphanIdle(stale, now, idle) {
+		t.Fatal("最新时间戳也超过 idle 的容器该收")
+	}
+}
+
+func TestIsOrphanIdleAtTheExactBoundaryIsInclusive(t *testing.T) {
+	// 判据是 `>=`：正好等于 idle 就收。这条钉住那个等号 ——
+	// 改成 `>` 它就红，而线上表现只是 reaper 慢一个 tick（60s），肉眼看不出来。
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	idle := time.Hour
+
+	exactly := inspectOf("2026-09-11T11:00:00Z", "", "")
+	if !isOrphanIdle(exactly, now, idle) {
+		t.Fatal("空闲时长正好等于 idle 时该收（判据是 >=）")
+	}
+
+	oneNanoShort := inspectOf("2026-09-11T11:00:00.000000001Z", "", "")
+	if isOrphanIdle(oneNanoShort, now, idle) {
+		t.Fatal("差 1ns 没到 idle 就不该收")
+	}
+}
+
+// ---- Release("") --------------------------------------------------------
+
+// W3 ①：契约（edge 的 .proto 里 `rpc Release` 那一行）标着「幂等」，而空 id 从前会
+// 走到 `ContainerRemove(ctx, "", …)`，拿回的不是 IsErrNotFound，于是报成
+// SandboxInternal —— 契约、包头注释、函数注释三处都说幂等，只有实现不是。
+//
+// **这条能待在无 daemon 门禁里，靠的正是那个早返回在 `dockerClient()` 之前**：
+// 把早返回删掉，这条测试就会一路走到 daemon —— 无论有没有 daemon 都红
+// （有 daemon：空引用报 SandboxInternal；没有：连不上 socket）。
+func TestReleaseOnAnEmptyIdIsANoop(t *testing.T) {
+	d, err := NewDocker(config.Sandbox{})
+	if err != nil {
+		t.Fatalf("装配不该失败：%v", err)
+	}
+	for _, id := range []string{"", " ", "\t\n"} {
+		if err := d.Release(context.Background(), id); err != nil {
+			t.Fatalf("Release(%q) 该当成已释放，实际 %v", id, err)
+		}
 	}
 }
