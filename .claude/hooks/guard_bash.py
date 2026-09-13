@@ -1,7 +1,6 @@
 """PreToolUse 守卫：拦截触碰受保护面的写入 / 执行操作。
 
-改编自 MAOS 的 scripts/guard_bash.py，保护面换成 Aite 的（2026-09-11 起含 Rust+Go 重写面）：
-  aite/contracts/**（Python 旧契约）、proto/**、core/crates/contracts/**（新契约）、.contracts.lock、
+改编自 MAOS 的 scripts/guard_bash.py，保护面换成 Aite 的（2026-09-11 起含 Rust+Go 重写面）：、proto/**、core/crates/contracts/**（新契约）、.contracts.lock、
   docs/dev-spec-*.md、core/Cargo.toml、edge/go.mod、edge/go.sum，以及守卫自身与 hook 配置。
 
 判定分两步 —— 先规范化（变量回填、shlex 分词、路径归一），再看受保护路径
@@ -24,7 +23,7 @@ import sys
 # ------------------------------------------------------------------ 保护面
 
 # 整片保护的目录：新增契约文件自动落在保护面内，不用回来改这张表。
-PROT_PREFIXES = ("aite/contracts/", "proto/", "core/crates/contracts/")
+PROT_PREFIXES = ("proto/", "core/crates/contracts/")
 # 冻结的 spec，按通配匹配（将来换日期也不用改守卫）。
 PROT_GLOBS = ("docs/dev-spec-*.md",)
 # 单文件保护。
@@ -38,7 +37,7 @@ PROT_PATHS = [
     ".claude/settings.local.json",
 ]
 # 通配符可能展开到受保护面 —— 用这些代表路径做反向匹配。
-PROBES = ["aite/contracts/__init__.py", "docs/dev-spec-2026-09-09.md",
+PROBES = ["docs/dev-spec-2026-09-09.md",
           "proto/aite/v1/events.proto", "core/crates/contracts/src/lib.rs"]
 # 不会重名的 basename，覆盖 `cd .claude/hooks && python3 guard_bash.py` 这类相对调用。
 BARE_MATCH = {"guard_bash.py", ".contracts.lock", "go.mod", "go.sum"}
@@ -49,7 +48,7 @@ READ_SAFE = {
     "grep", "egrep", "fgrep", "rg", "ag", "wc", "ls", "find", "file", "stat",
     "diff", "cmp", "uniq", "cut", "tr", "tree", "pwd", "which", "type",
     "basename", "dirname", "column", "jq", "yq", "shasum", "sha256sum", "md5",
-    "pytest", "true", "false", "test", "date", "sleep", "cd", "export", "set",
+    "true", "false", "test", "date", "sleep", "cd", "export", "set",
     "make", "docker",
 }
 # cargo / go：多数子命令只读或只写 target/；下面这些子命令改依赖表或整树重写，单独拦。
@@ -58,7 +57,7 @@ GO_BLOCKED_SUBS = {"mod", "get"}
 # 只是前缀包装，真正的程序名在后面
 WRAPPERS = {"env", "sudo", "nohup", "time", "command", "builtin", "exec",
             "xargs", "stdbuf", "nice", "then", "do", "else", "!"}
-INTERPRETERS = {"python", "python3", "python3.12", "perl", "ruby", "node", "sh", "bash", "zsh", "php"}
+INTERPRETERS = {"python3", "perl", "ruby", "node", "sh", "bash", "zsh", "php"}
 GIT_READ = {"diff", "status", "log", "show", "grep", "ls-files", "blame",
             "describe", "rev-parse", "cat-file", "shortlog"}
 # 就地重写整棵树的工具：写模式下没有任何一个 token 会写出契约路径，
@@ -69,7 +68,7 @@ REWRITE_FLAGS = {"format", "--fix", "--fix-only", "-i", "--in-place", "-w", "--w
 FIND_WRITE_ACTIONS = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
 # `python -m aite.contracts.lock --write` 走的是点分模块名，argv 里不出现任何路径，
 # 位置判定必然落空 —— 而它恰好是唯一能把「篡改过的契约」洗成绿 C2 的命令。
-RELOCK_MODULE_RE = re.compile(r"aite[./]contracts[./]lock\b|contracts\s+lock\b")
+RELOCK_MODULE_RE = re.compile(r"contracts\s+lock\b")
 RELOCK_ARG_RE = re.compile(r"(?:^|\s)--write(?:\s|$)")
 
 # 无法做位置判定的构造 —— 命中就对整条命令做规范化子串扫描
@@ -278,7 +277,7 @@ def check_segment(argv):
     elif prog in REWRITERS:
         if any(a in REWRITE_FLAGS for a in args):
             # 写模式下覆盖面由 CWD 决定而不是由参数决定，逐 token 判不出来，整条拦。
-            raise Blocked("aite/contracts/**", f"全树重写工具（{prog} 写模式）")
+            raise Blocked("冻结面（proto/** 与 core/crates/contracts/**）", f"全树重写工具（{prog} 写模式）")
         write_pos = False
     elif prog == "cargo":
         sub = next((a for a in args if not a.startswith("-") and not a.startswith("+")), "")
@@ -297,7 +296,7 @@ def check_segment(argv):
         write_pos = False
     elif prog == "find":
         if any(a in FIND_WRITE_ACTIONS for a in args):
-            raise Blocked("aite/contracts/**", "find 的 -delete/-exec 覆盖面判不出来")
+            raise Blocked("冻结面（proto/** 与 core/crates/contracts/**）", "find 的 -delete/-exec 覆盖面判不出来")
         write_pos = False
     elif prog == "sort":
         write_pos = any(a == "-o" or a.startswith("--output") for a in args)

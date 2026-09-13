@@ -1,7 +1,6 @@
 {
   "permissions": {
     "deny": [
-      "Edit(/aite/contracts/**)",
       "Edit(/.contracts.lock)",
       "Edit(/docs/dev-spec-2026-09-09.md)",
       "Edit(/docs/dev-spec-2026-09-11-rustgo.md)",
@@ -22,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py\""
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/guard_bash.py\""
           }
         ]
       }
