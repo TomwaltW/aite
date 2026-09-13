@@ -104,7 +104,7 @@ COPY evals /app/evals
 
 # ---------------------------------------------------------------- 以谁的身份跑
 #
-# **刻意没有 `USER`：core 以 root 跑。** 这不是漏了，是 W3 ⑤ 量过之后留下的。
+# ==== 病史：2026-09-12（W3 ⑤）量清楚了但刻意没修的那一轮，别删 ====
 #
 # 这条账原本的说法是「Linux 上 `data/evidence` 会是 root 拥有，宿主机那条
 # `aite evidence show` 可能读不了」，而且只在 macOS 上验过 —— macOS 验不出来：
@@ -124,15 +124,74 @@ COPY evals /app/evals
 #   WRITE DENIED
 #   MKDIR DENIED  ← 但宿主机写不进、删不掉，也没法在 ./data 里新建
 #
-# 「读得动」这一条是硬门禁，钉在 .github/workflows/ci.yml 的 compose-smoke 里
-# （把 data/aite.db 的权限位改成 0600，那一步就红并点名它 —— 本机实跑验过）。
+# 真后果：Linux 上 compose 跑过一次之后，宿主机直跑 `aite run` 会因为落盘目录不可写
+# 起不来。AA1 把这条也量出来了（命名卷形态、以 uid 1001 跑 core 镜像自己）：
+#   [7/7] FAIL 落盘目录可写   写不下去：data/aite.db（卡在 data）；data/evidence…
+#   汇总：OK 1 · WARN 1 · FAIL 1 · SKIP 4，退出码 1
 #
-# 为什么没顺手加 `USER`：写不进那半边确实是个真后果（Linux 上 compose 跑过一次之后，
-# 宿主机直跑 `aite run` 会因为落盘目录不可写起不来），但修它的代价不在这一行 ——
-# 命名卷 `run:` 的挂载点属主得跟着换（两个 socket 要建得出来）、`./data` 这条 bind
-# mount 在宿主机那边是当前用户而容器里是新 uid。那笔账连后果一起记在
-# review/review-findings-2026-09-12-vmerge.md 的 W3 回执里，不在这一轮的范围内。
-# **真要加的话 core 是先降的那个**：它不碰 Docker daemon，代价比 edge 小得多。
+# ==== 2026-09-13（AA1）：降权那一轮做了什么 ====
+#
+# 上面那笔账销掉了。先说 W3 留下的那句话**错在哪**：它写的是「两个 service 不必
+# 一视同仁，真要降权 core 先降」。**实测证伪** —— 两个 unix socket 把两个进程的身份
+# 锁死在一起，只降一个的形态根本起不来：
+#
+#   connect() 一个 unix socket 要的是**该 socket 文件的写权限**，而两边建出来的
+#   socket 都是 `srwxr-xr-x`（0777 & ~umask 022），**只有属主有写位**。
+#   实测（root 建 socket，另一个容器去连）：
+#     uid 1001 去连 → nc: /v/s.sock: Permission denied（退 1）
+#     root     去连 → 退 0
+#   core 要连 edge 的 PlatformService/SandboxService/EdgeStatusService，
+#   edge 要连 core 的 IngressService —— 两个方向都要。所以**两个进程必须同一个 uid**。
+#   只降 core 的症状正是「core 起来了但连不上 edge」，不是「起不来」。
+#
+# 于是这一轮 core 与 edge **一起**降到同一个非 root 身份。三条决定：
+#
+# 1. **uid/gid 取 1001:1001，但它只是默认值。** 1001 是 GitHub runner 那个已知锚点
+#    （CI 里 `id -u` 就是它），拿来当 `docker run` 直跑时的安全默认。**真正的旋钮在
+#    运行期**：docker-compose.yml 给两个 service 都写了
+#    `user: "${AITE_UID:-1001}:${AITE_GID:-1001}"`。`./data` 是 bind mount，宿主机那边
+#    的属主是**当前用户**，而当前用户的 uid 每台机器都不一样 —— 除了把它从宿主机传进来，
+#    没有第二种让两边对上的办法。刻意**不做**成 build ARG：build 期定的 uid 和运行期
+#    传的 uid 不一致是个纯陷阱，一个旋钮就够了。
+#
+# 2. **`COPY` 进来的东西不 chown。** `/app/core/crates/worker/prompts`、
+#    `/app/config/aite.example.yaml`、`/app/evals` 运行期只读，默认就是 root:root
+#    0644/0755 —— 对任何 uid 都开着读。chown 到 1001 反而会在 `user:` 被改成别的 uid
+#    时读不了。同理 `/app` 本身留给 root。
+#
+# 3. **命名卷 `run:` 的挂载点：`mkdir -p /app/data/run` 再 `chmod 1777`，两个镜像口径
+#    必须一致。** 这是最容易漏的一条，实测过 Docker 的语义才敢这么写：
+#      · 空命名卷第一次被挂上时，**属主和权限位是从镜像里那个目录抄过来的**
+#        （实测：镜像里 `/app/data/run` 是 1001:1001 → 卷根就是 1001:1001）；
+#      · 只要卷里还没有文件，**每挂一次就抄一次**（实测：同一个空卷先挂 root 属主的
+#        镜像变 0:0、再挂 1001 属主的镜像又变回 1001:1001）；卷里一有文件就冻住。
+#      → 所以「谁先起」会决定卷的属主。edge 先起、而 edge 镜像里那个目录归 root 的话，
+#        core 就再也建不出自己的 socket。两个镜像写同一份 mkdir+chmod 才没有这个竞态。
+#      → 权限位取 **1777 而不是 chown 到某个 uid**：运行期 uid 是从宿主机传进来的、
+#        build 期不知道，只有「谁都写得进 + 只能删自己的」这一档扛得住任意 uid。
+#        这就是 /tmp 的语义。代价写在下一条。
+#
+# **代价，别装作没有：**
+#   · 换 `AITE_UID` 之后必须 `docker compose down -v`。sticky 位只让属主删自己的文件，
+#     上一个 uid 留下的残留 socket 新 uid 删不掉 —— core 会报「已经有人在监听」或
+#     bind 失败，edge 会报清残留失败。是**响的**，但要知道该怎么收。
+#   · Linux 上 `./data` 必须**先存在且归当前用户**。它不入库（.gitignore:11），
+#     不先建的话 dockerd 会替你建成 root:root 0755，非 root 的容器当场写不进去。
+#     CI 在 up 之前 `mkdir -p data`；手起飞见 README 与 docs/acceptance-M.md §0.2.5。
+#   · macOS 上这两条都撞不到，也验不出来：VirtioFS 双向翻译 uid（实测容器里看见的是
+#     它自己的 uid、宿主机看见的是当前用户），换什么 uid 都写得进。
+#
+# 门禁在 .github/workflows/ci.yml 的 compose-smoke 里，两条都是**能被证伪的**：
+#   · 「读得动」（W3 留的）—— 把 data/aite.db 的权限位改成 0600，那一步就红并点名它；
+#   · 「写得进」（AA1 加的）—— 把 compose 的 `user:` 拿掉让容器退回 root，那一步就红。
+#   两条都本机实跑验过。
+
+# 运行层的默认身份。**别把它当成唯一的旋钮** —— compose 的 `user:` 会覆盖它，
+# 见上面第 1 条。写成纯数字：`user:` 传进来的 uid 不会在 /etc/passwd 里有条目，
+# 镜像里也就没必要 useradd 一个假装自己是主角的用户（实测纯数字 uid 跑 preflight /
+# run / evals 都正常）。
+RUN mkdir -p /app/data/run && chmod 1777 /app/data/run
+USER 1001:1001
 
 # 直接 exec 二进制，**不过 shell** —— blocker 1（登录 shell 洗掉 PATH）从形态上就没了。
 ENTRYPOINT ["aite"]

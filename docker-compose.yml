@@ -63,6 +63,25 @@ services:
     image: aite-edge:p0
     # 仓库根，不是 /app/edge：socket / 配置里的路径全相对仓库根
     working_dir: /app
+    # 以谁的身份跑（2026-09-13 AA1 降权）—— 完整理由在 docker/core/Dockerfile 的
+    # 「以谁的身份跑」小节。这里只说旋钮：镜像里的默认身份是 1001:1001，而 `./data`
+    # 是 bind mount、宿主机那边归**当前用户**，当前用户的 uid 每台机器都不一样，
+    # 所以真正的取值要从宿主机传进来。**core 与 edge 必须是同一个 uid** ——
+    # 两个进程互相 connect 对方的 unix socket，而 connect 要 socket 文件的写权限，
+    # socket 是 `srwxr-xr-x`、只有属主有写位（实测：uid 1001 连 root 建的 socket 是
+    # Permission denied）。
+    #   Linux：  AITE_UID=$(id -u) AITE_GID=$(id -g) docker compose up -d
+    #   macOS：  不用管，VirtioFS 双向翻译 uid，默认值就行
+    user: "${AITE_UID:-1001}:${AITE_GID:-1001}"
+    # 只有 edge 需要这一条：它要读 /var/run/docker.sock，而那个 socket 不归上面这个 uid。
+    # **这个 gid 每台宿主机不一样**：Docker Desktop 上容器里看到的是 root:root 0660
+    # （所以默认 0 正好对），Linux 上是 root:docker、gid 各机器不同（常见 999/998），
+    # **默认 0 在 Linux 上是错的**。从 socket 自己问出来最稳，CI 就是这么传的：
+    #   AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+    # 传错的后果不是静默的：daemon 连不上 → Ping 失败 → EdgeStatus.sandbox_ok false
+    # → `aite preflight` 第 6 组 FAIL 并点名沙箱不可用。
+    group_add:
+      - "${AITE_DOCKER_GID:-0}"
     # 默认两个 service 吃同一份 config/aite.yaml —— 那是真机验收（docs/acceptance-M.md）
     # 的形态，别的都别想。两个环境变量只是给「要让两边吃不同配置」的场合留的口子：
     # core 与 edge 读的是**同一个 platform 字段**，而 `platform: fake` 对两边的含义相反
@@ -80,6 +99,10 @@ services:
       - ./config:/app/config:ro
       # data/ 必须是 bind mount：SQLite 与证据链要在宿主机上看得到，
       # 否则 docs/acceptance-M.md §0.3 的第二个观察窗（evidence show）直接废掉。
+      # ⚠️ **Linux 上起飞前先 `mkdir -p data`。** 它不入库（.gitignore:11），不先建的话
+      #    dockerd 会替你建成 root:root 0755，而上面 `user:` 里那个非 root 身份写不进去
+      #    —— core 会死在建表那一步。先建出来它就归当前用户，与 `user:` 的取值对得上。
+      #    macOS 撞不到（VirtioFS 翻译 uid）。
       - ./data:/app/data
       # 两个 socket 都落在这里，两个 service 共享它（比 ./data 那层更深，所以盖住它）
       - run:/app/data/run
@@ -119,6 +142,9 @@ services:
       dockerfile: docker/core/Dockerfile
     image: aite-core:p0
     working_dir: /app
+    # 见 edge 那边同一条注释 —— **两个 service 必须解析出同一个 uid:gid**，
+    # 它们互相 connect 对方的 unix socket。core 不碰 docker daemon，所以没有 group_add。
+    user: "${AITE_UID:-1001}:${AITE_GID:-1001}"
     # 见 edge 那边同一条注释：默认就是 config/aite.yaml。
     command: ["run", "--config", "${AITE_CORE_CONFIG:-config/aite.yaml}"]
     environment:
@@ -176,4 +202,12 @@ services:
 volumes:
   # 两个进程的 unix socket。用命名卷而不是让它跟着 ./data 那份 bind mount 走：
   # socket 是进程间的运行期产物，不该往宿主机仓库里落（.gitignore 也挡着 /data/run/）。
+  #
+  # ⚠️ **这个卷的挂载点属主不是在这里定的，是从镜像里抄的**（2026-09-13 AA1 实测）：
+  # 空卷第一次被挂上时，Docker 把镜像里 `/app/data/run` 的属主与权限位抄到卷根上，
+  # 而且只要卷里还没有文件，每挂一次抄一次。两个 Dockerfile 因此写着**逐字一样**的
+  # `mkdir -p /app/data/run && chmod 1777` —— 不一致的话卷属主就取决于「谁先起」，
+  # 而这里刻意不写 depends_on，顺序无保证。
+  # 换了 `AITE_UID` 之后要 `docker compose down -v`：sticky 位只许属主删自己的文件，
+  # 上一个 uid 的残留 socket 新 uid 删不掉（会响，不是静默）。
   run:

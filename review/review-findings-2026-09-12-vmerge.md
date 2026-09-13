@@ -1882,3 +1882,380 @@ go 六包全 `ok`、`passed 10/10`，「全部通过」退出码 0。**五行关
 3. **Z2 想改而没伸手的文档面，本轮一个字没碰** —— 派单说它会把原文 + 改法写进自己的回执、
    由总管在合并时落。本轨也没碰 `guard.rs` 与 `.claude/**` 相关的任何东西。
 4. **`contract_state()` 零调用方那件事没动**（X1 记过，派单点名「要不要删不是本轨的决定」）。
+
+---
+
+## 十四、AA1 回执 —— 2026-09-13
+
+基线 `76c62fd`。改动面六处：`docker/core/Dockerfile`、`docker/edge/Dockerfile`、
+`docker-compose.yml`、`.github/workflows/ci.yml`、`docs/acceptance-M.md` §0.2.5 与抬头变更日志、
+`README.md`（compose 一节 + CI 一节），外加本文追加这一节。
+**零 Rust / 零 Go 改动**，`core/**`、`edge/**`、`evals/**`、`scripts/**` 一个字节没碰。
+
+### 基线与开场自检
+
+| 行 | 期望 | 实测 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` ✅ |
+| C1 契约测试 | `contracts passed=25 failed=0` | 同 ✅ |
+| B 全量 cargo test | `cargo passed=853 failed=0` | 同 ✅ |
+| B 全量 go test（-race） | 六个包全 `ok` | aiteerr/config/feishu/ingress/sandbox/server 全 `ok` ✅ |
+| B8 评测 | `passed 10/10` | 同 ✅ |
+| 末行 / 退出码 | `全部通过` / 0 | 同 ✅ |
+
+守卫那一条：`Read .claude/hooks/guard_bash.py` **被拦下**——
+`blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）`。hook 挂着。
+
+本轨专属的第 0 步三条全过：`daemon OK` / `Docker Compose version v5.3.0` / `compose 编排可解析`。
+
+### ① 改前基线（命名卷形态）
+
+**挂载形态说明，这条不能省。** 本机是 macOS，bind mount 过 VirtioFS —— 实测它**双向翻译
+uid**（容器里看见的是它自己的 uid，宿主机看见的是当前用户 `501:0`），所以 bind mount 上量
+到的属主**一律不作数**。照 W3 的办法把 `./data` 这条 bind 临时换成命名卷（Docker Desktop
+的 Linux VM 里是原生 ext4，uid 不翻译），**没有改仓库文件** —— 用的是 scratchpad 里一份
+override（`docker compose -f docker-compose.yml -f probe-volume.yml`，`git diff` 全程干净）。
+宿主侧那个「非 root 用户」由一个 `--user 1001:1001` 的辅助容器扮演，挂同一个卷。
+
+真镜像真起飞（两个 service 都转 `healthy`，`RestartCount` 都是 0），容器里量：
+
+```
+$ docker compose exec -T core id
+uid=0(root) gid=0(root) groups=0(root)
+$ docker compose exec -T edge id
+uid=0(root) gid=0(root) groups=0(root)
+
+$ docker compose exec -T core find /app/data -not -path '/app/data/run/*' -exec stat -c '%u:%g %a %F %n' {} ';'
+0:0 755 directory /app/data
+0:0 644 regular file /app/data/aite.db
+0:0 755 directory /app/data/artifacts
+0:0 755 directory /app/data/run
+0:0 755 directory /app/data/evidence
+
+$ docker compose exec -T edge ls -ln /app/data/run/
+srwxr-xr-x 1 0 0 0 Sep 13 13:36 aite-core.sock
+srwxr-xr-x 1 0 0 0 Sep 13 13:36 aite-edge.sock
+
+$ docker run --rm -v aite-aa1_run:/r debian:trixie-slim stat -c '%u:%g %a %F %n' /r
+0:0 755 directory /r          ← 命名卷 run: 的挂载点，也归 root
+```
+
+宿主侧（`--user 1001:1001`，GitHub runner 的取值）碰同一批文件：
+
+```
+probe 身份: uid=1001 gid=1001 groups=1001
+0:0 755 directory /probe
+0:0 644 regular file /probe/aite.db
+0:0 755 directory /probe/artifacts
+0:0 755 directory /probe/evidence
+READ  OK      /probe/aite.db
+WRITE DENIED
+MKDIR DENIED
+APPEND aite.db DENIED
+```
+
+**与 W3 的 Linux 实测逐条对上**（`0:0 755/644` 四个路径、READ OK / WRITE DENIED / MKDIR DENIED）。
+AA1 多量了一条 APPEND：往**已有的** `data/aite.db` 里写也是 DENIED —— 这条才是「宿主机
+直跑 `aite run`」真正要做的事。
+
+**W3 记的那条真后果也复现了**（以 core 镜像自己、`--user 1001:1001`、挂同一份 data）：
+
+```
+[7/7] FAIL 落盘目录可写     写不下去：data/aite.db（卡在 data）；data/evidence（卡在 data/evidence）；data/artifacts（卡在 data/artifacts）
+           └ 怎么补：给这几层目录写权限，或把 config 里的 storage.* 指到一个可写的位置
+汇总：OK 1 · WARN 1 · FAIL 1 · SKIP 4（共 7 项，过了 6 项）
+PREFLIGHT_EXIT=1
+```
+
+量完 `down -v`，`git status --short` 只剩一个未跟踪的 `config/aite.ci-edge.yaml`（冒烟临时件）。
+
+### ② core 降权 —— 每条决定与它的理由
+
+先说一条**推翻派单前提**的实测，它决定了后面所有事。
+
+**「只降 core、edge 那一侧单独算」这条路是死的。** `connect()` 一个 unix socket 要的是
+**该 socket 文件的写权限**，而两边建出来的 socket 都是 `srwxr-xr-x`（`0777 & ~umask 022`），
+**只有属主有写位**。实测（root 建 socket，另一个容器去连）：
+
+```
+srwxr-xr-x 1 0 0 0 Sep 13 13:40 s.sock
+uid 1001 去连 → nc: /v/s.sock: Permission denied   （退 1）
+root     去连 → 退 0
+```
+
+core 要连 edge 的 Platform/Sandbox/EdgeStatus，edge 要连 core 的 Ingress —— **两个方向都要**。
+所以两个进程只能是同一个 uid。W3 写在两个 Dockerfile 里的「两个 service 不必一视同仁，
+真要降权 core 先降」**被证伪**，这一轮 core 与 edge 一起降。
+
+**决定 1 · uid/gid 取 `1001:1001`，但它只是镜像的默认值，真旋钮在运行期。**
+1001 是 GitHub runner 那个已知锚点，拿来当 `docker run` 直跑时的安全默认；
+compose 两个 service 都写了 `user: "${AITE_UID:-1001}:${AITE_GID:-1001}"`。
+**没做成 build ARG**：`./data` 是 bind mount、宿主机那边归当前用户、uid 每台机器不一样，
+build 期定的值和运行期传的值不一致纯粹是陷阱，一个旋钮就够。
+CI 不写死 1001，而是 `AITE_UID=$(id -u)` / `AITE_GID=$(id -g)` 现问 —— runner 换一版就漂，
+而且这份 workflow 也该能在 self-hosted 上跑。
+
+**决定 2 · `COPY` 进来的东西不 chown。** `/app/core/crates/worker/prompts`、
+`/app/config/aite.example.yaml`、`/app/evals` 运行期只读，默认 root:root 0644/0755 对任何
+uid 都开着读。chown 到 1001 反而会在 `user:` 被改成别的 uid 时读不了。`/app` 本身同理留给 root。
+实测佐证：降权之后容器里跑 B8 仍是 `passed 10/10`。
+
+**决定 3 · 命名卷 `run:` 的挂载点 —— 两个镜像各写一行逐字相同的
+`mkdir -p /app/data/run && chmod 1777`。** 这是最容易漏的一条，先量了 Docker 的语义才敢定：
+
+```
+实验 A：镜像里 /app/data/run 是 1001:1001 755，挂一个空命名卷
+        → 卷根变成 1001:1001 755        （属主/权限位是从镜像抄的）
+实验 B：同一个空卷，先挂「该路径归 root」的镜像 → 0:0 755
+        再挂「该路径归 1001」的镜像       → 1001:1001 755
+        → **只要卷里还没有文件，每挂一次就重抄一次**
+实验 C：卷里先放一个文件，再挂 root 属主的镜像 → 仍是 1001:1001
+        → 卷一有文件就冻住
+```
+
+所以卷的属主取决于「空卷时谁先挂上它」，而 compose 刻意不写 `depends_on`、顺序无保证。
+两个镜像口径不一致的话，edge 先起就把卷翻回 root，core 再也建不出自己的 socket。
+**权限位取 1777 而不是 chown 到某个 uid**：运行期 uid 是从宿主机传进来的、build 期不知道，
+只有「谁都写得进 + 只能删自己的」这一档扛得住任意 uid（就是 /tmp 的语义）。
+实测 sticky 位能穿过卷的抄写：改后容器里 `/app/data/run` 是 `0:0 1777`。
+
+**这条语义在真编排里又咬了我一次，值得记**：为了让命名卷形态等价于 Linux 上的
+`mkdir -p data`，我先把卷根 chown 成 1001 再 `up` —— 结果卷还空着，Docker 又从镜像
+把 root 抄了回来，core 照样死。补一个文件让卷非空才冻得住。**bind mount 没有这一层**
+（dockerd 从不改写 bind 的属主），所以这一步是命名卷形态的脚手架，不是 Linux 上要做的事。
+
+**代价，写明白：**
+
+1. **Linux 上 `./data` 必须先存在且归当前用户。** 它不入库，不先建的话 dockerd 建成
+   `root:root 0755`，非 root 容器当场写不进。实测症状（而且是响的）：
+   `aite 起不来：建不出目录 data/evidence：Permission denied (os error 13)`，
+   配 `restart: unless-stopped` 就是崩溃循环。CI 在 up 前 `mkdir -p data`。
+2. **换 `AITE_UID` 之后要 `down -v`**：sticky 位只让属主删自己的文件，上一个 uid 的
+   残留 socket 新 uid 删不掉（core 报「已经有人在监听」或 bind 失败，edge 报清残留失败）。
+3. **`make compose-up` 不传这三个变量**（`Makefile` 不在本轨可写面）。macOS 无影响，
+   Linux 上要先 `export`。已记账转出去，见下面的表。
+
+**降权之后的实测**（同一命名卷形态，两个 service 都转 `healthy`、`RestartCount` 都是 0）：
+
+```
+$ docker compose exec -T core id
+uid=1001 gid=1001 groups=1001
+$ docker compose exec -T edge id
+uid=1001 gid=1001 groups=1001,0(root)          ← group_add 那条生效了
+
+core 侧四行起飞日志（剥 ANSI 后 grep）：
+HIT  edge.connected socket=/app/data/run/aite-edge.sock
+HIT  aite.edge_status
+HIT  ingress.listening socket=/app/data/run/aite-core.sock
+HIT  aite.up
+
+$ docker compose exec -T core find /app/data -not -path '/app/data/run/*' -exec stat -c '%u:%g %a %F %n' {} ';'
+1001:1001 755 directory /app/data
+1001:1001 644 regular file /app/data/aite.db
+1001:1001 755 directory /app/data/artifacts
+1001:1001 644 regular empty file /app/data/.keep     ← 命名卷形态的脚手架，见上文
+0:0 1777 directory /app/data/run                     ← sticky 位穿过了卷的抄写
+1001:1001 755 directory /app/data/evidence
+
+$ docker compose exec -T edge ls -ln /app/data/run/
+srwxr-xr-x 1 1001 1001 0 Sep 13 13:55 aite-core.sock
+srwxr-xr-x 1 1001 1001 0 Sep 13 13:55 aite-edge.sock
+```
+
+宿主侧（`--user 1001:1001`）**重量 ①**：
+
+```
+probe 身份: uid=1001 gid=1001 groups=1001
+1001:1001 755 directory /probe
+1001:1001 644 regular file /probe/aite.db
+1001:1001 755 directory /probe/artifacts
+1001:1001 644 regular empty file /probe/.keep
+1001:1001 755 directory /probe/evidence
+READ  OK      /probe/aite.db
+READ  OK      /probe/.keep
+WRITE OK
+MKDIR OK
+APPEND aite.db OK
+RM    probe file OK
+RMDIR probe dir  OK
+```
+
+**那条真后果销掉了**（同一发命令，改前是 FAIL + 退出码 1）：
+
+```
+[7/7] OK   落盘目录可写     3 个路径都落得下去：data/aite.db · data/evidence · data/artifacts
+汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4（共 7 项，过了 7 项）
+EXIT=0
+```
+
+顺带在非 root 容器里跑了一遍 B8：`passed 10/10`；`docker ps -a --filter label=aite.task` 是 0。
+
+### ③ edge —— 做了，不是「给判据说明不做」
+
+**做的理由**见 ② 开头那条 socket 权限实测：不做的话整个形态起不来。
+难点确实是 `/var/run/docker.sock`，实测如下：
+
+```
+容器里看到的 docker.sock：0:0 660 socket /var/run/docker.sock      ← Docker Desktop 上归 root:root
+--user 1001:1001 直连                 → nc: Permission denied（退 1）
+--user 1001:1001 --group-add 0 再连   → 退 0
+```
+
+做法：compose 给 edge 加 `group_add: ["${AITE_DOCKER_GID:-0}"]`。
+**「换一台机器还跑不跑得起来」的答案：跑得起来，但要带一个环境变量。**
+Docker Desktop 上 socket 归 `root:root`，默认值 0 正好对；Linux 上一般是 `root:docker`、
+docker 组 gid 各机器不同（常见 999/998），**默认 0 在 Linux 上是错的**。
+CI 不写死，从 socket 自己问：`AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)`。
+传错不是静默失败 —— `Ping` 失败 → `sandbox_ok` false → preflight 第 6 组 FAIL 并点名。
+
+**改后的 `sandbox_ok` 实测**（降权的 edge，真起了一个沙箱兄弟容器）：
+
+```
+[6/7] OK   沙箱可用         aite-sandbox:p0 起容器 + 四个 import 跑通（997ms）· docx=1.1.2 matplotlib=3.9.2 openpyxl=3.1.5 pandas=2.2.3 · 容器已收干净
+```
+
+edge 自己的日志也有 `msg=edge.sandbox_ok`。
+
+**「只降 core 会怎样」也真量了**（变异：`user: "0:0"` 只给 edge）。结果比预想的难看：
+
+```
+core=healthy edge=healthy                     ← 两个容器都报健康
+run: 卷里：srwxr-xr-x 1 1001 1001  aite-core.sock
+           srwxr-xr-x 1    0    0  aite-edge.sock
+MISS edge.connected
+MISS aite.edge_status
+HIT  ingress.listening
+HIT  aite.up
+core 日志：aite.edge_unreachable … error=[grpc_unavailable] Permission denied (os error 13)
+          edge.capabilities_unavailable error=[grpc_unavailable] Permission denied (os error 13)
+```
+
+**两个 healthcheck 都接不住它** —— core 的判据是 connect 自己的 socket，edge 的探针跑在
+edge 容器里。`docker compose ps` 看着全绿，系统是聋的。接得住的是 `compose-smoke` 第 6 步
+那四行日志 grep。这条记在两个 Dockerfile 的注释里了。
+
+### ④ 新门禁「写得进」的自证
+
+`compose-smoke` 新增一步 **⑥ 宿主机往 `./data` 里写得进**（原 ⑤「读得动」原样留着，
+它守的是权限位，与 owner 无关）。两条硬判据：产物的 owner 必须是 runner 自己；
+宿主机真做得了「直跑 `aite run`」要做的三件事（建目录、建文件、往 `data/aite.db` 里写）。
+
+**自证方法**：用 `python3` + `yaml` 把 ci.yml 里这两步的 `run` 脚本**原样抠出来**（手抄一遍
+再验证等于在验抄件），在 Linux 容器里以 uid 1001 对真产物跑。三档：
+
+| 档 | 形态 | ⑤ 读得动 | ⑥ 写得进 |
+|---|---|---|---|
+| A | 现状（非 root） | EXIT=0 | EXIT=0 |
+| B | 变异：两个 `user:` 改回 `"0:0"` | **EXIT=0（照样绿）** | **EXIT=1** |
+| C | 变异：`chmod 600 data/aite.db` | **EXIT=1** | owner 那一半照样过 |
+
+档 B 的红长这样：
+
+```
+OWNER  OK      1001  ./data
+OWNER  WRONG   0（期望 1001）  ./data/aite.db
+OWNER  WRONG   0（期望 1001）  ./data/artifacts
+OWNER  WRONG   0（期望 1001）  ./data/evidence
+MKDIR  OK
+WRITE  OK
+APPEND DENIED  data/aite.db —— 宿主机直跑 aite run 会死在建表那一步
+降权那条承诺退回去了 —— 见上面 WRONG / DENIED 的行
+---- 6 EXIT=1 ----
+```
+
+档 C 的红：`READ DENIED ./data/aite.db` + `宿主机读不到自己的证据文件 —— ⑤ 那条账成真了`。
+
+**A/B/C 三档合起来说明两件事**：⑥ 不是恒真断言；**⑤ 与 ⑥ 不能合并**，它们接的是会各自
+单独退化的两件事。还有一条值得单记：档 B 里 **`MKDIR` 与 `WRITE` 都是 OK** ——
+`./data` 是 `mkdir -p` 建的、本来就归 runner，容器退回 root 之后在里面新建照样成功。
+**真正接得住退化的是 OWNER 与 APPEND**。三条都留着是因为它们对应宿主机直跑要做的三件事。
+
+写门禁时改掉了自己两个坑：`(printf '' >> ./data/aite.db)` 在文件不存在时会**自己把它建出来**
+（判据就成了恒真的「在 ./data 里建文件」）—— 前面加了 `test -f`；owner 那一半原本 fail-fast，
+会盖掉后半段的诊断 —— 改成两条判据都跑完再一起退。
+
+### ⑤ 文档追平（先 grep 后改）
+
+grep 过 `root|属主|owner|写不进|删不掉|USER|uid|权限位|读得动` —— 两份文档里**原本一处
+都没提**容器身份，所以追平的是「行为变了之后变得不准的地方」，不是替换旧措辞：
+
+- `docs/acceptance-M.md` §0.2.5：新增「两个容器以非 root 跑」一段（三个环境变量 +
+  `mkdir -p data` + macOS 为什么验不出来 + 换 uid 要 `down -v`）；W1 那张四行实测表加了
+  第五行「宿主机**写得进** `./data` 吗」，连改前/改后的 preflight 判据一起写；抬头变更日志加一条。
+- `README.md`：compose 一节加同一段；CI 一节的 `compose-smoke` **六步 → 九步** ——
+  它原本就漏了 W3 加的 ⑤ 那一步（已经是旧的了），这次连 ⑤ ⑥ 与「容器身份」一起补全，
+  并把 A/B/C 三档的互证写进那段引用框。
+- **两处被本轮改动带漂的行号**：`README.md` 引的 `ci.yml:115-118`（preflight 那一步，
+  现在在 `:139`）与 `docs/acceptance-M.md` 引的 `docker-compose.yml:88-102`/`:131-149`
+  （两个 healthcheck，现在在 `:113`/`:167`）。**照 W3 ④ 定下的口径改成引措辞、不写行号**，
+  并在原地写明「2026-09-13 这个行号漂了一次」。
+  `acceptance-M.md` 引的 `ci.yml:97-104`（造配置那一步）**核过，没漂**（新步骤插在它后面）。
+
+### 验收
+
+```
+scripts/check.sh                      → 五行关键值与开场逐字相同，末行「全部通过」，退出码 0
+docker compose config -q              → OK；config --services 仍是 `core edge`
+python3 -c "yaml.safe_load(ci.yml)"   → ci.yml OK
+```
+
+（本轨零 Rust / 零 Go 改动，所以 check.sh 那五行必须逐字不变。收尾那一轮见下面「测试数」。）
+
+### 落盘残留复核
+
+`docker compose down -v` 之后：`aite-aa1` 前缀的卷 0 个、容器 0 个、`label=aite.task` 的
+容器 0 个、临时探针镜像（`aa1-*`）全删、`./data` 不存在、`git status` 只剩未跟踪的
+`config/aite.yaml`（`.gitignore` 挡着）与 `config/aite.ci-edge.yaml`（冒烟临时件，收尾已删）。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `Makefile` 的 `compose-up` / `compose-down` | 不传 `AITE_UID` / `AITE_GID` / `AITE_DOCKER_GID`，也不 `mkdir -p data`。**Linux 上 `make compose-up` 因此起不来**（core 死在 `建不出目录 data/evidence：Permission denied`）。macOS 无影响。改法：target 里加 `mkdir -p data` 与 `AITE_UID=$$(id -u) AITE_GID=$$(id -g) AITE_DOCKER_GID=$$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine stat -c %g /var/run/docker.sock)` —— **最后那个要问 daemon 的视角**，macOS 上直接 `stat` 宿主机那个符号链接拿到的是 `0:1`，不是 VM 里的取值。`Makefile` 不在 AA1 可写面 | **总管 / 下一轨** |
+| `.gitignore:11` + `data/` | 治本的办法是入库一个 `data/.gitkeep`（checkout 出来就归当前用户，CI 与本机都不用再 `mkdir -p data`）。要同时改 `.gitignore`，两者都不在 AA1 可写面 | 待定（与上一条二选一，或都做） |
+| `docs/acceptance-M.md` §0.2.5 那张 W1 表 | 表头写的是「下面**四条**是 2026-09-12（W1）…核过的」，AA1 加了第五行（标注了是 AA1 加的、日期也写了）。**表头那个「四条」没改** —— 改了就等于把 W1 的实测范围说成五条 | 总管（合并时定口径） |
+| `docs/acceptance-M.md` | AA2 轨也写这个文件。AA1 只动 §0.2.5 与抬头变更日志，但**抬头那块是两轨都会追加的地方**，合并时大概率冲突 | 总管 |
+
+### 测试数
+
+| 轮次 | 契约锁 | C1 | cargo | go -race | B8 | 末行 / 退出码 |
+|---|---|---|---|---|---|---|
+| 开场自检 | `OK 25 files` | `25/0` | `passed=853 failed=0` | 六个包全 `ok` | `passed 10/10` | `全部通过` / 0 |
+| 收尾 | `OK 25 files` | `25/0` | `passed=853 failed=0` | 六个包全 `ok` | `passed 10/10` | `全部通过` / 0 |
+
+**逐字不变，一次就绿。** 三个兄弟轨（AA2/AA3/AA4）全程在并行跑，两轮都没撞到台账第五节
+那几个时序假红（`graceful_shutdown` / `startup_recovery` / `reconnect_replay`）——
+本轨零 Rust / 零 Go 改动，这两行一样是应该的。
+
+### 没做的 / 拿不准的
+
+1. **本机是 macOS，所有属主/权限结论都是在「命名卷」形态下量的，没有一条是在 bind mount
+   上量的。** 命名卷在 Docker Desktop 的 Linux VM 里是原生 ext4、uid 不翻译，与 Linux
+   runner 上 bind mount 一个宿主目录同构 —— 但**同构不等于同一件事**。真正的 Linux 判据
+   在 CI 那一侧，本轮 CI 没跑过（这份 workflow 只在 push/PR 上跑）。
+2. **`AITE_DOCKER_GID` 在真 Linux 上的取值没验过。** 本机 Docker Desktop 上 socket 是
+   `root:root`、默认 0 正好；Linux 上是 `root:docker`、gid 各机器不同。CI 改成从 socket
+   现问（`stat -c '%g'`），逻辑上对，但**没在 Linux runner 上实跑过**。
+   同理，**GitHub runner 的 `id -u` / `id -g` 具体是多少我没有第一手证据**，只知道派单说
+   uid 是 1001 —— 所以 CI 里一个都没写死，全是现问。
+3. **edge 的 `group_add` 默认值 0 在 Linux 上会给容器一个用不上的 root 组。** 传对
+   `AITE_DOCKER_GID` 就没这回事，但默认值确实是「对 Desktop 友好、对 Linux 不对」。
+   compose 没有条件表达式，做不到按平台取不同默认值；退而求其次是把后果写进注释与文档，
+   并让 preflight 第 6 组接住。**如果总管觉得默认值应该是「空/报错」而不是 0，这是个可以翻的决定。**
+4. **没做 `data/.gitkeep` 那条治本的改法**，因为要动 `.gitignore`（不在可写面）。已记账。
+5. **本地建 edge 镜像用的不是仓库里那份 Dockerfile 的原文。** 本机连不上
+   proxy.golang.org（实测两次 `dial tcp 142.251.34.209:443: i/o timeout`），而
+   `go install pkg@version` 一定会查一次 deprecation。本地在 scratchpad 里生成了一份副本，
+   只在第一个 `FROM golang:` 后面注入两行 `ENV GOPROXY=file:///go/pkg/mod/cache/download`
+   与 `ENV GOSUMDB=off`（模块本来就在 BuildKit 的 cache mount 里）。
+   **仓库里的 `docker/edge/Dockerfile` 一个字节都没为此改动** —— CI 的 runner 每次都是冷
+   缓存，必须走真 proxy，那边才是这条依赖的门禁。但如实说：**改后的 edge 镜像没有用仓库
+   原文在联网环境下建过一次**，`docker compose build edge` 在本机今天建不出来。
+6. **`core` 镜像是用仓库原文建的**（`docker compose build core`，没有任何注入）。
+7. **没验过「换一个真的不同的 uid」**（比如 1000）。所有实测都是 uid 1001，因为它同时是
+   镜像默认值和 runner 的取值。1777 那条设计就是为了扛任意 uid，但**扛没扛住没有实测**。
+8. **装了一个 Python 包**：抠 ci.yml 的 `run` 脚本要 `pyyaml`，本机没有，`pip install` 了一次。
+   收尾已卸载（见下）。这件事记在这儿是因为它动了 worktree 之外的东西。
+9. **`aite-core:p0` / `aite-edge:p0` 两个镜像标签现在指向本轨改过的 Dockerfile 建出来的
+   镜像**（原来是 22 小时前的）。标签是全局的，从 `main` 跑 compose 的人会拿到本轨的镜像。
+   不算残留（它们是本分支的正确产物），但合并前从别的 worktree 起 compose 要重 build。
