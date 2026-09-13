@@ -783,7 +783,7 @@ k8s 滚动更新都会），进程就永远不退，只能等 `SIGKILL`。**这�
 | `core/crates/edge-client/src/link.rs:83`、`:136` | 「`!status` 的健康行」那句谎话的**另外两个副本**（本轨改掉的是 `lib.rs` 的两个）。`link.rs` 不在本轨可写面 | 下一轮 |
 | `core/crates/edge-client/src/lib.rs` 的 `contract_state()` | 产品代码**零调用方**，只有 `tests/contract_gate.rs` 用。要不要删不是本轨的决定 | 待定（总管） |
 | `platform: fake` / `model.provider: scripted` 而没注入 | 与 ① 改前同形状：**七组里没有一组管**，全跑也全绿而 `aite run` 退出码 2。本轨实证了 `--offline` 那一档，全跑那一档没有凭证、没实证 | 下一轮 |
-| `.claude/hooks/guard_bash.py` 的 `PROBES` | 仍留着指向已删文件的 `aite/contracts/__init__.py`，命令里带 `*` 通配符时会反向匹配误拦（本轨撞上一次，换了写法绕开）。`review/v6-guard-patch.py` 就是删它的，**只有人能跑**，至今没跑 | 总管（跑一次那个补丁） |
+| `.claude/hooks/guard_bash.py` 的 `PROBES` | 仍留着指向已删文件的 `aite/contracts/__init__.py`，命令里带 `*` 通配符时会反向匹配误拦（本轨撞上一次，换了写法绕开）。`review/v6-guard-patch.py` 就是删它的，**只有人能跑** | ~~总管（跑一次那个补丁）~~ **已销（2026-09-13）**：`4969a8d fix(guard): 落地 V6 的守卫补丁` 已落盘，死探针确实删掉了（Z2 行为层复验两条） |
 
 ### 没做的 / 拿不准的
 
@@ -970,7 +970,7 @@ edge.capabilities_unavailable …
 | 位置 | 病 | 归哪轨 |
 |---|---|---|
 | `core/crates/control/tests/support/mod.rs:229`+`:258` `ParkedSleep` | 与本轨病根**同一个形状**的 `watch` 丢信号：`new()` 丢 `_rx` + `let _ = parked.send(true)`。闭包先于 `wait_until_parked()` 跑到时，`wait_for` 永远等，用例挂死。目前没见它抖，但窗口是真的 | 下一轮（`core/crates/control/**` 只读面）。药同样是 `send_replace(true)` |
-| `.claude/hooks/guard_bash.py` 的 `PROBES` | X1 记过、**本轨又撞两次**：正文里带 `**`（markdown 加粗）的 heredoc 会被反向匹配成已删的 `aite/contracts/__init__.py`；带中文引号的 `python3 -c` 被判「引号配不平」。两次都换写法绕开了。`review/v6-guard-patch.py` 只有人能跑，至今没跑 | 总管（跑一次那个补丁） |
+| `.claude/hooks/guard_bash.py` 的 `PROBES` | X1 记过、**本轨又撞两次**：正文里带 `**`（markdown 加粗）的 heredoc 会被反向匹配成已删的 `aite/contracts/__init__.py`；带中文引号的 `python3 -c` 被判「引号配不平」。两次都换写法绕开了。`review/v6-guard-patch.py` 只有人能跑 | ~~总管（跑一次那个补丁）~~ **已销（2026-09-13）**：同第八节，`4969a8d` 已落盘 |
 
 ### 没做的 / 拿不准的
 
@@ -1007,7 +1007,11 @@ B8 评测 ........... passed 10/10                （开场 / 收尾一致）
 
 **开场自检没撞到假红**（一次跑过，818/0）。守卫实测有效：Read `.claude/hooks/guard_bash.py`
 被拦下。中途撞到两次守卫误拦，都是 heredoc 正文被扫：一次「命令无法解析」（正文里有配不平的
-引号），一次「不透明载荷」（正文太长）。换 Edit 工具 / 临时文件绕开，没碰守卫本身。
+引号），一次「不透明载荷」（~~正文太长~~ —— **归因错了，2026-09-13 更正**：
+这个标签是「受保护路径出现在判不出读/写的位置」时打的，**与长度无关**。Z2 实测 3.7KB 与
+32KB 的纯中文正文都放行，而一条正文里带受保护路径字面量的**短**命令当场被判同一个标签 ——
+**按长度去绕是绕不掉的**，标准绕法是改用 Write 工具落文件。见「十二、Z2 回执」的误拦归类表第 8 行）。
+换 Edit 工具 / 临时文件绕开，没碰守卫本身。
 
 ### ① 判断题：选了 (a) —— fake / scripted 直接 FAIL
 
