@@ -61,7 +61,7 @@ W3 拿到 Linux 语义的办法写在 Dockerfile 的注释里：**`./data` 换�
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-aa1
 分支     : task-aa1
-基线     : __BASE__
+基线     : 76c62fd（守卫补丁进 git 那一格：`fix(guard): 落地 Z2 的 hook 命令`）
 工具链   : cargo 1.98.1、go 1.27.1、libprotoc 36.1、Docker 29.6.1、Docker Compose v5.3.0
 PATH     : 要有 /opt/homebrew/opt/rustup/bin 与 ~/go/bin
 ```
@@ -70,23 +70,23 @@ PATH     : 要有 /opt/homebrew/opt/rustup/bin 与 ~/go/bin
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-aa1
-git log --oneline -1        # 期望 __BASE_SHORT__
+git log --oneline -1        # 期望 76c62fd
 git status --short          # 期望空
 scripts/check.sh            # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
 
-**关键行期望**（总管 __TODAY__ 在合并后的 main 上实跑，原样抄的）：
+**关键行期望**（总管 2026-09-13 在合并后的 main 上实跑，原样抄的）：
 
 | 行 | 期望 |
 |---|---|
 | A3/C2 契约锁 | `OK 25 files` |
 | C1 契约测试 | `contracts passed=25 failed=0` |
-| B 全量 cargo test | `cargo passed=852 failed=0` |
+| B 全量 cargo test | `cargo passed=853 failed=0` |
 | B 全量 go test（-race） | 六个包全 `ok`（aiteerr/config/feishu/ingress/sandbox/server） |
 | B8 评测 | `passed 10/10` |
 
 > ⚠️ **如果你看到 `cargo passed=852 failed=1`、唯一红点是 `-p aite --test guard`** ——
-> 那说明 `.claude/settings.json` 的修正那一格没进 git，**停下来喊人**，别当回归也别自己修
+> 那说明 `.claude/settings.json` 的修正那一格没进 git（**总数仍是 853**，只是那一条从 passed 变成 failed），**停下来喊人**，别当回归也别自己修
 > （那是守卫的保护面，只有人能改）。
 
 **还有一条，必须真跑**：
@@ -127,7 +127,7 @@ READ / WRITE / MKDIR 各试一次。**把命令与逐字输出记进回执。**
   而且症状是「core 起来了但 edge 连不上」，不是「起不来」。
 
 **把每条决定的理由写进 Dockerfile 的那个小节**（W3 那段实测别删，它是病史；在它后面接着写
-「__TODAY__ 降权那一轮做了什么」）。
+「2026-09-13 降权那一轮做了什么」）。
 
 ### ③ edge：做，或者给出不做的判据
 
@@ -181,7 +181,7 @@ env -u FEISHU_APP_ID -u FEISHU_APP_SECRET -u FEISHU_BOT_OPEN_ID -u AITE_MODEL_AP
 
 ## 回执
 
-写进 `review/review-findings-2026-09-12-vmerge.md`，**追加**一节「十四、AA1 回执 —— __TODAY__」
+写进 `review/review-findings-2026-09-12-vmerge.md`，**追加**一节「十四、AA1 回执 —— 2026-09-13」
 （**只追加，别动别人的节**）。要有：
 
 - 基线与开场自检（五行关键值 + 守卫拦截那一条）；

@@ -18,7 +18,7 @@
 **判据是核过的，不是推的**（Z3 记的）：`!status` 唯一会多报的计数是 core 控制面自己的
 `events.dropped`（`plane.rs` 的 `dropped_note`，取自 `self.shared`），**edge 侧的计数一个都到不了**。
 
-总管 __TODAY__ 拍板：**动**。这一轨就是把它连根拔掉。
+总管 2026-09-13 拍板：**动**。这一轨就是把它连根拔掉。
 
 ## ⚠️ 这一轨的处境：你要改的每一个文件，守卫都拦着
 
@@ -85,7 +85,7 @@ protoc             v7.36.1
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-aa4
 分支     : task-aa4
-基线     : __BASE__
+基线     : 76c62fd（守卫补丁进 git 那一格：`fix(guard): 落地 Z2 的 hook 命令`）
 工具链   : cargo 1.98.1、go 1.27.1、libprotoc 36.1、Docker 29.6.1、Docker Compose v5.3.0
 PATH     : 要有 /opt/homebrew/opt/rustup/bin 与 ~/go/bin
 ```
@@ -94,23 +94,23 @@ PATH     : 要有 /opt/homebrew/opt/rustup/bin 与 ~/go/bin
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-aa4
-git log --oneline -1        # 期望 __BASE_SHORT__
+git log --oneline -1        # 期望 76c62fd
 git status --short          # 期望空
 scripts/check.sh            # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
 
-**关键行期望**（总管 __TODAY__ 在合并后的 main 上实跑，原样抄的）：
+**关键行期望**（总管 2026-09-13 在合并后的 main 上实跑，原样抄的）：
 
 | 行 | 期望 |
 |---|---|
 | A3/C2 契约锁 | `OK 25 files` |
 | C1 契约测试 | `contracts passed=25 failed=0` |
-| B 全量 cargo test | `cargo passed=852 failed=0` |
+| B 全量 cargo test | `cargo passed=853 failed=0` |
 | B 全量 go test（-race） | 六个包全 `ok`（aiteerr/config/feishu/ingress/sandbox/server） |
 | B8 评测 | `passed 10/10` |
 
 > ⚠️ **如果你看到 `cargo passed=852 failed=1`、唯一红点是 `-p aite --test guard`** ——
-> 那说明 `.claude/settings.json` 的修正那一格没进 git，**停下来喊人**。
+> 那说明 `.claude/settings.json` 的修正那一格没进 git（**总数仍是 853**，只是那一条从 passed 变成 failed），**停下来喊人**。
 
 **还有一条，必须真跑**：
 
@@ -226,7 +226,7 @@ scripts/check.sh        # 五行关键值与开场逐字相同（本轨在 workt
 
 ## 回执
 
-写进 `review/review-findings-2026-09-12-vmerge.md`，**追加**一节「十七、AA4 回执 —— __TODAY__」
+写进 `review/review-findings-2026-09-12-vmerge.md`，**追加**一节「十七、AA4 回执 —— 2026-09-13」
 （**只追加，别动别人的节**）。要有：
 
 - 基线与开场自检（五行关键值 + 守卫拦截那一条）；

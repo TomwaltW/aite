@@ -2,7 +2,7 @@
 
 ## 背景：这轨是从哪来的
 
-守卫（`.claude/hooks/guard_bash.py`）到 __TODAY__ 为止，在台账里留下了 **10 次误拦**
+守卫（`.claude/hooks/guard_bash.py`）到 2026-09-13 为止，在台账里留下了 **10 次误拦**
 （X1 1 次、Y1 2 次、Y2 2 次、Z1 3 次，外加总管这一侧 2 次）。Z2 把它们归成了四类，
 写在 `core/crates/app/tests/guard.rs` 的模块头里：
 
@@ -58,7 +58,7 @@ Read / `cat` 守卫自身会被当场拦下，这是设计如此，不是可以�
 ```
 worktree : /Users/shensikai/Documents/Aite/.worktrees/task-aa3
 分支     : task-aa3
-基线     : __BASE__
+基线     : 76c62fd（守卫补丁进 git 那一格：`fix(guard): 落地 Z2 的 hook 命令`）
 工具链   : cargo 1.98.1、go 1.27.1、libprotoc 36.1、Docker 29.6.1、Docker Compose v5.3.0
 PATH     : 要有 /opt/homebrew/opt/rustup/bin 与 ~/go/bin
 ```
@@ -67,23 +67,23 @@ PATH     : 要有 /opt/homebrew/opt/rustup/bin 与 ~/go/bin
 
 ```bash
 cd /Users/shensikai/Documents/Aite/.worktrees/task-aa3
-git log --oneline -1        # 期望 __BASE_SHORT__
+git log --oneline -1        # 期望 76c62fd
 git status --short          # 期望空
 scripts/check.sh            # 期望最后一行「全部通过」，退出码 0（首次全量编译 5–10 分钟）
 ```
 
-**关键行期望**（总管 __TODAY__ 在合并后的 main 上实跑，原样抄的）：
+**关键行期望**（总管 2026-09-13 在合并后的 main 上实跑，原样抄的）：
 
 | 行 | 期望 |
 |---|---|
 | A3/C2 契约锁 | `OK 25 files` |
 | C1 契约测试 | `contracts passed=25 failed=0` |
-| B 全量 cargo test | `cargo passed=852 failed=0` |
+| B 全量 cargo test | `cargo passed=853 failed=0` |
 | B 全量 go test（-race） | 六个包全 `ok`（aiteerr/config/feishu/ingress/sandbox/server） |
 | B8 评测 | `passed 10/10` |
 
 > ⚠️ **如果你看到 `cargo passed=852 failed=1`、唯一红点是 `-p aite --test guard`** ——
-> 那说明 `.claude/settings.json` 的修正那一格没进 git，**停下来喊人**。
+> 那说明 `.claude/settings.json` 的修正那一格没进 git（**总数仍是 853**，只是那一条从 passed 变成 failed），**停下来喊人**。
 > 本轨尤其别自己动手修：那正是你要研究的那个保护面。
 
 **还有一条，必须真跑**：
@@ -174,7 +174,7 @@ cd core && cargo clippy --workspace --all-targets -- -D warnings
 
 ## 回执
 
-写进 `review/review-findings-2026-09-12-vmerge.md`，**追加**一节「十六、AA3 回执 —— __TODAY__」
+写进 `review/review-findings-2026-09-12-vmerge.md`，**追加**一节「十六、AA3 回执 —— 2026-09-13」
 （**只追加，别动别人的节**）。要有：
 
 - 基线与开场自检（五行关键值 + 守卫拦截那一条的**逐字原话**）；
