@@ -35,10 +35,14 @@ async fn second_app_on_the_same_db_resumes_the_same_thread() {
     platform1
         .emit(&Ev::new("e1", "第一问").message_id(ROOT).build())
         .await;
-    let task1 = app1.store.list_active_tasks(CHAT).await.expect("list")[0].clone();
-    let session_id = task1.session_id.clone();
     let p1 = platform1.clone();
     wait_until(|| p1.inner.count("send_text") == 1, "第一个任务交付").await;
+    // 交付完了再从磁盘读。这条脚本是单步 `final`，走 Answering 路径 —— 落 `Answering`
+    // 就退出活跃口径，原来那句 `list_active_tasks(CHAT)[0]` 在 worker 抢先跑完时报的是
+    // 越界 panic，而不是人话（撑开窗口必现，本轨实测）。`id` / `session_id` / `task_no`
+    // 建出来就定死，跑多快都一样。
+    let task1 = the_only_task_from_disk(&config, "第一套组装").await;
+    let session_id = task1.session_id.clone();
     run1.shutdown().await.expect("run_app 正常收场");
 
     // `run_app` 的收尾把连接关了：再用它查任何东西都该报「未初始化」。
@@ -70,9 +74,14 @@ async fn second_app_on_the_same_db_resumes_the_same_thread() {
                 .build(),
         )
         .await;
-    let task2 = app2.store.list_active_tasks(CHAT).await.expect("list")[0].clone();
     let p2 = platform2.clone();
     wait_until(|| p2.inner.count("send_text") == 1, "第二个任务交付").await;
+    // 同上。这会儿磁盘上有两个任务了，要的是**不是** task1 的那个。
+    let task2 = tasks_from_disk(&config)
+        .await
+        .into_iter()
+        .find(|t| t.id != task1.id)
+        .unwrap_or_else(|| panic!("第二套组装该留下一个新任务，除了 {}", task1.id));
 
     assert_eq!(task2.session_id, session_id, "命中同一会话");
     assert_eq!(

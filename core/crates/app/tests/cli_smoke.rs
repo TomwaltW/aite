@@ -107,6 +107,58 @@ fn preflight_offline_reports_seven_lines_and_names_env_vars_without_values() {
     );
 }
 
+/// **进程级**那条：配置指着一个不存在的 system prompt 时，`aite preflight` 的退出码
+/// 必须是 1 —— 而不是像 2026-09-12 那次一样报「全部没红，可以起飞」然后退 0。
+///
+/// 那天的现场：`preflight --offline` 退出码 0、`aite run` 退出码 2
+/// （`读不到 system prompt：aite/worker/prompts/platform.md`），因为那份配置还指着当天
+/// 被删掉的 Python 树，而七组里没有一组碰 `worker.system_prompt_path`。
+/// 判据面（FAIL 而不是 WARN、「怎么补」的正文、offline 下照跑）钉在
+/// `tests/preflight_e2e.rs`；**这一条只钉真二进制的退出码和它打给人看的那两行** ——
+/// 脚本判的是退出码，上面那些断言全绿而退出码是 0 的话，总管照样会起飞失败。
+#[test]
+fn preflight_exits_one_when_the_system_prompt_is_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = tmp.path().join("stale.yaml");
+    // storage 指进 tempdir：第 7 组的可写探测是真建一个目录再删，别碰仓库的 data/。
+    std::fs::write(
+        &cfg,
+        format!(
+            "platform: feishu\nmodel:\n  provider: openai_compat\n  \
+             base_url: http://127.0.0.1:1/v1\n  model: fake-model\n\
+             worker:\n  system_prompt_path: aite/worker/prompts/platform.md\n\
+             storage:\n  sqlite_path: {d}/aite.db\n  evidence_dir: {d}/evidence\n  \
+             artifacts_dir: {d}/artifacts\n",
+            d = tmp.path().display()
+        ),
+    )
+    .expect("写 config");
+
+    let out = aite()
+        .args(["preflight", "--offline", "--config"])
+        .arg(&cfg)
+        .current_dir(repo_root())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "退出码必须是 1：\n{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("[1/7]"))
+        .unwrap_or_else(|| panic!("没有第 1 组那一行：\n{stdout}"));
+    assert!(row.contains("FAIL"), "第 1 组没红：{row}");
+    assert!(row.contains("worker.system_prompt_path"), "{row}");
+    assert!(
+        stdout.contains("core/crates/worker/prompts/platform.md"),
+        "「怎么补」里没有正确路径：\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("全部没红，可以起飞"),
+        "起不来还说可以起飞 —— 这正是 2026-09-12 那条：\n{stdout}"
+    );
+}
+
 /// R7 的评测面：场景清单读得出来，且恰好是 §3.8 的十个。
 #[test]
 fn evals_lists_the_ten_p0_scenarios() {

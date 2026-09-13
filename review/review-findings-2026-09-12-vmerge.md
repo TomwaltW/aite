@@ -532,3 +532,273 @@ core 先降。这些连实测输出一起写进两个 Dockerfile 的「以谁的
 793 → **797**（Rust，全在 `cli_smoke.rs`：16 → 20）；
 Go 侧 `internal/sandbox` 无 daemon 档 **19 → 29** 条（其中 `docker_pure_test.go` 13 → 23），
 docker 档 50 条不变。
+
+---
+
+## 八、X1 回执 —— 2026-09-13
+
+基线 `542a29c`（= `69323db` 的代码面 + 一个只加派单文件的 commit）。
+
+开场自检与收尾 `scripts/check.sh` 的五行关键值：
+
+```
+契约锁 ............ OK 25 files                 （开场 / 收尾一致）
+C1 契约测试 ....... contracts passed=25 failed=0（开场 / 收尾一致）
+B 全量 cargo ...... 开场 810 failed=0 → 收尾 818 failed=0
+B go test（-race）. 六个包全 ok                  （开场 / 收尾一致）
+B8 评测 ........... passed 10/10                （开场 / 收尾一致）
+全部通过，退出码 0
+```
+
+**开场自检没撞到假红**（一次跑过，810/0）。守卫实测有效：Read `.claude/hooks/guard_bash.py`
+被拦下。收尾第一遍 `check.sh` 红在 **A4b `cargo fmt --check`**（两个被改文件的格式），
+`cargo fmt --all` 写模式会碰 contracts 冻结面、被守卫正确拦下，改用
+`rustfmt --edition 2024` 只格式化那两个文件；实质检查那一遍就全过了。
+
+### ① preflight 漏检 `worker.system_prompt_path`
+
+判据折进**第 ① 组**，没有变成八组 —— 「七组」这个说法全仓一处没改（下面「涟漪」那栏）。
+`check_config` 多吃一个 `repo_root`，配置解析成功后**直接复用 `aite run` 走的那个
+`load_system_prompt`**：两边逐字同一条路径，相对路径都按 `Options.repo_root` 解析，
+而它就是进程 cwd（`preflight::run` 里 `current_dir()`），与 `require_system_prompt`
+相对 cwd 的口径对得上，不会出现「这边说行、那边说不行」。
+
+* **FAIL 不是 WARN**（硬起飞前提），但**照样把 `cfg` 交出去** —— 不交的话后面六组会全变成
+  「第 1 组没过，配置读不出来」，「一项失败不阻断后面的」当场破功。
+* 「怎么补」三件事齐：当前值、该改成什么（`core/crates/worker/prompts/platform.md`）、
+  以及那条真实病史。病史那半句**只在认出旧 Python 树时才说**（路径不是那个还硬贴一段
+  2026-09-12 的病史，只会把人往错方向带），另一支给 cwd 那条。
+* `--offline` 下照样跑（它不碰网络也不碰 docker），单独有测试钉着。
+* 红线照旧：detail / fix 都是 `CheckResult` 的字段，渲染前统一过 `Redactor`，没有新的直写路径。
+
+**另外修掉 `app.rs` 那句误诊。** 原话「路径相对于进程的工作目录 —— 多半是没在仓库根起进程」
+把人带反了（总管撞上时 cwd 就是仓库根）。现在先说真正最可能的（配置里这一行本身不对 /
+旧配置指着已删的 Python 树），再说 cwd，并且**把解析成的绝对路径打出来**。
+
+**`app.rs:195`（连不上 edge 那条）复核了，判定不改**：那一条的措辞是「socket 路径由 config 的
+`edge.edge_socket` 决定，相对仓库根 —— 多半是没在仓库根起进程，或者 aite-edge 还没起」。
+两个真因都给了，而且 edge socket 用的是 `repo_root` 而不是配置里的绝对路径，cwd 确实是常见真因。
+与 prompt 那条的处境不同（那条的真因是配置内容本身），不改。
+
+**钉它的测试（5 条新的 + 2 条集成）**：`preflight.rs` 的 `mod tests` 五条（常量与契约默认值一致 /
+与样例配置一致 / FAIL 但仍交出 config / 相对路径按 repo_root 解析 / 病史只在该说时说），
+`preflight_e2e.rs` 两条（FAIL + `report.ok()` 假 + fix 正文 + 后六组照跑 + `--json` 面；
+另一条单钉 `--offline` 下照跑），`cli_smoke.rs` 一条（真二进制，退出码 1）。
+
+**改坏产品代码验过**（五组变异，每组都被抓到）：
+
+| 改坏什么 | 谁红了 |
+|---|---|
+| 整段判据摘掉（退回 2026-09-12 那天） | e2e 2 条 + cli_smoke 1 条 + lib 1 条 |
+| FAIL 降成 WARN（不拦起飞了） | e2e 2 条 + cli_smoke 1 条 + lib 1 条 |
+| 改成相对「配置文件所在目录」解析（两边口径分家） | lib 1 条 |
+| 「该改成什么」指错一个字母 | lib 2 条 + e2e 1 条 + cli_smoke 1 条 |
+| 病史那句话无条件贴 | lib 1 条 |
+
+### ② `startup_recovery.rs:259` 的裸 `[0]`
+
+**原病复现**（照 W2 的手法，在取下标前插一句 `settle().await`）：
+
+```
+panicked at crates/app/tests/startup_recovery.rs:260:74:
+index out of bounds: the len is 0 but the index is 0
+```
+
+**没有照「换成 `first_active_task`」那条修**，因为实测它不够 —— 同样撑开窗口，它照样红，
+只是把越界换成一句人话，还多等 5s：
+
+```
+panicked at crates/app/tests/common/mod.rs:553:13:
+5s 内 oc_1 没等到活跃任务：旧线程里的新任务。活跃列表从头到尾是空的 ——
+要么任务压根没建出来，要么它跑得比这句断言还快、已经落 `Answering` / 终态从活跃口径里退场了。
+```
+
+那条人话自己说破了病根：这条脚本是**单步 `final`**，worker 一走完就落 `Answering`，
+而 `Answering` 不在 `ACTIVE_TASK_STATUSES` 里。所以判据换成**对负载不敏感**的那种：
+**先等交付完成，再从磁盘把任务读回来**。要断的 `task_no` / `session_id` 在任务建出来那一刻
+就定死了，终态时还是那两个值，跑多快都不影响结论。
+
+**修后确认复现不出来**：同一位置插 1 次 / 3 次 `settle()`，都是 `ok. 1 passed`。
+
+### ③ 同族的另外三处
+
+三处**全部实测是必现**（不只是「报的不是人话」）—— 包括我一开始以为窗口大的
+`evidence_on_disk.rs:64`，推测被实测推翻：
+
+| 位置 | 撑开窗口 | 修法 |
+|---|---|---|
+| `evidence_on_disk.rs:64` | 越界必现 | 跑完后 `the_only_task_from_disk` |
+| `sqlite_cross_process.rs:38` | 越界必现 | 同上 |
+| `sqlite_cross_process.rs:73` | 越界必现 | `tasks_from_disk` 里挑不是 task1 的那个 |
+
+所以三处都走 ② 那条路，而不是 `first_active_task`。helper 收在
+`tests/common/mod.rs`（`tasks_from_disk` / `the_only_task_from_disk`），
+任务 id 取自 evidence 目录名、本体从 SQLite 读，两边对不上当场 panic ——
+顺带把「evidence 目录名就是 task_id」也钉住了。**四处修后撑开窗口都复现不出来。**
+
+`evidence_on_disk.rs:264` 有 `wait_until` 兜着，照派单没动。
+
+### ④ `startup_recovery` 的第二个抖动源 —— **不是「机器太忙」，是产品的真死锁**
+
+派单让「先判断这 10s 在等什么，别急着调大预算」。查下来 **W2 那句警告是对的，而我的第一版
+判断是错的** —— 先按「瞬时饿死」把兜底放到 60s，**实测照样撞穿且实际等满 60.0s**。
+调度饥饿早该返回了，所以它不是饥饿。
+
+**三条独立证据指向真死锁**：
+
+1. `sample` 抓的**三份栈形状完全一致**：两个 tokio worker **全都 park**、栈上**一个 aite 帧都没有**。
+   饥饿的话 worker 会在跑别的东西 —— 这是没有可运行 task 的死锁。
+2. 8 路并发 24 遍红 3 遍（**12.5%**），顺序跑不红：越挤越容易让 `run_app` 那条 task 晚一步。
+3. 死锁那一遍的日志**停在 `aite.orphans`，`aite.stopping` 一次都没打** ——
+   `shutdown()` 的第一行都没到，卡的是它前面的 `serve()`。
+
+**病根**（探针实证，不是推理）：`StopSignal::set()`（`src/run.rs`）写的是
+`let _ = self.tx.send(true)`，而 `tokio::sync::watch::Sender::send` 在**一个活跃接收者都没有**时
+返回 `Err` 且**连内部那个值都不改**。`StopSignal::new()` 当场就把建出来的 `_rx` 丢了，于是在
+`run_app` 走到 `serve()`（那里才 `subscribe()`）之前，`set()` 是一次**彻底的 no-op**。
+最小探针：
+
+```rust
+let stop = StopSignal::new();
+stop.set();
+assert!(stop.is_set());   // ← 红：set() 之后 is_set() 仍是 false
+```
+
+**窗口在哪**：`RunningApp::start` 等的是 `platform.start()` 被调（`inner.started()`），
+而 `takeoff()` 里 `start()` 之后还有 `spawn(run_forever)` 和 `serve()` 两步。
+测试在这两步之间 `set()`，就正好落进洞里。
+
+**真机也踩得到**：`aite run` 把 `SIGINT`/`SIGTERM` 接到同一个 `StopSignal` 上
+（`install_signal_handlers`）。信号赶在 `serve()` 之前到达（compose 的 `stop_grace_period`、
+k8s 滚动更新都会），进程就永远不退，只能等 `SIGKILL`。**这不是测试专属问题。**
+
+**药在 `src/run.rs` —— 本轨只读面，记账转出去**（见下表）：`set()` 改用 `send_replace(true)`
+（不管有没有接收者都更新值），或者让 `StopSignal::new()` 自己留一个 `rx`。
+
+**本轨在测试侧做的**（可写面内，带指向病根的注释，`run.rs` 修好之后该删）：
+
+* `RunningApp::shutdown` **重试 `set()` 直到 `is_set()` 为真**（带 5s 死线）。
+  一旦 `run_app` 订阅上，下一次 `set()` 就生效。这不是「把挂死咽掉」—— 真挂死照样撞穿兜底。
+* 兜底预算**改回 10s**（放到 60s 毫无意义：真挂死等多久都不返回，只让每次假红多拖 50s）。
+* 超时那句 panic 消息改成指向第一现场（「看最后一条 `aite.*` 日志停在 `aite.stopping` 之前
+  还是之后」），不再说「多半是机器太忙」那种分不出两种病的话。
+
+**怎么区分它和真挂死**（下次撞上不用再判一遍，已写进 `common/mod.rs` 的文档）：
+撞穿兜底 → 看最后一条 `aite.*` 日志。停在 `aite.stopping` **之前** = 根本没进收尾，卡的是
+`serve()`（十有八九就是这条丢信号）；停在**之后**才是收尾里某一步真卡住了。
+
+**验**：改前 8 路并发 24 遍红 3 遍；**改后同样 8 路并发 120 遍红 0 遍**。
+外加派单要的：顺序连跑 **20 遍 0 红**，负载下（同时跑 `cargo test --workspace`）**6 遍 0 红**。
+
+### ⑤ `edge-client/src/lib.rs` 的两条失真注释
+
+全仓 grep 核实：
+
+* `contract_state()` —— **产品代码里零调用方**，唯一使用者是 `tests/contract_gate.rs`（9 处），
+  那一组拿它当闸门三态的判据。坐实了 W2 的记账。**要不要删这个函数不是本轨的决定**，
+  注释里把话说准即可。
+* `status()` —— 真调用方三个：`app.rs` 的 `check_contract_version`（起飞比版本）、
+  `preflight.rs` 第 6 组（沙箱可用，先问 daemon 可达）、`wiring.rs` 的评测接线。
+* 那条「`!status` 的健康行」**全仓不存在** —— 与 W2 ③ 改掉的 `app.rs:83` 那句同源。
+
+只改注释，代码一个字没动。**同一句谎话还剩两个副本在 `link.rs:83` / `:136`**，
+那个文件不在本轨可写面，记账（见下表）。
+
+### ① 的两边口径对照
+
+拿一份 `worker.system_prompt_path: aite/worker/prompts/platform.md`（= 总管那份 2026-09-10
+配置的形状）在**仓库根**跑：
+
+| | 改之前 | 改之后 |
+|---|---|---|
+| `preflight --offline` | `[1/7] OK 配置可加载`，汇总 `FAIL 0`，**「全部没红，可以起飞。」退出码 0** | `[1/7] FAIL 配置可加载 … 但 worker.system_prompt_path 指不到文件：… → /…/aite/worker/prompts/platform.md（不存在）`，退出码 **1**，「怎么补」给出正确路径 + 病史 |
+| `preflight`（**不带** `--offline`，全跑） | `[1/7] OK 配置可加载` —— **七组里根本没有这一项，全跑也救不了** | FAIL（同上，第 1 组与 offline 无关） |
+| `aite run` | 退出码 2，`…路径相对于进程的工作目录 —— 多半是没在仓库根起进程。`（**误诊**：当时 cwd 就是仓库根） | 退出码 2，先说配置里这一行本身不对 + Python 树病史 + **打出解析成的绝对路径**，再说 cwd |
+
+**照「怎么补」改完之后**（只把那一行换成 `core/crates/worker/prompts/platform.md`）：
+`preflight --offline` 第 1 组转 `OK`、退出码 0；`aite run` **不再死在 prompt 这一步** ——
+它走过去了，进主循环（这台机器上 `aite-edge` 没起，卡在 edge 不可达的 WARN 上，预期内）。
+两边口径一致。
+
+### ① 之后 `--offline` 还剩哪些「全绿 ≠ 起得来」的口子
+
+**没有补全，如实列。** 实跑对拍（每种坏配置各跑一次 `preflight --offline` 与 `aite run`）：
+
+| 坏配置 | `preflight --offline` | `aite run` | 归哪一组管 |
+|---|---|---|---|
+| `model.base_url` 空 | 全绿，退出 0 | 退出 2 | 第 5 组，**被 `--offline` 跳过**（V3 记的那条，仍在） |
+| `model.model` 空 | 全绿，退出 0 | 退出 2 | 同上 |
+| `platform: fake` 而没注入平台 | 全绿，退出 0 | 退出 2（`build_app` 明文拒绝） | **七组里没有一组管** ← 与 ① 改前同形状 |
+| `model.provider: scripted` 而没注入模型 | 全绿，退出 0 | 退出 2（同上） | **七组里没有一组管** ← 同上 |
+| `system_prompt_path` 指着已删的 Python 树 | **FAIL，退出 1** | 退出 2 | 第 1 组（① 补的） |
+
+前两条是「被 `--offline` 跳过」，去掉 `--offline` 就查得出来。**后两条更狠，和 ① 改前一个病：
+七组里根本没有一组碰它，全跑一遍也是全绿。** 第 1 组只把 `platform` / `model.provider` 的
+**取值**报出来，不判断它跟「有没有注入」搭不搭；其余六组的判据都与这两个取值无关。
+
+> 后两条的「全跑也查不到」是**从判据代码推断的，没在真机实证** —— 这台机器没有飞书凭证，
+> 不带 `--offline` 跑第 2/3/4 组必红，演示不了「七组全绿而起不来」。要坐实得在一台凭证配齐的
+> 机器上跑一次。**归下一轮。**
+
+### ②④ 的复现记录
+
+| | 原病 | 修后 |
+|---|---|---|
+| ② | 插 `settle()` → `index out of bounds: the len is 0 but the index is 0`（必现） | 插 1 次 / 3 次 `settle()` 都是 `ok. 1 passed` |
+| ③ 三处 | 各插 `settle()` → 越界**全部必现** | 各插 3 次 `settle()` → 四处全 `ok` |
+| ④ | 8 路并发 24 遍红 3 遍（12.5%）；栈：两 worker 全 park、0 个 aite 帧；日志停在 `aite.orphans`；放到 60s 照样等满 60.0s | 8 路并发 **120 遍红 0 遍**；顺序 **20 遍 0 红**；负载下 **6 遍 0 红** |
+
+### ③ 全仓同族写法清单
+
+扫的是 `list_active_tasks(...)[0]`、`.expect("…")[0]`、`.await…[0]`、`.unwrap()[0]` 四种形状。
+
+| 位置 | 在可写面内？ | 改了没 |
+|---|---|---|
+| `app/tests/startup_recovery.rs:259`（②） | 是 | ✅ 改了 |
+| `app/tests/evidence_on_disk.rs:64` | 是 | ✅ 改了 |
+| `app/tests/sqlite_cross_process.rs:38` | 是 | ✅ 改了 |
+| `app/tests/sqlite_cross_process.rs:73` | 是 | ✅ 改了 |
+| `app/tests/evidence_on_disk.rs:264` | 是 | ❌ 有 `wait_until` 兜着，照派单没动 |
+| `app/tests/reconnect_replay.rs:578` | 否 | 不是同族：前面有 `rig.settled(1).await` 守着 |
+| `app/tests/startup_recovery.rs:378` | 是 | 不是同族：前一行 `assert_eq!(count("send_text"), 1)` 已经把长度断了 |
+| `worker/tests/test_final.rs:25,87`、`test_checklist.rs:45,72,80` | 否 | 不是同族：前面都先断了 `.len()`，且 `run_script` 跑完才返回 |
+| `testing/tests/fake_model.rs:115,312` | 否 | 不是同族：`tool_calls` 的纯数据断言，没有任务生命周期竞态 |
+
+### 测试数
+
+810 → **818**（+8）：
+
+* `src/preflight.rs` 的 `mod tests` **+5**（31 → 36）：常量与契约默认值一致、与样例配置一致、
+  FAIL 但仍交出 config、相对路径按 repo_root 解析、病史只在该说时说。
+* `tests/preflight_e2e.rs` **+2**（15 → 17）：prompt 指不到 → 第 1 组 FAIL；`--offline` 下照跑。
+* `tests/cli_smoke.rs` **+1**（20 → 21）：进程级，真二进制，退出码 1。
+
+②③④⑤ 都是**改判据不加条数**（同一批测试换了个不会随负载变脸的问法）。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/app/src/run.rs` 的 `StopSignal::set()` | **没有接收者时 `watch::send` 返回 `Err` 且不改值 → `set()` 是彻底的 no-op，信号丢掉、`serve()` 永远等不到。**真机上 `SIGTERM` 赶在 `serve()` 之前到达就永不退出，只能 `SIGKILL`。本轨探针实证 + 三份栈 + 日志三条证据。药：`send_replace(true)`，或 `new()` 里留一个 `rx`。修好之后把 `common/mod.rs` 里那个重试循环删掉 | **下一轮（产品面，优先级高 —— 它不只是测试抖动）** |
+| `core/crates/edge-client/src/link.rs:83`、`:136` | 「`!status` 的健康行」那句谎话的**另外两个副本**（本轨改掉的是 `lib.rs` 的两个）。`link.rs` 不在本轨可写面 | 下一轮 |
+| `core/crates/edge-client/src/lib.rs` 的 `contract_state()` | 产品代码**零调用方**，只有 `tests/contract_gate.rs` 用。要不要删不是本轨的决定 | 待定（总管） |
+| `platform: fake` / `model.provider: scripted` 而没注入 | 与 ① 改前同形状：**七组里没有一组管**，全跑也全绿而 `aite run` 退出码 2。本轨实证了 `--offline` 那一档，全跑那一档没有凭证、没实证 | 下一轮 |
+| `.claude/hooks/guard_bash.py` 的 `PROBES` | 仍留着指向已删文件的 `aite/contracts/__init__.py`，命令里带 `*` 通配符时会反向匹配误拦（本轨撞上一次，换了写法绕开）。`review/v6-guard-patch.py` 就是删它的，**只有人能跑**，至今没跑 | 总管（跑一次那个补丁） |
+
+### 没做的 / 拿不准的
+
+1. **④ 只在测试侧兜住，产品的病没修** —— `run.rs` 不在可写面。所以「`startup_recovery` 不再抖」
+   这件事是靠测试侧的重试循环达成的，**不是病治好了**。`run.rs` 那条修掉之前，任何新写的
+   「`stop.set()` 之后等 `run_app` 返回」都会重新踩到。
+2. **越了一处白名单：`core/crates/app/tests/common/mod.rs` 动得比派单预期多。** 派单写的是
+   「`first_active_task` 已在 `:542`，够用就别改」，而实测它不够用（②③ 那四处撑开窗口后它照样红），
+   所以加了 `tasks_from_disk` / `the_only_task_from_disk`，并改了 `shutdown` 与
+   `SHUTDOWN_FALLBACK_SEC`。`first_active_task` 本身**一个字没动**。
+3. **临时探针文件用完即删**：验 `StopSignal` 丢信号时临时写过
+   `core/crates/app/tests/tmp_stopsignal_probe.rs`，拿到证据后删掉了，不在交付 diff 里。
+4. **`acceptance-M.md` §0.1 那份逐行实测输出重跑了，结论是「不用改」** —— ① 不影响这一档
+   （样例配置指的 prompt 在仓库里存在，第 1 组照旧 OK），逐字比对一致。改的是它下面那句
+   「第 1 组只验『配置解析得出来』」—— 那句现在不准了。
+5. **`platform: fake` / `provider: scripted` 那两个口子没补。** 它们和 ① 同形状，本来可以顺手
+   一起折进第 ① 组，但那超出派单点名的范围，且要重新想「注入」这件事在 preflight 里怎么表达
+   （preflight 没有 `Injections`）。记账，不自作主张。

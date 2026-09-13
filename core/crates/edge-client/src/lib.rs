@@ -74,8 +74,12 @@ impl EdgeClient {
 
     /// edge 自身健康：RΩ 起飞时拿它比对 `contract_version`（不等就拒绝起飞）。
     ///
-    /// 每答上来一次都顺手记进契约闸门（`gate.rs`）—— 起飞体检和 `!status` 的健康行
-    /// 走的都是这条路，两处都算「连上就比一次」的入口。
+    /// 每答上来一次都顺手记进契约闸门（`gate.rs`），所以它也是「连上就比一次」的入口。
+    ///
+    /// 产品代码里的三个调用方：`app.rs` 的 `check_contract_version`（起飞时比版本）、
+    /// `preflight.rs` 第 6 组（沙箱可用，先问 daemon 可达）、`wiring.rs` 的评测接线。
+    /// 原注释写的「`!status` 的健康行」**全仓不存在** —— 与 `app.rs` 上那句同源的谎话
+    /// （W2 已改掉那一处）。
     pub async fn status(&self) -> Result<EdgeStatus, PlatformError> {
         let reply = self
             .link
@@ -89,8 +93,11 @@ impl EdgeClient {
         Ok(status)
     }
 
-    /// 契约闸门此刻的状态（`!status` 的健康行拿它说人话；闸落着时 platform /
-    /// sandbox 的每一发 RPC 都会在本地直接失败）。
+    /// 契约闸门此刻的状态：闸落着时 platform / sandbox 的每一发 RPC 都会在本地直接失败。
+    ///
+    /// **产品代码里零调用方** —— 唯一的使用者是 `tests/contract_gate.rs`，那一组拿它当
+    /// 闸门行为的判据（未验证 / 放行 / 落闸三态）。原注释说它是给「`!status` 的健康行」
+    /// 用的，而那条健康行全仓不存在；要不要删这个函数不在本轨的口径里，先把话说准。
     pub fn contract_state(&self) -> ContractState {
         self.link.contract_state()
     }
