@@ -2873,3 +2873,608 @@ Write(file_path = "crates/contracts/src/lib.rs")     → 退出码 0，放行
    `cargo clippy --workspace --all-targets -- -D warnings` 干净。
    `cargo fmt --all` 照例被守卫拦（本轨正好量了这一格），改用
    `rustfmt --edition 2024 crates/app/tests/guard.rs`。
+
+## 十七、AA4 回执 —— 2026-09-13
+
+把「`!status` 会显示 edge 侧的东西」这句谎话从**源头**拔掉：改两行注释，一行在冻结的
+`proto/aite/v1/edge.proto`、一行在冻结的 `edge/cmd/aite-edge/main.go`。
+
+**本轨在 worktree 里一行产品代码都没改。** 交付是 `review/aa4-proto-patch.py` + 本节末尾那条
+命令链，由人落地。真正的活不在那份脚本上（改的就是两行注释），在 **② 的 codegen 可复现性验证**上 ——
+没有那条证明，谁也不敢在冻结的生成产物上跑 `make proto-gen`。
+
+### 基线与开场自检
+
+HEAD `76c62fd`（与派单抬头一致），`git status --short` 空。`scripts/check.sh` 一次跑过，
+**五行关键值与派单期望逐字相同**：
+
+| 行 | 实测 |
+|---|---|
+| A3/C2 契约锁 | `OK 25 files` |
+| C1 契约测试 | `contracts passed=25 failed=0` |
+| B 全量 cargo test | `cargo passed=853 failed=0` |
+| B 全量 go test（-race） | 六个包全 `ok`（aiteerr 6.655s / config 6.185s / feishu 11.485s / ingress 9.620s / sandbox 8.749s / server 9.867s） |
+| B8 评测 | `passed 10/10` |
+
+末行「全部通过」，退出码 0。**没撞上那三个抖动 target。**
+
+守卫拦截那一条**真跑了**，Read `.claude/hooks/guard_bash.py` 被拦下，逐字：
+
+```
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+（顺带确认：Z2 那条带 `[ -f ]` 回退的 hook 命令已经在生效中，方括号里就是它。）
+
+> **派单有一条与现状不符，是好消息**：派单说「本机没装 Go 侧的 codegen 插件」。
+> **实测已经装了，而且版本正好对上**（见 ②）。所以本轨**没装任何东西**，
+> 也就没有「装插件产生的残留」要交代。
+
+### ① 两处注释改成什么
+
+#### ①.0 先说复核结果（本轨自己 grep 的，没照抄 Z3，两处与派单不一致）
+
+**（a）`GetStatus` 的调用方是四个，不是三个。**
+
+| 调用方 | 走哪条路 | 干什么 |
+|---|---|---|
+| `app.rs:370` `check_contract_version` | `EdgeClient::status()` | 起飞比契约版本，最多 5 发、每发隔 1s |
+| `preflight.rs:1345` `check_sandbox` | `EdgeClient::status()` | 第 6 组「沙箱可用」，先问 daemon 可达 |
+| `wiring.rs:388` `docker_probe` | `EdgeClient::status()` | 评测接线的起飞前体检 |
+| `link.rs` `verify_contract` | **直接** `status_client().get_status()` | 契约闸门：后台探针每次拨通后补比一发 |
+
+**这跟既有注释不矛盾，别当成打架**：`gate.rs` / `lib.rs` / `link.rs` / `contract_gate.rs` 里那句
+「三个调用方」限定的是 **`EdgeClient::status()`** 的调用方，那确实是三个（`link.rs:148` 自己
+还写着「两个调用方都在本 crate 里：`EdgeClient::status()` 与上面那个 `verify_contract`」，
+说的是 `status_client()`）。本轨改的是 **proto 上的 RPC 注释**，量的是 **RPC** 的调用方，所以是四个。
+
+判据只有两条：`contract_version` 要与 core 一致、`sandbox_ok` 要为真。其余字段只进日志 / preflight 的 extra。
+
+**（b）⚠️ 派单说 `platform_connected`「被 `app.rs:388` 打成日志、**被 preflight 第 6 组读**」——
+后半句不对。**
+
+`preflight.rs` 的 `edge_status_verdict` 只读 `contract_version` 与 `sandbox_ok`，
+往 extra 里只放 `edge_version` / `edge_contract_version` / `sandbox_ok`，
+**从头到尾不碰 `platform_connected`**。全仓 grep（排除 `core/target`）确认：
+Rust **产品**代码里 `platform_connected` 只出现一次 —— `app.rs:388`，那行
+`tracing::info!(target: "aite.edge_status")` 的一个字段。其余全在测试里
+（`preflight.rs:3222`、`edge_client.rs:228`、`common/mod.rs:453`）。
+
+所以 `main.go` 那条注释按**实测**写成「preflight 第 6 组与评测接线的体检都只读
+`contract_version` 与 `sandbox_ok`，**不读它**」，没有沿用派单那半句。
+
+#### ①.1 `proto/aite/v1/edge.proto`（`EdgeStatusService` 的 leading comment）改后全文
+
+原文一行：
+
+```proto
+// edge 自身健康：给 !status / preflight 用。
+```
+
+改后：
+
+```proto
+// edge 自身健康：给 core 的契约闸门与起飞前体检用。
+//
+// 四个真调用方：`app.rs` 的 `check_contract_version`（起飞比版本，最多 5 发）、
+// `preflight.rs` 第 6 组「沙箱可用」、`wiring.rs` 评测接线的 `docker_probe`，
+// 以及契约闸门在探针每次拨通后补比的 `link.rs::verify_contract`。
+// 判据只有 `contract_version` 一致与 `sandbox_ok` 为真两条，其余字段只进日志。
+//
+// **`!status` 看不到这里的任何字段** —— 它由 core 的 `control::cmd_status` 答，
+// 只从 store 列活跃任务、不碰 edge。原注释「给 !status / preflight 用」里
+// preflight 那半句是对的，`!status` 那半句不是。
+```
+
+`preflight` 那半句**留着**（它是对的）；把 `!status` 那半句换成真实消费者，并把「原注释错在哪」
+一起写死 —— 这句话已经复活过五轮，只把它删掉是不够的。
+
+**注释里一个行号都没写**（只写函数名 / 组号），免得下一轮有人动了行号就又对不上。
+
+#### ①.2 `edge/cmd/aite-edge/main.go`（`statusSource.Status` 里）改后全文
+
+原文一行：
+
+```go
+	// platform: fake 时压根没起长连接，connected 恒 false —— 别让 !status 误报「飞书在线」。
+```
+
+改后：
+
+```go
+	// platform: fake 时压根没起长连接，connected 恒 false —— 这两个字段就别填了，
+	// 免得读它们的人以为「飞书在线」。
+	//
+	// **`!status` 看不到它们。** 原注释写的是「别让 !status 误报『飞书在线』」——
+	// `platform_connected` 在产品代码里唯一的去处是 core 起飞时那行 `aite.edge_status`
+	// 日志（`app.rs` 的 `check_contract_version`）：preflight 第 6 组与评测接线的体检
+	// 都只读 `contract_version` 与 `sandbox_ok`，**不读它**。而 `!status` 由 core 的
+	// `control::cmd_status` 答，只从 store 列活跃任务、不碰 edge。
+	// 与 `internal/ingress/client.go` 那三句、`aite/v1/edge.proto` 的
+	// `EdgeStatusService` 那句同源。
+```
+
+口径与 Z3 改的 `client.go` 三处对齐（「**`!status` 看不到这些**」+ 点名真去处 + 交叉引用同源处），
+没另起一套说法。第一句保留原意（fake 下这两个字段故意不填），只是把「谁会误报」那半句
+从 `!status` 换成中性的「读它们的人」—— 因为现在唯一读它的是那行日志。
+
+> **两处的路径写法都是刻意的**：`cmd/aite-edge/main.go` / `aite/v1/edge.proto` 用的是
+> 模块内相对路径，不是仓库根相对路径。守卫扫的是命令文本里的受保护路径**子串**
+> （`tests/guard.rs` 模块头误拦表第 4 行），注释里留下完整字面量会让后来人 grep 一次就被拦。
+
+### ② codegen 可复现性验证（本轨主交付）
+
+全部在 **`/tmp/aa4-codegen-check`** 这份仓库副本里做（`git archive HEAD | tar -x`，329 个跟踪文件，
+在副本里 `git init` + 一次 commit 当基线）。**真仓库的冻结面一个字节没碰。**
+
+#### ②.1 版本三元组 —— 逐字对上，不需要装任何东西
+
+`--version` 原始输出：
+
+```
+$ protoc-gen-go --version
+protoc-gen-go v1.36.12
+$ protoc-gen-go-grpc --version
+protoc-gen-go-grpc 1.6.2
+$ protoc --version
+libprotoc 36.1
+```
+
+来源（`go version -m` / brew）：
+
+```
+protoc-gen-go       path google.golang.org/protobuf/cmd/protoc-gen-go
+                    mod  google.golang.org/protobuf              v1.36.12
+protoc-gen-go-grpc  path google.golang.org/grpc/cmd/protoc-gen-go-grpc
+                    mod  google.golang.org/grpc/cmd/protoc-gen-go-grpc  v1.6.2
+protoc              /opt/homebrew/bin/protoc -> ../Cellar/protobuf/36.1/bin/protoc   (brew protobuf 36.1)
+```
+
+两个产物文件头钉的是：`edge.pb.go` → `protoc-gen-go v1.36.12` + `protoc v7.36.1`；
+`edge_grpc.pb.go` → `protoc-gen-go-grpc v1.6.2` + `protoc v7.36.1`。**全部对上。**
+
+**派单那句「`protoc v7.36.1` 与 `libprotoc 36.1` 是同一个东西」本轨没有去信它，而是让 ②.2 自证**：
+版本真不一样的话，重跑 codegen 会改写文件头那一行，sha256 就不可能一致。②.2 的结果是一致 ——
+**所以本机这支 protoc 生成出来的头就是 `protoc v7.36.1`**，这是量出来的，不是听来的。
+
+**装插件的命令**（本机不需要；总管若在别的机器上跑，版本必须逐字这样钉）：
+
+```bash
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+# PATH 上要有 ~/go/bin；protoc 走 brew install protobuf（本机 36.1）
+```
+
+#### ②.2 证据一：不改任何东西、直接重跑 codegen，产物逐字节不变
+
+在副本里原封不动跑 `make proto-gen`：
+
+```
+protoc -I proto --go_out=edge --go_opt=module=aite/edge --go-grpc_out=edge --go-grpc_opt=module=aite/edge proto/aite/v1/*.proto
+make 退出码: 0
+```
+
+`edge/gen/aitepb/*.go` 六个文件的 sha256，**跑前跑后 `diff -u` 无差异**：
+
+```
+625a42dbdfedb38f0da0bf84e3822a94680ab6aec3555ad02bfbfe822b116131  capabilities.pb.go
+41c42c2f4cca01bc147c6204ee60919b7d0051566d44b4c281430adfb6cfb2bc  edge_grpc.pb.go
+2820d6410a3b141ae29ff283f358be64b9cdaff9164091b7ae78d62f41181428  edge.pb.go
+eb9bcff762e4f33bafbdc7831038710ae93b85434cdbdb1b3bf023d0ef159e3f  events.pb.go
+4d8e4a99de5446c7d6ff0fb2f5b3498d72312f14eaaf01d2ea704aef8bfb63b2  outbound.pb.go
+97996305f8abab25ae1ce6832c76b9459c86ccac5a053c3a4eed7cf13918aecd  sandbox.pb.go
+```
+
+副本里 `git status --porcelain` **空**。→ **工具版本是对的，可以往下走。**
+
+#### ②.3 证据二：改了那一行注释之后重跑，`git diff` 只有注释行
+
+对副本跑 `python3 review/aa4-proto-patch.py --root /tmp/aa4-codegen-check`（真写），再 `make proto-gen`：
+
+```
+# 跑 codegen 之前
+ edge/cmd/aite-edge/main.go | 11 ++++++++++-
+ proto/aite/v1/edge.proto   | 11 ++++++++++-
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+# 跑 codegen 之后
+ edge/cmd/aite-edge/main.go      | 11 ++++++++++-
+ edge/gen/aitepb/edge_grpc.pb.go | 22 ++++++++++++++++++++--
+ proto/aite/v1/edge.proto        | 11 ++++++++++-
+ 3 files changed, 40 insertions(+), 4 deletions(-)
+```
+
+**机器判据**：`git diff -U0` 里所有增删行（去掉 `+++` / `---` 文件头）全部命中 `^[+-]\s*//` ——
+**没有一行非注释行**。
+
+**三条值得单独记的**：
+
+1. **`edge.pb.go` 一个字节都没动**（sha 仍是 `2820d641…`，与 ②.2 的基线相同）。
+   service 的 leading comment 只落进 `edge_grpc.pb.go`，message 那个文件不受影响。
+   派单写的是「两/三个文件」—— 实际动的**恰好三个**，而 `edge.pb.go` **不在其中**，
+   它出现在 `git status` 里就说明出事了。
+2. **两个生成副本确实是从 proto 的 leading comment 逐字抄下来的** ——
+   `edge_grpc.pb.go` 的 `+22/-2` 正好是「新注释 10 行 x 2 处 − 旧注释 1 行 x 2 处」。
+   所以**改 proto 就够，不用手改产物**（补丁脚本因此故意不碰产物）。
+3. 副本里 Go 侧 `gofmt -l .` 空、`go build ./...` 过、`go vet ./...` 干净。
+
+逐字 `git diff`（三个文件全文）：
+
+```diff
+diff --git a/edge/cmd/aite-edge/main.go b/edge/cmd/aite-edge/main.go
+@@ -55,7 +55,16 @@ func (s *statusSource) Status(ctx context.Context) *pb.EdgeStatus {
+ 		ContractVersion: server.ContractVersion,
+ 		Platform:        s.cfg.Platform,
+ 	}
+-	// platform: fake 时压根没起长连接，connected 恒 false —— 别让 !status 误报「飞书在线」。
++	// platform: fake 时压根没起长连接，connected 恒 false —— 这两个字段就别填了，
++	// 免得读它们的人以为「飞书在线」。
++	//
++	// **`!status` 看不到它们。** 原注释写的是「别让 !status 误报『飞书在线』」——
++	// `platform_connected` 在产品代码里唯一的去处是 core 起飞时那行 `aite.edge_status`
++	// 日志（`app.rs` 的 `check_contract_version`）：preflight 第 6 组与评测接线的体检
++	// 都只读 `contract_version` 与 `sandbox_ok`，**不读它**。而 `!status` 由 core 的
++	// `control::cmd_status` 答，只从 store 列活跃任务、不碰 edge。
++	// 与 `internal/ingress/client.go` 那三句、`aite/v1/edge.proto` 的
++	// `EdgeStatusService` 那句同源。
+ 	if s.platform != nil && s.cfg.Platform == "feishu" {
+ 		st.PlatformConnected = s.platform.Connected()
+ 		st.ReconnectCount = s.platform.ReconnectCount()
+
+diff --git a/edge/gen/aitepb/edge_grpc.pb.go b/edge/gen/aitepb/edge_grpc.pb.go
+@@ -828,7 +828,16 @@ const (
+ //
+ // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+ //
+-// edge 自身健康：给 !status / preflight 用。
++// edge 自身健康：给 core 的契约闸门与起飞前体检用。
++//
++// 四个真调用方：`app.rs` 的 `check_contract_version`（起飞比版本，最多 5 发）、
++// `preflight.rs` 第 6 组「沙箱可用」、`wiring.rs` 评测接线的 `docker_probe`，
++// 以及契约闸门在探针每次拨通后补比的 `link.rs::verify_contract`。
++// 判据只有 `contract_version` 一致与 `sandbox_ok` 为真两条，其余字段只进日志。
++//
++// **`!status` 看不到这里的任何字段** —— 它由 core 的 `control::cmd_status` 答，
++// 只从 store 列活跃任务、不碰 edge。原注释「给 !status / preflight 用」里
++// preflight 那半句是对的，`!status` 那半句不是。
+ type EdgeStatusServiceClient interface {
+ 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*EdgeStatus, error)
+ }
+@@ -855,7 +864,16 @@ func (c *edgeStatusServiceClient) GetStatus(ctx context.Context, in *GetStatusRe
+ // All implementations must embed UnimplementedEdgeStatusServiceServer
+ // for forward compatibility.
+ //
+-// edge 自身健康：给 !status / preflight 用。
++// edge 自身健康：给 core 的契约闸门与起飞前体检用。
++//
++// 四个真调用方：`app.rs` 的 `check_contract_version`（起飞比版本，最多 5 发）、
++// `preflight.rs` 第 6 组「沙箱可用」、`wiring.rs` 评测接线的 `docker_probe`，
++// 以及契约闸门在探针每次拨通后补比的 `link.rs::verify_contract`。
++// 判据只有 `contract_version` 一致与 `sandbox_ok` 为真两条，其余字段只进日志。
++//
++// **`!status` 看不到这里的任何字段** —— 它由 core 的 `control::cmd_status` 答，
++// 只从 store 列活跃任务、不碰 edge。原注释「给 !status / preflight 用」里
++// preflight 那半句是对的，`!status` 那半句不是。
+ type EdgeStatusServiceServer interface {
+ 	GetStatus(context.Context, *GetStatusRequest) (*EdgeStatus, error)
+ 	mustEmbedUnimplementedEdgeStatusServiceServer()
+
+diff --git a/proto/aite/v1/edge.proto b/proto/aite/v1/edge.proto
+@@ -148,7 +148,16 @@ message ReapIdleResponse {
+   repeated string released = 1;
+ }
+ 
+-// edge 自身健康：给 !status / preflight 用。
++// edge 自身健康：给 core 的契约闸门与起飞前体检用。
++//
++// 四个真调用方：`app.rs` 的 `check_contract_version`（起飞比版本，最多 5 发）、
++// `preflight.rs` 第 6 组「沙箱可用」、`wiring.rs` 评测接线的 `docker_probe`，
++// 以及契约闸门在探针每次拨通后补比的 `link.rs::verify_contract`。
++// 判据只有 `contract_version` 一致与 `sandbox_ok` 为真两条，其余字段只进日志。
++//
++// **`!status` 看不到这里的任何字段** —— 它由 core 的 `control::cmd_status` 答，
++// 只从 store 列活跃任务、不碰 edge。原注释「给 !status / preflight 用」里
++// preflight 那半句是对的，`!status` 那半句不是。
+ service EdgeStatusService {
+   rpc GetStatus(GetStatusRequest) returns (EdgeStatus);
+ }
+```
+
+#### ②.4 证据三：补丁落地之后，副本里的 `scripts/check.sh`
+
+在副本里跑了**完整的 `scripts/check.sh`**（冷编译全量）。**十二格里十格全绿，两格红，
+而且两格是同一个根因：本轨故意没重锁**（见「没做的」第 2 条）。
+
+| 格 | 结果 |
+|---|---|
+| A1 `cargo build --workspace` | exit 0 |
+| A2 `go build ./...` | exit 0 |
+| **A3/C2 契约锁 `--check`** | **exit 1 ✗** —— `MISMATCH 1 file(s): changed proto/aite/v1/edge.proto` |
+| **A4a `cargo clippy -D warnings`** | **exit 0** ← 见下 |
+| A4b `cargo fmt --check` | exit 0 |
+| A4c `go vet` | exit 0 |
+| A4d `gofmt` | exit 0 |
+| A5 `cargo test --no-run` | exit 0 |
+| C1 契约测试 | exit 0，`contracts passed=25 failed=0` |
+| **B 全量 `cargo test`** | **exit 1 ✗** —— `cargo passed=852 failed=1`，唯一红点 `-p aite --test cli_smoke` |
+| B 全量 `go test -race` | exit 0，六个包全 `ok` |
+| B8 评测 | exit 0，`passed 10/10` |
+
+**那条红测试是 `contracts_lock_check_is_ok_on_a_clean_tree`**，单独跑出来的 panic 原文与 A3 一字不差：
+
+```
+thread 'contracts_lock_check_is_ok_on_a_clean_tree' panicked at crates/app/tests/cli_smoke.rs:630:5:
+stdout= stderr=MISMATCH 1 file(s):
+  changed  proto/aite/v1/edge.proto
+    locked 1abdef0013fa264004b9e4cf49cda0114c84e0fcec141c1aca634cacf2e8c185
+    actual b996bbc6a9f0d671bad353739b6917d6561ebc0390240070b0bd9be081f1f89f
+```
+
+`cli_smoke` 其余 22 条全过。**所以这两格红是「锁还没刷」的两个症状，不是两个问题** ——
+总管跑到第 5 步重锁之后，它们一起转绿。
+
+> ⚠️ **别跟派单警告的那一条搞混。** 派单说「看到 `cargo passed=852 failed=1`、唯一红点是
+> **`-p aite --test guard`** 就停下来喊人」。这里的红点是 **`--test cli_smoke`**，
+> 根因完全不同（一个是 hook 命令没进 git，一个是契约锁没刷）。两者的计数形状恰好一样
+>（总数都还是 853），**只能靠测试名区分**。
+
+**A4a 那一格是本轨提前排掉的一个真风险**：`core/crates/proto/build.rs` 走 `tonic_prost_build`，
+**每次重编都把 `.proto` 的注释生成成 Rust 的 `///` 文档注释**。新注释里有 `**粗体**`、
+反引号、`link.rs::verify_contract` 这种带 `::` 的写法 —— 万一撞上某条 lint，
+`clippy -D warnings` 就会在总管的第 6 步炸，而那时补丁已经落进冻结面了。
+**实测 exit 0，不炸。**
+
+### ③ 补丁脚本 `review/aa4-proto-patch.py` 的 `--root` 自验矩阵
+
+骨架照 `review/z2-guard-patch.py`。与那份的区别：**锚点要求唯一命中（恰好 1 条）**，不是 `>=1`；
+**没有 `--partial`**（半份补丁比没打更难查：proto 改了产物没改，或者反过来）。
+
+六格全部对着 `/tmp` 副本跑，**真仓库两个冻结文件的 sha256 全程未变**（每格都量了）：
+
+| # | 情形 | 期望 | 实测 |
+|---|---|---|---|
+| 1 | `--root <干净副本> --check` | 两条锚点各命中 1、合法性两关都过、打印新注释、不写盘、退 0 | ✅ 退 0，两个文件 sha 未变 |
+| 2 | `--root <干净副本>`（真写） | 写两个文件 + 读回复验（新注释在、旧锚点 0 条）、退 0 | ✅ 退 0，两行「写了 …」+ 两行 `[读回 OK]` |
+| 3 | 对**已打过补丁**的树再跑一遍 | 命中 0 条 → 整份拒写，且要报成人话 | ✅ 退 1，两行「看起来这份补丁已经打过了」，sha 未变 |
+| 4 | **无 `AITE_RELOCK`、无 `--root`**（指向真仓库） | 当场拒绝、一个字节不碰 | ✅ 退 1，真仓库两文件 sha 未变（`1abdef00…` / `5e75b034…`） |
+| 5 | proto 锚点被人**改过一个字**（「用」→「使用」） | **整份**拒写 —— main.go 那条虽然命中 1 也不许落 | ✅ 退 1；报「文件里还有 `!status`，但不是本补丁锚点的那一行」；**两个文件 sha 都没变** |
+| 6a | 把 Go 新注释的缩进换成空格 | `gofmt` 闸拦住，一个字节不写 | ✅ 退 1，「改完的 Go 源码不是 gofmt 形态」；两文件 sha 未变 |
+| 6b | proto 新注释里混进一行非法语法 | `protoc` 闸拦住，一个字节不写 | ✅ 退 1，`protoc` 原文：`edge.proto:161:1: Expected top-level statement (e.g. "message").`；两文件 sha 未变 |
+
+**第 5 格是这份脚本的本分**：它证明「一条对不上就整份拒写」是真的 —— 不会出现
+proto 改了而 main.go 没改（或反过来）的半截状态。
+
+两道合法性闸的做法：
+- **Go**：把改完的全文喂给 `gofmt`（读 stdin），既验可解析、又验**格式没走样**
+  （`gofmt -l` 是 `check.sh` 的 A4d 硬判据）。
+- **proto**：把改完的 `edge.proto` 连同它的四个 import 摆进一棵临时树，让 `protoc
+  --descriptor_set_out=/dev/null` 真解析一遍。**不在原地跑** —— 原地跑就得先写盘，
+  而这份脚本的规矩是「验不过一个字节都不写」。
+- 两者都**不许静默跳过**：找不到 `gofmt` / `protoc` 直接报错退 1，不降级。
+
+### ④ 给总管的命令链（每步带期望输出）
+
+在仓库根跑。**第 4 步是最要紧的一道闸，看清楚了再往下。**
+
+```bash
+# ── 0. 装插件 ──────────────────────────────────────────────────────────────
+# 本机（2026-09-13 实测）已经装好且版本对上，这一步可跳。别的机器上必须逐字钉版本：
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+protoc-gen-go --version         # 期望：protoc-gen-go v1.36.12
+protoc-gen-go-grpc --version    # 期望：protoc-gen-go-grpc 1.6.2
+protoc --version                # 期望：libprotoc 36.1
+# 三条对不上就停 —— 版本不一致会把整个 .pb.go 按新版风格重写，那时候没人分得清
+# 哪些变化是本轨要的、哪些是工具带来的。
+```
+
+```bash
+# ── 1. 干跑 ────────────────────────────────────────────────────────────────
+AITE_RELOCK=1 python3 review/aa4-proto-patch.py --check
+```
+期望（退出码 **0**）：
+```
+[命中 1 条] edge.proto: EdgeStatusService 的 leading comment：换掉「给 !status / preflight 用」
+[命中 1 条] main.go: statusSource.Status 里 platform_connected 那句：换掉「别让 !status 误报」
+[  合法] edge.proto: protoc 认
+[  合法] main.go: gofmt 认
+
+--check：没写盘。改完这两处会是：
+（接着打印两段新注释全文，与 ①.1 / ①.2 逐字相同）
+```
+> 任何一行 `[命中 0 条]` / `[命中 2 条]` → **停**。脚本会自己报出是哪种状态
+>（已经打过了 / 原文被人动过 / 已经没有 `!status` 了）。
+
+```bash
+# ── 2. 真写 ────────────────────────────────────────────────────────────────
+AITE_RELOCK=1 python3 review/aa4-proto-patch.py
+```
+期望（退出码 **0**）：上面四行 + 下面六行
+```
+写了 <仓库根>/proto/aite/v1/edge.proto
+写了 <仓库根>/edge/cmd/aite-edge/main.go
+[读回 OK] edge.proto: 新注释在、旧锚点 0 条
+[读回 OK] main.go: 新注释在、旧锚点 0 条
+
+接着必须跑：make proto-gen
+```
+
+```bash
+# ── 3. 重生成 Go 侧产物 ────────────────────────────────────────────────────
+make proto-gen
+```
+期望：只回显那一行 `protoc -I proto --go_out=edge …`，**无其它输出**，退出码 **0**。
+
+```bash
+git status --short
+```
+期望**恰好三行**（顺序按 git 的排法）：
+```
+ M edge/cmd/aite-edge/main.go
+ M edge/gen/aitepb/edge_grpc.pb.go
+ M proto/aite/v1/edge.proto
+```
+> ⚠️ **`edge/gen/aitepb/edge.pb.go` 不该出现在这里。** service 的 leading comment 只落进
+> `edge_grpc.pb.go`。它要是也变了，说明工具版本不对 —— **停下来，别往下走**。
+
+```bash
+git diff --stat
+```
+期望逐字：
+```
+ edge/cmd/aite-edge/main.go      | 11 ++++++++++-
+ edge/gen/aitepb/edge_grpc.pb.go | 22 ++++++++++++++++++++--
+ proto/aite/v1/edge.proto        | 11 ++++++++++-
+ 3 files changed, 40 insertions(+), 4 deletions(-)
+```
+
+```bash
+# 3b. 机器判据：diff 里不许有非注释行
+git diff -U0 | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -vE '^[+-][[:space:]]*//'
+```
+期望：**无输出**（`grep` 退出码 1）。有输出 = 有代码行被动了，**停**。
+
+```bash
+# ── 4. 看契约锁在抱怨谁 —— 重锁之前必须先看清楚 ────────────────────────────
+core/target/debug/aite contracts lock --check
+```
+期望逐字（退出码 **1**，红是对的）：
+```
+MISMATCH 1 file(s):
+  changed  proto/aite/v1/edge.proto
+    locked 1abdef0013fa264004b9e4cf49cda0114c84e0fcec141c1aca634cacf2e8c185
+    actual b996bbc6a9f0d671bad353739b6917d6561ebc0390240070b0bd9be081f1f89f
+```
+
+**这一步的三条判据，逐条核**：
+
+1. **`1 file(s)`，不是 2 也不是 3。** 派单写的是「只该点名那两/三个文件」——
+   **实际只有一个**。理由在 `core/crates/app/src/lock.rs`：
+   `LOCK_DIRS = ["proto/aite/v1", "core/crates/contracts"]` ——
+   **锁面根本不含 `edge/**`**，两个 `.pb.go` 与 `main.go` 都不在锁里。
+2. **点名的必须就是 `proto/aite/v1/edge.proto` 这一个。** 多出任何一个 →
+   有别的东西被动了，**这时候重锁就是把问题锁进去**。停下来查。
+3. **`actual` 那串 sha 要与上面逐字相同**（`b996bbc6…f1f89f`）。不同 = 落到盘上的
+   proto 内容跟本轨在副本里验过的不是同一份（多半是手工动过），**别重锁**。
+   `locked` 那串是改前的值（`1abdef00…`），可以顺手对一眼基线对不对。
+
+```bash
+# ── 5. 重锁 ────────────────────────────────────────────────────────────────
+AITE_RELOCK=1 core/target/debug/aite contracts lock --write
+```
+期望（退出码 **0**）：
+```
+wrote 25 files -> .contracts.lock
+```
+> **`25` 这个数不许变。** 本轨只改文件内容、不增删文件；变成 24 或 26 说明锁面被动过。
+
+```bash
+# ── 6. 全量 ────────────────────────────────────────────────────────────────
+scripts/check.sh
+```
+期望五行与开场逐字相同、末行「全部通过」、退出码 **0**：
+```
+OK 25 files
+contracts passed=25 failed=0
+cargo passed=853 failed=0
+（go 六个包全 ok：aiteerr / config / feishu / ingress / sandbox / server）
+passed 10/10
+```
+> `cargo passed=853` 不变：本轨零测试改动。proto 改了会让 `aite-proto` 的 `build.rs`
+> 重跑一次 codegen（Rust 侧产物不入库，在 `OUT_DIR` 里），所以 A1 那一格会比平时慢些，
+> 但测试数与判据都不动。
+>
+> ⚠️ **第 5 步不能跳过、也不能放到第 6 步后面。** 锁没刷就跑 `check.sh` 会看到**两个**红点
+> 而不是一个：A3/C2 之外，`B 全量 cargo test` 也会红成 `cargo passed=852 failed=1`，
+> 红的是 `-p aite --test cli_smoke` 里的 `contracts_lock_check_is_ok_on_a_clean_tree`
+> （它就是拿 `contracts lock --check` 当判据的）。**同一个根因的两个症状**，
+> 本轨在副本里实测过（②.4）。别把第二个当成新问题。
+
+### ⑤ 收口 —— 改后重新数 `!status`
+
+派单说的是「在**源码里**」，所以口径钉死为：**git 跟踪的 `*.rs` / `*.go` / `*.proto`，排除 `review/`**。
+（全仓含文档是 124 处，其中 `*.md` 21 / `*.yaml` 7 —— 文档面另见下面一段。）
+
+| | 改前（基线 76c62fd） | 改后（副本：补丁 + codegen） |
+|---|---|---|
+| 源码面总命中 | **96** | **103** |
+
+多出来的 7 处**全是本轨新写的纠正文本自己的字**（proto 2 + `edge_grpc.pb.go` 4 + `main.go` 1；
+新注释里「`!status` 看不到……」「原注释『给 !status / preflight 用』」各占一行）。**判据文件一处没动。**
+
+**逐条落类**（改后）：
+
+| 类 | 处数 | 内容 | 还在说谎吗 |
+|---|---|---|---|
+| A | 3 | **Rust 负号误命中**，根本不是命令名：`preflight.rs:1397` 与 `wiring.rs:403` 的 `if !status.sandbox_ok`、`models/src/lib.rs:438` 的 `if !status.is_success()` | — |
+| B | 58 | `core/crates/control/**`：`!status` 这条命令自己的实现与测试（`plane.rs` 的 `cmd_status` / `status_tasks`、`commands.rs`、七个测试文件）。说的全是 core 侧的事 | 否 |
+| C | 9 | `core/crates/app/**`：`app.rs:83`（W2 改过，在解释这句谎话）、`run.rs:388`、`crash_recovery.rs` 4 处、`startup_recovery.rs` 3 处 —— 都是 store / 控制面口径 | 否 |
+| D | 7 | `evals` / `store` / `testing` / `worker`：顺带提命令名 | 否 |
+| E | 8 | `core/crates/edge-client/**`：`gate.rs:21`（Z3）、`lib.rs:81/99`（X1）、`link.rs:88/149/150`（Y2）、`contract_gate.rs:217/218`（Z3）—— **全是在解释这句谎话、并明说「健康行全仓不存在」** | 否 |
+| F | 9 | `edge/**`：`client.go:42/44/138/139/212/213`（Z3 的三句）、`cards.go:131`（说的是 `!stop`/`!status` 走普通消息事件，对的）、**`main.go` 本轨新写的 2 行** | 否 |
+| G | 6 | `edge/gen/aitepb/edge_grpc.pb.go`：本轨新注释的生成副本 x 2 | 否 |
+| H | 3 | `proto/aite/v1/edge.proto`：本轨新注释 | 否 |
+
+> **改前的 E'（仍在断言 `!status` 看得到 edge 侧东西）是 4 处** ——
+> `proto:151`、`edge_grpc.pb.go:831`、`edge_grpc.pb.go:858`、`main.go:58`。
+> **改后是 0 处。**
+
+**没有只 grep「健康行」**：这一遍量的是 `!status` 本身，并且**逐条读了上下文**
+（不是看 grep 行就下结论）—— Z3 的教训正是「多 grep 一层才发现这两处」。
+
+**文档面也顺手扫了一遍**（`*.md` / `*.yaml`，排除 `review/`，21 + 7 处）：
+全部是命令本身的用法 / 排障口径，**没有一处断言 `!status` 能看到 edge 侧的东西**。
+`docs/acceptance-M.md:1022-1024` 反而写得很准：「`!status` 只回任务列表、一个计数器都不回，
+唯一的例外是 `events.dropped` 不为 0 时末尾多一句」—— 与 Z3 核过的判据一致。**这一面没有账要转。**
+
+### 收尾（worktree）
+
+`scripts/check.sh` 一次跑过，**五行关键值与开场机器比对逐字相同**
+（`diff` 过，只有 go 各包耗时秒数不同）：`OK 25 files`、`contracts passed=25 failed=0`、
+`cargo passed=853 failed=0`、go 六包全 `ok`、`passed 10/10`，「全部通过」退出码 0。
+**本轨在 worktree 里零产品代码改动，这一跑只是证明没碰到不该碰的。**
+
+`git status --short` 只有两项：`M review/review-findings-2026-09-12-vmerge.md`（**纯追加
+591 行、0 删除**，前 1884 行与 HEAD 逐字相同，机器比对过）、`?? review/aa4-proto-patch.py`。
+冻结面一个字节没动。
+
+> 补一句时序：③ 的自验矩阵先跑过一遍，之后把 `diagnose()` 一个没用上的参数删了，
+> **六格全部原样复跑了一遍**才收工 —— 上表贴的是复跑后的结果。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/edge-client/src/lib.rs` 的 `contract_state()` | **产品代码里零调用方**，唯一使用者是 `tests/contract_gate.rs`。X1 记过、Z3 确认还挂着。本轨只读面 | 总管（要不要删是他的决定，已挂三轮） |
+| `core/crates/app/src/app.rs:152` 的文档注释 | 「`SqliteSessionStore::open`：库文件不在就建一个空的」没说「文件在而不是库」会怎样。Z1 / Z3 都记过 | 总管（已挂三轮） |
+| preflight 第 1 组探不出「库是好的但文件只读」 | Z1 记过，代码面的账仍挂着（Z3 只把它写进了 `acceptance-M.md` 的排障文本） | 总管 |
+| `gate.rs` / `lib.rs` / `link.rs` / `contract_gate.rs` 里的「三个调用方」 | **不是错，但口径要留意**：那是 `EdgeClient::status()` 的调用方（确实 3 个）；`GetStatus` 这个 **RPC** 的调用方是 4 个（多一个 `link.rs::verify_contract`）。本轨的 proto 注释按 RPC 口径写 4 个 —— 两处并存不打架，但下一轮别拿它们互相「更正」 | 记着就行，不用改 |
+
+### 没做的 / 拿不准的
+
+1. **本轨所有验证都在 `/tmp/aa4-codegen-check` 这份副本里做的，真仓库一个字节没动 ——
+   这两件事差一个量级，别混为一谈。** 副本是 `git archive HEAD` 出来的、与基线 `76c62fd`
+   逐字相同，`make proto-gen` 与 `protoc` / 两个插件也都是同一套；但**副本上绿 ≠ 真仓库上绿**。
+   真仓库上的验收要等总管跑完 ④ 那条链，尤其第 4 步的 `actual` sha 与第 6 步的五行。
+   **本轨给不了「真仓库验过」这句话，也不打算装作给得了。**
+2. **第 5 步（重锁）本轨没验过。** 守卫故意拦 agent 自我授权（`AITE_RELOCK=1` 判「授权变量赋值」
+   直接拦，`relock_and_self_authorization_are_blocked` 钉着），本轨**没有绕它**——
+   连在 `/tmp` 副本里也没绕（那需要把 `export AITE_RELOCK=1` 藏进脚本文件来躲开守卫的文本扫描，
+   那是在钻守卫的空子，不做）。所以 `wrote 25 files -> .contracts.lock` 那一行是**从
+   `lock.rs` 的源码读出来的期望**，不是跑出来的 —— 它是本节里唯一一条没有实跑支撑的期望值。
+   副本里的两个红点（A3/C2 与 `cli_smoke`）正是这个选择的代价，见 ②.4。
+   **换句话说：「补丁落地 + 重锁之后 check.sh 全绿」这句话，本轨验到了「重锁」之前为止。**
+3. **`make proto-gen` 的注释里说「只有 R0/RΩ 在 `AITE_RELOCK=1` 下跑」，而 target 本身并不检查
+   这个变量**（`Makefile:47-48` 就一行 `protoc …`）。本轨照 ④ 的顺序把它排在授权之后，
+   但它不是机器强制的 —— 想加门禁的话是另一轨的事，本轨没碰 `Makefile`。
+4. **注释里那句「其余字段只进日志」对 preflight 严格说是「只进日志与 extra」。**
+   proto 那条为了控长度（它要被抄进生成产物两遍）写成了「只进日志」；
+   `main.go` 那条写全了。**不算错但不够精确，如实标出来。**
+5. **副本留着没删**：`/tmp/aa4-codegen-check`（已打补丁 + 已重跑 codegen，可直接 `git diff` 复核）。
+   ②.3 用过的 `/tmp/aa4-pristine`（未打补丁）也留着，给总管做对照。矩阵 5/6 的临时树
+   （`/tmp/aa4-m5` / `-m6a` / `-m6b`）**已清**。中间文件 `/tmp/aa4-before.sha`、
+   `/tmp/aa4-after.sha`、`/tmp/aa4-before-status.txt`、`/tmp/aa4-after-status.txt` 留着，
+   不用的话直接删。**worktree 里 `git status` 只有本轨这两个文件。**
+6. **没做变异验证。** 本轨零判据改动（纯注释），没有「摘掉某条判据看几条测试变红」这种
+   可做的变异点。②.2 的「不改也重跑、产物逐字节不变」是本轨能给的最强等价物：
+   它排除的是「工具版本不对」这个本轨最大的风险。
