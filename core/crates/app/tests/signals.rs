@@ -109,6 +109,94 @@ const SIGNAL_SEEN: &str = "aite.signal 收到";
 const UP: &str = "aite.up";
 const STOPPING: &str = "aite.stopping";
 const DOWN: &str = "aite.down";
+/// 起飞这一轮没比成 `contract_version`（edge 不可达）。**不是**起飞失败，见下面那条测试。
+const EDGE_GONE: &str = "aite.edge_unreachable";
+/// 投递面起来了：core 自己监听 `core_socket`。这一行是「起飞真的走到了 `serve()` 跟前」
+/// 的判据 —— 它在 `takeoff()` 里 `serve()` 的前一步（`platform.start()`）。
+const LISTENING: &str = "ingress.listening";
+/// 能力表问不到 —— 只 warn 一行，不拦起飞。
+const CAPS_GONE: &str = "edge.capabilities_unavailable";
+
+/// 收尾兜底：中间任何一条断言炸掉都别把进程留在机器上。
+struct Reaper(std::process::Child);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// 按样例配置造一份能真起飞的 `aite.yaml`，落在 `dir` 里，返回它的路径。
+///
+/// 三件事都在这儿定死：`storage.*` / 两个 socket 全指进 `dir`（一个字节都不写进仓库的
+/// `data/`）、`platform: feishu`（`build_app` 明确拒绝「fake 又不注入」，而真二进制是
+/// `Injections::default()`）、模型只要过 `build_app` 的「配置不完整」那关（真有任务时
+/// 才会被调到，这两条测试都没有任务）。
+///
+/// **`edge_socket` 指着一个谁都没在监听的路径** —— 两条测试都不起 `aite-edge`。
+/// 那不是将就：`edge_absent_still_takes_off_to_ingress_listening` 钉的就是这件事。
+fn write_takeoff_config(dir: &std::path::Path) -> std::path::PathBuf {
+    // socket 路径要短于 SUN_LEN（104）：TMPDIR 下的 tempdir 实测 ~65 字符，够用；
+    // 换到长路径下会先炸在 `EdgeClient::connect` 上，不会静悄悄地变成别的毛病。
+    std::fs::create_dir_all(dir.join("run")).expect("建 run 目录");
+    let cfg_path = dir.join("aite.yaml");
+    let example = std::fs::read_to_string(common::repo_root().join("config/aite.example.yaml"))
+        .expect("读 config/aite.example.yaml");
+    let cfg = example
+        .replace(
+            "sqlite_path: data/aite.db",
+            &format!("sqlite_path: {}", dir.join("aite.db").display()),
+        )
+        .replace(
+            "evidence_dir: data/evidence",
+            &format!("evidence_dir: {}/evidence", dir.display()),
+        )
+        .replace(
+            "artifacts_dir: data/artifacts",
+            &format!("artifacts_dir: {}/artifacts", dir.display()),
+        )
+        .replace(
+            "system_prompt_path: core/crates/worker/prompts/platform.md",
+            &format!("system_prompt_path: {}", common::platform_md().display()),
+        )
+        // 模型只在真有任务时才会被调到，这里只要过 build_app 的「配置不完整」那关。
+        .replace("base_url: \"\"", "base_url: \"http://127.0.0.1:9/v1\"")
+        .replace("model: \"\"", "model: \"signals-e2e\"")
+        .replace(
+            "edge_socket: data/run/aite-edge.sock",
+            &format!("edge_socket: {}/run/e.sock", dir.display()),
+        )
+        .replace(
+            "core_socket: data/run/aite-core.sock",
+            &format!("core_socket: {}/run/c.sock", dir.display()),
+        );
+    std::fs::write(&cfg_path, cfg).expect("写配置");
+    cfg_path
+}
+
+/// 起一个真 `aite run`，stdout/stderr 都灌进 `log_path`。
+fn spawn_aite(cfg_path: &std::path::Path, log_path: &std::path::Path) -> std::process::Child {
+    let out = std::fs::File::create(log_path).expect("建日志文件");
+    let err = out.try_clone().expect("复制句柄");
+    std::process::Command::new(env!("CARGO_BIN_EXE_aite"))
+        .args(["run", "--config", cfg_path.to_str().expect("配置路径")])
+        .current_dir(common::repo_root())
+        .env("AITE_MODEL_API_KEY", "signals-e2e")
+        .stdout(out)
+        .stderr(err)
+        .spawn()
+        .expect("起 aite run")
+}
+
+/// 发 `SIGTERM`。借 `/bin/kill`，省得为一个 `libc::kill` 往依赖表里加东西。
+fn sigterm(pid: u32) {
+    let killed = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("发 SIGTERM");
+    assert!(killed.success(), "/bin/kill -TERM {pid} 没成功");
+}
 
 /// 轮询到 `mark` 出现为止，超过 `budget` 就带着现场 panic。
 ///
@@ -170,69 +258,16 @@ fn wait_for_mark(log: &std::path::Path, mark: &str, budget: Duration, what: &str
 #[test]
 fn sigterm_before_serve_still_exits_by_itself() {
     let dir = tempfile::tempdir().expect("tmpdir");
-    // socket 路径要短于 SUN_LEN（104）：TMPDIR 下的 tempdir 实测 ~65 字符，够用；
-    // 换到长路径下这里会先炸在 `EdgeClient::connect` 上，不会静悄悄地变成别的毛病。
-    std::fs::create_dir_all(dir.path().join("run")).expect("建 run 目录");
     let db = dir.path().join("aite.db");
-    let cfg_path = dir.path().join("aite.yaml");
+    let cfg_path = write_takeoff_config(dir.path());
     let log_path = dir.path().join("out.log");
-
-    let example = std::fs::read_to_string(common::repo_root().join("config/aite.example.yaml"))
-        .expect("读 config/aite.example.yaml");
-    let cfg = example
-        .replace(
-            "sqlite_path: data/aite.db",
-            &format!("sqlite_path: {}", db.display()),
-        )
-        .replace(
-            "evidence_dir: data/evidence",
-            &format!("evidence_dir: {}/evidence", dir.path().display()),
-        )
-        .replace(
-            "artifacts_dir: data/artifacts",
-            &format!("artifacts_dir: {}/artifacts", dir.path().display()),
-        )
-        .replace(
-            "system_prompt_path: core/crates/worker/prompts/platform.md",
-            &format!("system_prompt_path: {}", common::platform_md().display()),
-        )
-        // 模型只在真有任务时才会被调到，这里只要过 build_app 的「配置不完整」那关。
-        .replace("base_url: \"\"", "base_url: \"http://127.0.0.1:9/v1\"")
-        .replace("model: \"\"", "model: \"signals-e2e\"")
-        .replace(
-            "edge_socket: data/run/aite-edge.sock",
-            &format!("edge_socket: {}/run/e.sock", dir.path().display()),
-        )
-        .replace(
-            "core_socket: data/run/aite-core.sock",
-            &format!("core_socket: {}/run/c.sock", dir.path().display()),
-        );
-    std::fs::write(&cfg_path, cfg).expect("写配置");
 
     // --- 撑开窗口：把库锁住，子进程的 store.init() 建表就只能排队等 ---
     let lock = rusqlite::Connection::open(&db).expect("开库");
     lock.execute_batch("PRAGMA journal_mode=delete; BEGIN EXCLUSIVE;")
         .expect("持 EXCLUSIVE 写锁");
 
-    let out = std::fs::File::create(&log_path).expect("建日志文件");
-    let err = out.try_clone().expect("复制句柄");
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_aite"))
-        .args(["run", "--config", cfg_path.to_str().expect("配置路径")])
-        .current_dir(common::repo_root())
-        .env("AITE_MODEL_API_KEY", "signals-e2e")
-        .stdout(out)
-        .stderr(err)
-        .spawn()
-        .expect("起 aite run");
-
-    // 收尾兜底：中间任何一条断言炸掉都别把进程留在机器上。
-    struct Reaper(std::process::Child);
-    impl Drop for Reaper {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
+    let child = spawn_aite(&cfg_path, &log_path);
 
     // 1) 信号面接管了 —— 窗口从这一刻起是开的。
     let text = wait_for_mark(
@@ -249,11 +284,7 @@ fn sigterm_before_serve_still_exits_by_itself() {
     // 2) 发 SIGTERM，并等到 handler 真的跑了（`aite.signal` 那一行紧挨着 `stop.set()`）。
     let pid = child.id();
     let mut child = Reaper(child);
-    let killed = std::process::Command::new("/bin/kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-        .expect("发 SIGTERM");
-    assert!(killed.success(), "/bin/kill -TERM {pid} 没成功");
+    sigterm(pid);
 
     let text = wait_for_mark(
         &log_path,
@@ -306,4 +337,93 @@ fn sigterm_before_serve_still_exits_by_itself() {
         at_signal < at_up,
         "信号没落在 `serve()` 之前（`{SIGNAL_SEEN}` 排在 `{UP}` 后面）。\n{text}"
     );
+}
+
+// --------------------------------------------------------------------------
+// 上面那条回归的地基：edge 完全没起来时，起飞照样走到 `serve()` 跟前
+// --------------------------------------------------------------------------
+
+/// **`aite-edge` 一个都没起时，`aite run` 仍然一路走到 `ingress.listening`。**
+///
+/// 这条不是顺手加的，它是**刻意**钉下来的一条既有行为：
+///
+/// * **依据是 §2.1「启动顺序无关，连不上不退出」**。两边都是懒连接 + 退避重连，
+///   所以 core 先起、edge 后起（`docker compose up` 下的常态，compose 刻意不写
+///   `depends_on`）必须能飞。整条起飞路上只有 `platform.start()` 里的
+///   `ingress.start()`（core 自己监听 `core_socket`）是硬要求；
+///   `check_contract_version` 等满 5 次照常返回 `Ok`，能力表问不到只 warn 一行。
+/// * **上面那条 `sigterm_before_serve_still_exits_by_itself` 现在依赖它** ——
+///   它起的就是一个 edge 不可达的真进程。哪天有人把「edge 不可达就拒绝起飞」当成改进
+///   加进来，那条会莫名其妙地红，而红的理由跟它要测的事（信号）毫无关系。
+///   有了这一条，那时先红的是它，而且它的名字就说明了病在哪。
+/// * 全仓原来**没有任何文档或测试写过这件事**（Y1 做进程级回归时实测出来、记账转出，
+///   本轨钉住）。同一条口径也写进了 `app.rs` 的 `build_app` / `check_contract_version`
+///   文档注释和 `README.md` 的「两个进程」那一节。
+///
+/// 三条断言缺一不可：`aite.edge_unreachable` 证明 edge **真的**不可达（不然这条测的是
+/// 「edge 恰好起着」）；`ingress.listening` 证明起飞走到了投递面；
+/// `edge.capabilities_unavailable` 证明能力表那一问也确实没答上来、而它只是一行 warn。
+///
+/// 这条大约 6s，绝大部分花在 edge 不可达的那 5 次 `GetStatus` 重试上（每次隔 1s）——
+/// 那是 `build_app` 的既有行为，不是这条测试自己在等。
+#[test]
+fn edge_absent_still_takes_off_to_ingress_listening() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let cfg_path = write_takeoff_config(dir.path());
+    let log_path = dir.path().join("out.log");
+
+    // 这一轨从头到尾不起 aite-edge，配置里那个 edge socket 谁都没在监听。
+    assert!(
+        !dir.path().join("run/e.sock").exists(),
+        "edge socket 不该存在 —— 这条测试的前提就是没有 edge"
+    );
+
+    let child = spawn_aite(&cfg_path, &log_path);
+    let pid = child.id();
+    let mut child = Reaper(child);
+
+    // 60s 给的是死线不是预期：正常 ~6s（其中 4s 是 GetStatus 那 5 次重试）。
+    let text = wait_for_mark(
+        &log_path,
+        LISTENING,
+        Duration::from_secs(60),
+        "edge 不可达时起飞仍要走到投递面",
+    );
+    assert!(
+        text.contains(EDGE_GONE),
+        "没看到 `{EDGE_GONE}` —— 这一遍 edge 竟然是可达的，那这条测试什么也没证明。\n{text}"
+    );
+    let text = wait_for_mark(
+        &log_path,
+        CAPS_GONE,
+        Duration::from_secs(10),
+        "能力表问不到只 warn 一行",
+    );
+    assert!(text.contains(UP), "`{UP}` 都没打，起飞根本没走完。\n{text}");
+
+    // 顺序也钉一下：`aite.edge_unreachable` 在 `aite.up` 之前 —— 起飞是**带着**
+    // 「没比成版本」这个结论继续走的，不是先飞起来再发现 edge 没了。
+    let at_gone = text.find(EDGE_GONE).expect("edge_unreachable 行在");
+    let at_up = text.find(UP).expect("up 行在");
+    assert!(
+        at_gone < at_up,
+        "`{EDGE_GONE}` 排在 `{UP}` 后面了，那它说的不是起飞那一轮。\n{text}"
+    );
+
+    // 收尾：它得能被正常停掉（顺带不把进程留在机器上）。
+    sigterm(pid);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.0.try_wait().expect("查子进程") {
+            Some(s) => break s,
+            None if std::time::Instant::now() >= deadline => {
+                let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+                panic!("30s 内没退出。\n{text}");
+            }
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    };
+    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert_eq!(status.code(), Some(0), "{text}");
+    assert!(text.contains(DOWN), "收尾没走完：`{DOWN}` 没打。\n{text}");
 }

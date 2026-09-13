@@ -4,7 +4,7 @@
 //!
 //! | # | 组 | 判据 |
 //! |---|---|---|
-//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且它起得来**：`worker.system_prompt_path` 指到的文件真的在、`platform` / `model.provider` 的取值不需要注入（配置不存在退到样例，算 WARN；后两者是 FAIL） |
+//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且它起得来**：`worker.system_prompt_path` 指到的文件真的在、`platform` / `model.provider` 的取值不需要注入、`storage.sqlite_path` 已有的那个文件真能当库打开（配置不存在退到样例，算 WARN；后三者是 FAIL） |
 //! | 2 | 环境变量齐 | config 里所有 `*_env` 点到的变量**在不在**（取值一个字都不打）。`platform: fake` 时 SKIP |
 //! | 3 | 飞书凭证有效 | 换得到 `tenant_access_token`。`platform: fake` 时 SKIP |
 //! | 4 | 飞书身份对得上 | `GET /open-apis/bot/v3/info` 的 `bot.open_id` == `FEISHU_BOT_OPEN_ID`。`platform: fake` 时 SKIP |
@@ -12,9 +12,9 @@
 //! | 6 | 沙箱可用 | 经 edge：daemon 可达 → 起容器 → 四个 import → **一定收掉** |
 //! | 7 | 落盘目录可写 | 三个路径的「最近的已存在祖先」写得进去 |
 //!
-//! **第 1 组为什么不只验「解析得出来」**：2026-09-12 与 2026-09-13 总管连着撞上两次
+//! **第 1 组为什么不只验「解析得出来」**：2026-09-12 与 2026-09-13 总管连着撞上**三次**
 //! 「preflight 说可以起飞、`aite run` 退出码 2」，病根是同一个 —— 配置解析成功 ≠ 它起得来，
-//! 而七组里**没有一组**去问后半句。所以第 1 组管三件事，而不是新开第 8 / 9 组
+//! 而七组里**没有一组**去问后半句。所以第 1 组管四件事，而不是新开第 8 / 9 / 10 组
 //! （`docs/dev-spec-2026-09-11-rustgo.md:308` 的「七组自检」是冻结面）：
 //!
 //! 1. **yaml 解析得出来**（原本就有的那件事）。
@@ -28,10 +28,14 @@
 //!    `build_app` 明文拒绝、退出码 2。判据见 [`injection_fault`]，与 `app.rs` 那两条
 //!    不等式同源。这一档下第 2/3/4 组一并 SKIP —— fake 平台压根不连飞书，那三组的
 //!    判据对它毫无意义（理由写在各自那一行里，见 [`FAKE_PLATFORM_SKIP`]）。
+//! 4. **`storage.sqlite_path` 上已经有的那个文件真能当库打开**：指着一个内容不是 SQLite
+//!    的文件时，起飞会死在建表那一步（`run.rs` 的 `store.init()`），退出码 2。第 7 组接不住
+//!    这一条 —— 它验的是「三个路径的最近已存在祖先**目录**写得进去」，不是「这个**文件**
+//!    是不是个库」，两件事。判据见 [`sqlite_fault`]，**纯读、文件不在就不探**。
 //!
-//! 三件事**一次报齐**（口径照第 5 组「缺什么一次报齐」），不是撞上第一条就早退。
+//! 四件事**一次报齐**（口径照第 5 组「缺什么一次报齐」），不是撞上第一条就早退。
 //! 它们都不碰网络也不碰 docker，所以 `--offline` 下照样跑 —— 这正是要紧的地方：
-//! 上面两种「全绿而起不来」在 `--offline` 下也全绿，第 5/6 组那种「被 offline 跳过」
+//! 上面三种「全绿而起不来」在 `--offline` 下也全绿，第 5/6 组那种「被 offline 跳过」
 //! 的口子救不了它们。
 //!
 //! **红线：任何输出都不得出现密钥取值。** 第一道是代码里根本不去打它们；第二道是
@@ -52,10 +56,11 @@ use std::time::{Duration, Instant};
 
 use aite_contracts::{
     AiteConfig, CONTRACT_VERSION, ExecRequest, Message, ModelConfig, ModelProvider, PlatformChoice,
-    Role, SandboxError, SandboxErrorKind, SandboxNetwork, SandboxPort, SandboxSpec,
+    Role, SandboxError, SandboxErrorKind, SandboxNetwork, SandboxPort, SandboxSpec, SessionStore,
 };
 use aite_edge_client::{EdgeClient, EdgeStatus};
 use aite_models::{OpenAiCompatModel, cost_of, env_snapshot, resolve_api_key};
+use aite_store::SqliteSessionStore;
 use serde_json::{Map, Value, json};
 
 use aite_worker::context::load_system_prompt;
@@ -70,6 +75,13 @@ const DEFAULT_SYSTEM_PROMPT_PATH: &str = "core/crates/worker/prompts/platform.md
 /// 2026-09-12 删掉的 Python 树里 prompt 的位置。旧配置十有八九还指着它 ——
 /// 认出来就能在「怎么补」里直接说破病史，而不是让人自己去猜路径为什么不对。
 const DELETED_PYTHON_PROMPT_DIR: &str = "aite/worker/prompts/";
+
+/// `SqliteSessionStore::open` 认的那个「不落盘」取值。第 ① 组的库探针要放它过去 ——
+/// 它压根不是一个路径。
+const IN_MEMORY_SQLITE: &str = ":memory:";
+/// `storage.sqlite_path` 该长什么样。同样只在「怎么补」里露面，同样拿契约默认值 +
+/// 样例配置两头钉住（`sqlite_default_matches_the_contract`）。
+const DEFAULT_SQLITE_PATH: &str = "data/aite.db";
 
 /// `platform: fake` 时第 2/3/4 组那一行的理由。口径照 `--offline：不碰网络` ——
 /// 「判据不适用」要写在那一行里，不能默默跳过。
@@ -431,6 +443,80 @@ fn injection_fault(cfg: &AiteConfig) -> Option<(String, String)> {
     ))
 }
 
+/// 第 ① 组的第四件事：`storage.sqlite_path` 上**已经有的**那个文件真能当库用。
+///
+/// 返回 `(那一行说什么, 怎么补)`；没毛病（或者压根没得探）时返回 `None`。
+///
+/// **病史（2026-09-13，同一种病的第三次）**：把 `sqlite_path` 指到一个内容是
+/// `this is definitely not a sqlite database` 的文件，`preflight --offline` 全绿退出 0，
+/// 全跑七组里也没有一组管（第 7 组给的是 `OK 落盘目录可写`），而 `aite run` 退出码 2：
+/// `aite 起不来：建表失败（…）：sqlite: file is not a database`。第 7 组接不住它 ——
+/// 那一组验的是「三个路径的最近已存在祖先**目录**写得进去」，这里问的是「那个**文件本身**
+/// 能不能当库打开」，两件事。
+///
+/// **真正炸的那一步是 `store.init()`（`run.rs` 的 `takeoff`）而不是 `build_app`。**
+/// `SqliteSessionStore::open`（`app.rs` 第 6 步）只是一句 `Connection::open`，SQLite 在这一步
+/// 根本不读文件头，所以组装那一关是过得去的；等到 `init()` 的 `CREATE TABLE` 第一次真去读头，
+/// 才报 `SQLITE_NOTADB`。所以判据是**开一次库 + 逼它读一次文件头**，而不是只 open 一下
+/// （只 open 的话这条判据恒真，等于没加）。
+///
+/// **零副作用是硬要求**（第 ① 组是「配置可加载」，把文件建出来不该是它的事；X1 那条
+/// prompt 判据是纯读）：
+///
+/// * **文件不在就不探，直接过。** 那是正常路径 —— `build_app` 的文档注释明写「库文件不在
+///   就建一个空的（里面还没有表）」。也正因为先问了这一句，下面那个
+///   `SqliteSessionStore::open`（它会 `create_dir_all` 父目录、并新建库文件）**永远建不出
+///   任何东西来**：走到它跟前时，文件和父目录都已经在了。
+/// * `:memory:` 直接放过（[`IN_MEMORY_SQLITE`]，store 认这个取值）。
+/// * 探针本身只读：`PRAGMA schema_version` 一个字节都不写，跑完就 `close()`。
+///
+/// **探不出来的那一半，如实记在这儿**：文件是个好库、但它自己只读（或者所在卷只读）时，
+/// `init()` 的 `CREATE TABLE` 照样会炸，这条判据看不见 —— 它只读，读得动就算过。
+/// 第 7 组也接不住：那一组问的是**目录**写不写得进去。要覆盖它得真往库里写一次，
+/// 那就把第 ① 组从纯读变成有副作用，不划算。
+async fn sqlite_fault(cfg: &AiteConfig, repo_root: &Path) -> Option<(String, String)> {
+    let raw = cfg.storage.sqlite_path.clone();
+    if raw == IN_MEMORY_SQLITE {
+        return None;
+    }
+    let abs = resolve_under(repo_root, &raw);
+    if !abs.exists() {
+        return None;
+    }
+
+    let why = match SqliteSessionStore::open(&abs) {
+        // 目录、坏符号链接、没读权限这几种在这里就炸（`Connection::open` 打不开文件）。
+        Err(e) => e.to_string(),
+        Ok(store) => {
+            // `PRAGMA schema_version` 要解析数据库头 —— 正是 `init()` 建表时第一次撞上的
+            // 那一关。空文件（0 字节）在 SQLite 眼里是一个合法的空库，答 0，不会误伤。
+            let verdict = store.pragma_int("schema_version").await;
+            // 探完就还回去：preflight 后面几组不该带着一条打开的连接跑。
+            let _ = store.close().await;
+            match verdict {
+                Ok(_) => return None,
+                Err(e) => e.to_string(),
+            }
+        }
+    };
+
+    Some((
+        format!(
+            "storage.sqlite_path 指着的文件当不了 SQLite 库：{raw} → {}（{}）",
+            abs.display(),
+            tail(&why, 160)
+        ),
+        format!(
+            "把配置里的 storage.sqlite_path 指到一个真的 SQLite 库，\
+             或者把 {} 挪开／删掉、让起飞时自己建一个空库出来\
+             （{EXAMPLE_CONFIG_PATH} 里是 {DEFAULT_SQLITE_PATH}）；\
+             当前那个文件读得到但不是库，`aite run` 会走到建表那一步才炸 —— \
+             退出码 2、`aite 起不来：建表失败（…）`，preflight 这边不拦的话你要到那时才知道",
+            abs.display()
+        ),
+    ))
+}
+
 fn display_width(text: &str) -> usize {
     text.chars()
         .map(|c| if (c as u32) > 0x2e80 { 2 } else { 1 })
@@ -495,7 +581,8 @@ fn arm_redactor(
 // 1 配置可加载
 // --------------------------------------------------------------------------
 
-fn check_config(
+/// `async` 只为了第四件事（[`sqlite_fault`] 要 `await` 一次库探针）—— 前三件都是纯函数。
+async fn check_config(
     path: &Path,
     fell_back: bool,
     repo_root: &Path,
@@ -522,11 +609,12 @@ fn check_config(
     extra.insert("sandbox_image".into(), json!(cfg.sandbox.image));
     extra.insert("config_path".into(), json!(path.display().to_string()));
 
-    // 配置解析成功 ≠ 它起得来。下面两件事都是**硬起飞前提**（`build_app` 拒绝起飞的
-    // 原文就是它们），所以都是 FAIL 不是 WARN —— 见模块头「第 1 组为什么不只验解析」。
+    // 配置解析成功 ≠ 它起得来。下面三件事都是**硬起飞前提**（起飞路径上拒绝起飞的原文
+    // 就是它们：前两件在 `build_app`，第三件在 `run.rs` 的 `store.init()`），所以都是 FAIL
+    // 不是 WARN —— 见模块头「第 1 组为什么不只验解析」。
     //
     // **一次报齐，不是撞上第一条就早退**：口径照第 5 组那句「缺什么一次报齐，别让人补完
-    // base_url 重跑一遍才发现还缺 key」。两条都犯了的配置，一轮就能全改完。
+    // base_url 重跑一遍才发现还缺 key」。三条都犯了的配置，一轮就能全改完。
     // 只命中一条时这一行与「只验 prompt」那天**逐字相同**（涟漪最小）。
     let mut faults: Vec<String> = Vec::new();
     let mut fixes: Vec<String> = Vec::new();
@@ -572,6 +660,30 @@ fn check_config(
         }
         None => {
             extra.insert("needs_injection".into(), json!(false));
+        }
+    }
+
+    // 其三：`storage.sqlite_path` 上已经有的那个文件真能当库打开（`run.rs` 的
+    // `store.init()` 建表那一步）。见 [`sqlite_fault`]。
+    let sqlite_abs = resolve_under(repo_root, &cfg.storage.sqlite_path);
+    extra.insert(
+        "sqlite_path_resolved".into(),
+        json!(sqlite_abs.display().to_string()),
+    );
+    // 「探过没有」与「探的结果」分成两个字段：文件还不在时 `sqlite_ok` 也是 true
+    // （那是正常路径），不分开的话读 --json 的人分不出「好的」和「还没有」。
+    extra.insert(
+        "sqlite_probed".into(),
+        json!(cfg.storage.sqlite_path != IN_MEMORY_SQLITE && sqlite_abs.exists()),
+    );
+    match sqlite_fault(&cfg, repo_root).await {
+        Some((why, fix)) => {
+            extra.insert("sqlite_ok".into(), json!(false));
+            faults.push(why);
+            fixes.push(fix);
+        }
+        None => {
+            extra.insert("sqlite_ok".into(), json!(true));
         }
     }
 
@@ -1634,7 +1746,7 @@ pub async fn run_checks(
     arm_redactor(redactor, &env_var_names(&AiteConfig::default()), env);
 
     let mut notes: Vec<Note> = Vec::new();
-    let (cfg_result, cfg) = check_config(&config_path, fell_back, &opts.repo_root);
+    let (cfg_result, cfg) = check_config(&config_path, fell_back, &opts.repo_root).await;
     let mut checks = vec![cfg_result];
 
     let Some(cfg) = cfg else {
@@ -2356,13 +2468,13 @@ mod tests {
 
     /// 对拍 Python 的 `test_bad_config_fails_but_still_reports_seven_rows` 的前一半：
     /// yaml 读不懂就是 FAIL，且不许交出一个半成品 config。
-    #[test]
-    fn check_config_fails_on_a_yaml_it_cannot_read() {
+    #[tokio::test]
+    async fn check_config_fails_on_a_yaml_it_cannot_read() {
         let root = tempfile::tempdir().expect("tempdir");
         let bad = root.path().join("bad.yaml");
         std::fs::write(&bad, "platform: 不存在的平台\n").expect("write");
 
-        let (r, cfg) = check_config(&bad, false, root.path());
+        let (r, cfg) = check_config(&bad, false, root.path()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_none(), "读不出来就不该交出 config");
@@ -2411,8 +2523,8 @@ mod tests {
     /// 最后那半句才是容易写错的地方：yaml 读不懂时不交 config（后面六组没判据可谈），
     /// 而这里配置本身是好的 —— 交不出去的话后面六组会全变成「第 1 组没过，配置读不出来」，
     /// 「一项失败不阻断后面的」当场破功。端到端那一面钉在 `tests/preflight_e2e.rs`。
-    #[test]
-    fn check_config_fails_but_still_hands_over_the_config_when_the_prompt_is_missing() {
+    #[tokio::test]
+    async fn check_config_fails_but_still_hands_over_the_config_when_the_prompt_is_missing() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("aite.yaml");
         std::fs::write(
@@ -2421,7 +2533,7 @@ mod tests {
         )
         .expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path());
+        let (r, cfg) = check_config(&path, false, root.path()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
@@ -2444,8 +2556,8 @@ mod tests {
     /// `require_system_prompt` 也是相对 cwd 读的。这里改成按别的什么解析（比如相对
     /// 配置文件所在目录），preflight 就会在总管那台机器上说「行」而 `aite run` 说「不行」，
     /// 或者反过来 —— 正是这一轨要根治的那个病。
-    #[test]
-    fn check_config_resolves_the_prompt_under_the_repo_root() {
+    #[tokio::test]
+    async fn check_config_resolves_the_prompt_under_the_repo_root() {
         let root = tempfile::tempdir().expect("tempdir");
         // 配置文件搁在子目录里：相对配置文件解析的话，下面这份 prompt 就找不到了。
         let sub = root.path().join("etc");
@@ -2459,7 +2571,7 @@ mod tests {
         std::fs::create_dir_all(root.path().join("prompts")).expect("mkdir");
         std::fs::write(root.path().join("prompts/platform.md"), "# 假 prompt\n").expect("write");
 
-        let (r, _cfg) = check_config(&path, false, root.path());
+        let (r, _cfg) = check_config(&path, false, root.path()).await;
 
         assert_eq!(r.status, Status::Ok, "{} / {}", r.detail, r.fix);
         assert_eq!(
@@ -2568,8 +2680,8 @@ mod tests {
     ///
     /// 后半句是 X1 点名的那条口径（prompt 那边同款）：交不出去的话后面六组会全变成
     /// 「第 1 组没过，配置读不出来」，「一项失败不阻断后面的」当场破功。
-    #[test]
-    fn check_config_fails_but_still_hands_over_the_config_when_the_platform_is_fake() {
+    #[tokio::test]
+    async fn check_config_fails_but_still_hands_over_the_config_when_the_platform_is_fake() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("aite.yaml");
         std::fs::write(&path, "platform: fake\n").expect("write");
@@ -2578,7 +2690,7 @@ mod tests {
         std::fs::create_dir_all(prompt.parent().expect("有父目录")).expect("mkdir");
         std::fs::write(&prompt, "# 假 prompt\n").expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path());
+        let (r, cfg) = check_config(&path, false, root.path()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
@@ -2593,8 +2705,8 @@ mod tests {
     ///
     /// 早退的话，人补完 prompt 重跑才发现还有 `platform: fake` 挡着，白跑一轮。
     /// 口径照第 5 组那句「缺什么一次报齐，别让人补完 base_url 重跑一遍才发现还缺 key」。
-    #[test]
-    fn check_config_reports_the_prompt_and_the_injection_in_one_go() {
+    #[tokio::test]
+    async fn check_config_reports_the_prompt_and_the_injection_in_one_go() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("aite.yaml");
         std::fs::write(
@@ -2604,7 +2716,7 @@ mod tests {
         )
         .expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path());
+        let (r, cfg) = check_config(&path, false, root.path()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some());
@@ -2627,6 +2739,120 @@ mod tests {
         ] {
             assert!(r.fix.contains(keyword), "「怎么补」缺 {keyword}：{}", r.fix);
         }
+    }
+
+    // ---- 第 1 组的第四件事：sqlite_path 上的那个文件当不当得了库 ----------
+
+    /// [`DEFAULT_SQLITE_PATH`] 必须和契约默认值、和样例配置里那一行对得上。
+    ///
+    /// 口径照 [`prompt_default_matches_the_contract`] + [`check_config_points_at_the_example`]：
+    /// 这个常量只在「怎么补」里露面 —— 就是那句「该改成什么」。指错了照样 FAIL、照样给 fix，
+    /// 只是那句 fix 是错的，**没有任何别的测试会红**。所以两头各钉一次。
+    #[test]
+    fn sqlite_default_matches_the_contract() {
+        assert_eq!(
+            DEFAULT_SQLITE_PATH,
+            AiteConfig::default().storage.sqlite_path,
+            "「怎么补」里那句「该改成什么」和契约默认值分家了"
+        );
+        let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join(EXAMPLE_CONFIG_PATH);
+        let text = std::fs::read_to_string(&example)
+            .unwrap_or_else(|e| panic!("读不到 {}：{e}", example.display()));
+        assert!(
+            text.contains(&format!("sqlite_path: {DEFAULT_SQLITE_PATH}")),
+            "{EXAMPLE_CONFIG_PATH} 里的 storage.sqlite_path 和「怎么补」指的不是同一个值"
+        );
+    }
+
+    /// **这一条是 (a) 那条路的准入条件**：第 ① 组是纯读的，一个字节都不许落盘。
+    ///
+    /// 三种「没得探」的形态各钉一次。第一条最要紧 —— `SqliteSessionStore::open` 会
+    /// `create_dir_all` 父目录并新建库文件，判据要是不先问一句「文件在不在」，
+    /// 光跑一次 `aite preflight` 就会把 `data/aite.db` 和它的父目录建出来，
+    /// 而「配置可加载」这一组凭什么去建东西。
+    #[tokio::test]
+    async fn the_db_probe_never_writes_anything() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        // 1) 文件不在：不探，也不许把它（或它的父目录）建出来。
+        let mut cfg = AiteConfig::default();
+        cfg.storage.sqlite_path = "data/aite.db".to_string();
+        assert!(sqlite_fault(&cfg, root.path()).await.is_none());
+        assert!(
+            !root.path().join("data").exists(),
+            "第 ① 组把 data/ 建出来了 —— 它是「配置可加载」，不该有落盘副作用"
+        );
+
+        // 2) `:memory:` 不是路径，放过。
+        cfg.storage.sqlite_path = IN_MEMORY_SQLITE.to_string();
+        assert!(sqlite_fault(&cfg, root.path()).await.is_none());
+        assert!(!root.path().join(IN_MEMORY_SQLITE).exists());
+
+        // 3) 0 字节的文件在 SQLite 眼里是一个合法的空库 —— 不许误伤，
+        //    也不许被探针写进去（探完还是 0 字节）。
+        let empty = root.path().join("empty.db");
+        std::fs::write(&empty, b"").expect("建空文件");
+        cfg.storage.sqlite_path = "empty.db".to_string();
+        assert!(sqlite_fault(&cfg, root.path()).await.is_none());
+        assert_eq!(
+            std::fs::metadata(&empty).expect("空库还在").len(),
+            0,
+            "探针往库里写东西了"
+        );
+    }
+
+    /// 四件事都犯的配置**一次报齐** —— 第四件加进来之后仍然不许撞上第一条就早退。
+    ///
+    /// [`check_config_reports_the_prompt_and_the_injection_in_one_go`] 钉的是前三件；
+    /// 这一条把 sqlite 那件也拉进同一轮。缺一件就要重跑一轮才发现，正是第 5 组那句
+    /// 「缺什么一次报齐」在骂的事。
+    #[tokio::test]
+    async fn check_config_reports_all_four_faults_in_one_go() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("aite.db"),
+            "definitely not a sqlite database",
+        )
+        .expect("写坏库");
+        let path = root.path().join("aite.yaml");
+        std::fs::write(
+            &path,
+            "platform: fake\nmodel:\n  provider: scripted\nworker:\n  \
+             system_prompt_path: aite/worker/prompts/platform.md\nstorage:\n  \
+             sqlite_path: aite.db\n",
+        )
+        .expect("write");
+
+        let (r, cfg) = check_config(&path, false, root.path()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
+        for keyword in [
+            "worker.system_prompt_path",
+            "platform=fake",
+            "model.provider=scripted",
+            "storage.sqlite_path",
+        ] {
+            assert!(
+                r.detail.contains(keyword),
+                "四件事没报齐，缺 {keyword}：{}",
+                r.detail
+            );
+        }
+        // 「怎么补」也要四件齐。sqlite 那件的「该改成什么」断到右括号 ——
+        // 光断 `data/aite.db` 的话，`data/aite.db.bak` 之类也能蒙混过去。
+        for keyword in [
+            DEFAULT_SYSTEM_PROMPT_PATH,
+            REAL_PLATFORM,
+            REAL_MODEL_PROVIDER,
+            &format!("里是 {DEFAULT_SQLITE_PATH}）"),
+        ] {
+            assert!(r.fix.contains(keyword), "「怎么补」缺 {keyword}：{}", r.fix);
+        }
+        assert_eq!(r.extra["sqlite_ok"], json!(false));
+        assert_eq!(r.extra["sqlite_probed"], json!(true));
     }
 
     /// 对拍 Python 的 `test_missing_env_var_fails_and_names_it`：非 offline 下缺变量就是

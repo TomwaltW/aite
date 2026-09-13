@@ -211,7 +211,13 @@ async fn the_gate_reopens_itself_once_edge_is_back_on_the_right_contract() {
     edge.stop().await;
 }
 
-/// `GetStatus` 本身不许过闸门：拦住它，闸门就永远开不了，`!status` 的健康行也问不出来。
+/// `GetStatus` 本身不许过闸门：拦住它，闸门就永远开不了 —— 闸落着时它是唯一还出得去的
+/// 一发 RPC，`verify_contract` 靠它解锁。
+///
+/// 原注释还有半句「`!status` 的健康行也问不出来」：那条健康行**全仓不存在**。
+/// `!status` 这条命令是真的（`control/src/plane.rs` 的 `cmd_status`），但它走
+/// `status_tasks(&ev.chat_id)`，只从 store 列活跃任务，从头到尾不碰 edge。
+/// 与 `app.rs:83`（W2 改掉）、`lib.rs` 那两处（X1）、`link.rs` 那两处（Y2）是同一句谎话的副本。
 #[tokio::test]
 async fn get_status_itself_is_never_barred() {
     let mut edge = FakeEdge::start().await;

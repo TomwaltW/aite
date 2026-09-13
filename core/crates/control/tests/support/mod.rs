@@ -218,6 +218,15 @@ impl TickingWallClock {
 
 /// 替掉 reaper 的 `sleep`：前 `limit-1` 次立刻返回（让循环转起来），
 /// 第 `limit` 次永久挂住 —— 否则一个不 yield 的假 sleep 会把 reaper 变成空转。
+///
+/// **「挂住了」这个信号一定要留得下痕迹**：`new()` 当场把建出来的 `_rx` 丢了，唯一订阅它的
+/// 地方是 [`Self::wait_until_parked`]。`watch::Sender::send` 在一个活跃接收者都没有时返回
+/// `Err` **并且连内部那个值都不改** —— 于是闭包先跑到第 `limit` 次、`wait_until_parked()`
+/// 后到的那个时序里，等待方看到的值永远是 `false`，`wait_for` 永远不返回，用例挂死。
+/// 药是 [`watch::Sender::send_replace`]（见 `as_sleep`），与 `app` 那边
+/// `StopSignal::set()` 逐字同一条 —— 那条是产品缺陷（真机上 SIGTERM 会被吃掉），
+/// 这条是同形状的测试替身，一并治掉。
+/// 回归见本文件的 [`parking_counts_even_when_nobody_is_waiting_yet`]。
 pub struct ParkedSleep {
     limit: usize,
     calls: Mutex<Vec<f64>>,
@@ -255,13 +264,37 @@ impl ParkedSleep {
                     calls.len()
                 };
                 if n >= me.limit {
-                    let _ = me.parked.send(true);
+                    // `send_replace` 而不是 `send`：这里通常一个接收者都还没有（见类型注释）。
+                    me.parked.send_replace(true);
                     std::future::pending::<()>().await;
                 }
                 tokio::task::yield_now().await;
             })
         })
     }
+}
+
+/// **回归**：挂住这件事发生在任何 `wait_until_parked()` 之前也必须算数。
+#[tokio::test]
+async fn parking_counts_even_when_nobody_is_waiting_yet() {
+    let sleeper = ParkedSleep::new(1);
+
+    // 让闭包先跑到 —— `timeout` 先 poll 内层，一次 poll 就走到 `pending()` 挂住了，
+    // 也就是说 `send` 已经发生，而这时一个订阅者都还没有。
+    let parked = (sleeper.as_sleep())(1.0);
+    tokio::time::timeout(std::time::Duration::from_millis(50), parked)
+        .await
+        .expect_err("第 limit 次 sleep 的本分就是永不返回");
+    // 防空转：闭包确实跑进了挂住那条分支，不是压根没被 poll 到。
+    assert_eq!(sleeper.calls(), vec![1.0], "第 1 次 sleep 没被记下来");
+
+    // 后到的等待必须立刻返回。
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sleeper.wait_until_parked(),
+    )
+    .await
+    .expect("挂住早于订阅时 wait_until_parked() 必须立刻返回");
 }
 
 /// 永远不返回的 sleep：路由类用例不跑 reaper，但也不该真等 60 秒。
