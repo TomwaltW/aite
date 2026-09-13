@@ -1453,3 +1453,265 @@ aite.signal 在 aite.up 之前：True
 5. **⑤ 那条测试大约 6s**，其中 4s 是 `check_contract_version` 那 5 次 `GetStatus` 重试 ——
    既有行为，不是测试自己在 sleep。它与 `sigterm_before_serve_still_exits_by_itself` 同样
    受 `SUN_LEN` 那条隐性前提约束（Y1 记过，本轨的 `write_takeoff_config` 里原样留了那条注释）。
+
+## 十二、Z2 回执 —— 2026-09-13
+
+守卫 2026-09-13 把总管那一侧的会话整体锁死了一次，而且从会话内部出不来。这一轨给 hook 命令
+补了恢复路径，加了一条**真跑那条命令**的行为回归，并把历次误拦归拢成一张带标准绕法的表。
+
+**交付时 `check.sh` 是红的，而且是对的**：新那条测试读的是 `settings.json` 的真实内容，
+那个文件在守卫的保护面里、只有人能改。补丁（`review/z2-guard-patch.py`）跑之前它必须红，
+跑之后必须绿 —— 它要是交付时就绿，说明它没在验真东西。
+
+### 基线与开场自检
+
+HEAD 是 `7a261f7`，不是派单抬头写的 `f3bc017`。差的那一格就是**出 Z2 / Z3 两份派单本身**
+（`review/paste-Z2.md` + `review/paste-Z3.md`，545 行文档、零代码改动），`7a261f7^` 正是 `f3bc017`。
+当基线用，不是回归。
+
+`scripts/check.sh` 开场：`OK 25 files`、`contracts passed=25 failed=0`、
+**`cargo passed=852 failed=0`**、go 六个包全 `ok`、`passed 10/10`，「全部通过」退出码 0。
+**一次跑过，那三个抖动 target 一个都没撞到**（`graceful_shutdown` / `reconnect_replay` /
+`startup_recovery` 全绿）。Read `.claude/hooks/guard_bash.py` 被守卫拦下 ✅，原话逐字：
+
+```text
+blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+### ① 补丁脚本 `review/z2-guard-patch.py`
+
+**锚点只有 1 条，三处交叉确认，不是猜的**：
+
+| 来源 | 拿到的东西 |
+|---|---|
+| `review/v6-guard-patch.py` (3c) 那条 `Edit` 的 `new` 值 | `python3 "$(git rev-parse --show-toplevel)/.claude/hooks/guard_bash.py"` |
+| `Read .claude/hooks/guard_bash.py` 被拦时，守卫把 hook 命令原样打进了错误消息的方括号 | `[python3 "$(git rev-parse --show-toplevel)/.claude/hooks/guard_bash.py"]` |
+| 一条临时测试让 `pretooluse_commands()` 在**测试运行时** `println!` 出来（用完删了，`grep` 复核 0 命中） | `TMPDUMP count=1` / `TMPDUMP[0] >>>python3 "$(git rev-parse --show-toplevel)/.claude/hooks/guard_bash.py"<<<` |
+
+三处逐字相同，**条数 = 1**。顺带确认了一件事：`4969a8d fix(guard): 落地 V6 的守卫补丁` ——
+**V6 那份补丁已经跑过了**（台账第八 / 九节里「只有人能跑，至今没跑」那条账可以销了）。
+
+转义交给 `json.dumps(s)[1:-1]` 算，没手写 —— V6 就是这么做的，而它的 (3c) 已经成功落盘，
+也就是说这个转义形与文件里实际的写法是对得上的。
+
+**药不是照抄总管那一行。** 五种 cwd x 三个候选命令 x 两种 payload 全部实跑
+（`sh -c <命令>`，喂 payload 看退出码；`AITE_RELOCK` 每次都摘掉）：
+
+| 情形 | V6 现状（无 fallback） | 总管那行（`\|\|`） | 本轨（`[ -f ]`） |
+|---|---|---|---|
+| ① 仓库根 | ✅ | ✅ | ✅ |
+| ② 仓库子目录（(3c) 要治的那条） | ✅ | ✅ | ✅ |
+| ③ 仓库外（09-13 锁死那个） | ❌ 变砖 | ✅ | ✅ |
+| ④ **另一个 git 仓库里（没有守卫）** | ❌ 变砖 | **❌ 变砖** | ✅ |
+| ⑤ 仓库外 + `CLAUDE_PROJECT_DIR` 也没有 | ❌ 变砖 | ❌ 变砖 | ❌ 变砖（**故意的**） |
+
+（✅ = 该拦的退 2、该放的退 0；❌ 变砖 = 两种 payload 都退 2。）
+
+**④ 就是改药的理由**：`||` 看的是「git 有没有成功」，而 cwd 落在**另一个** git 仓库里时
+git 会**成功**并返回那边的根，`||` 分支于是永远不触发，命令仍然指向一个不存在的守卫 →
+退 2 → 照样变砖。这台机器上不止一个仓库（`~/Documents/MAOS` 等），`cd` 过去毫不稀奇。
+判据得换成「找到的那个根里到底有没有守卫」：
+
+```bash
+d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"
+```
+
+⑤ 保持变砖是**故意的**：两个来源都不可用时没有任何办法找到守卫，而 **fail-closed 优先于
+不锁死**。这一点结构上有保证 —— 命令最后一句永远是 `python3 "$d/…"`，`$d` 算成什么都好，
+文件不在就是退出码 2；`[ -f ]` 这一探只能改变「跑哪一份守卫」，改不了「到底跑不跑守卫」。
+
+**`--check` 跑不了真目标，只跑了合成件 —— 为什么**：跑真目标要么得 `AITE_RELOCK=1`
+（守卫故意拦自我授权），要么就是让脚本替我读一个守卫判 `readable=False` 的文件 ——
+两条都是绕。所以脚本加了一道闸：没有 `--root` 又没有 `AITE_RELOCK=1` 时当场拒绝，
+**一个字节都不读**（V6 那份没有这道闸）。自验改成对**合成的** `settings.json` 跑，
+里面那条命令是上面三处量出来的逐字原文。八种情形全部按预期：
+
+```text
+### A. 一条 PreToolUse（实测的真实形态）· --check
+[命中 1 条] settings.json: PreToolUse hook 命令：加一条恢复路径（仓库外 / 别的仓库里都别锁死）
+[      OK] settings.json: 命中 1 条，全部换掉，旧命令剩 0
+
+--check：没写盘。改完会是这一条命令：
+  d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"
+[退出码 0]
+
+### C. 三条 PreToolUse 条目 · 真写
+[命中 3 条] …
+[      OK] settings.json: 命中 3 条，全部换掉，旧命令剩 0
+落盘后 PreToolUse 命令：（三条，逐字相同）
+全部换成新命令：True（3 条）
+
+### D. 两条旧的 + 一条无关的 · 真写
+[命中 2 条] …  [      OK] 命中 2 条，全部换掉，旧命令剩 0
+落盘后：两条换了，`echo unrelated` 一个字没动
+
+### E. 已经打过了 · --check
+           └ 看起来这份补丁已经打过了（新命令已经在文件里）。不用再跑。   [退出码 1]
+### F. 还停在 V6 之前 · --check
+           └ hook 命令还停在 V6 (3c) 之前那一版（$CLAUDE_PROJECT_DIR）——先跑 review/v6-guard-patch.py，再跑这一份。   [退出码 1]
+### G. 被人改成别的了 · --check
+           └ hook 命令既不是 V6 (3c) 那一版，也不是本补丁的目标形态 —— 它在 V6 之后又被人改过。人工核一遍再说，别硬来。   [退出码 1]
+### H. 真目标 + 没有 AITE_RELOCK
+这份补丁改的是 .claude/** —— 守卫的保护面，故意只让人跑。   [退出码 1]
+```
+
+「换掉的条数 == 命中的条数」是硬断言：命中几条就必须换掉几条、旧命令一条不许剩
+（C / D 两例正是在验它）。JSON 合法性检查照抄 V6 那份，外加一道**落盘后读回来**再验一遍
+（JSON 还合法、新命令真的在里面）—— 写坏了 hook 整个不加载，那就是又一次静默失效，
+而且是最坏的那种：守卫在，但没挂上。
+
+### ② 行为回归 `the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session`
+
+`the_hook_command_uses_python3_not_python` 只看命令的**形状**。形状对、而在某个 cwd 下它把
+**一切**都拦掉 —— 这种病它一个字也看不见。新那条**真跑**命令（`sh -c`，喂 payload 看退出码），
+三种 cwd x 两个 payload：
+
+| cwd | 锁着哪种退化 |
+|---|---|
+| 仓库外（`tempfile::tempdir()`，**先量一次** `git rev-parse` 确认不在任何仓库里，不假设 `TMPDIR`） | 2026-09-13 锁死那条本身 |
+| 另一个 git 仓库里（测试里 `git init` 现建，并断言那边没有守卫） | 「git 失败才回退」这种写法 |
+| 子目录 + `CLAUDE_PROJECT_DIR` 也指着子目录 | V6 (3c) 治的那条原病（2026-09-12） |
+
+**两个 payload 都断，两条都承重**（做了变异，各自能抓到不同的病）：
+
+| 变异 | 红在哪条断言 |
+|---|---|
+| hook 命令 = `cat >/dev/null; exit 0`（守卫在、但什么都不拦） | **payload ①**（`guard.rs:435`）：`写冻结面没被拦 … left: 0 right: 2` |
+| hook 命令 = 现状（无 fallback） | **payload ②**（`guard.rs:441`）：`echo hello 被拦了 … left: 2 right: 0` |
+
+也就是说 payload ① 抓「静默放行」，payload ② 抓「会话变砖」，**缺一条这测试就没意义** ——
+只断「该拦的拦住了」是恒真断言，一条把一切都拦掉的坏命令照样满足它。
+
+**四个候选命令各喂一次**（临时给 `settings_path()` 加了个 `Z2_TMP_SETTINGS` 覆盖，
+跑完立刻还原，`grep` 复核 0 命中、`git diff` 只剩正经改动）：
+
+```text
+### old-v6（= 交付时 settings.json 里就是这条）
+panicked at crates/app/tests/guard.rs:441:13:
+assertion `left == right` failed: 【仓库外（2026-09-13 锁死会话的那种 cwd）】`echo hello` 被拦了 …
+  left: 2   right: 0
+test result: FAILED. 0 passed; 1 failed
+
+### pre-v6（纯 $CLAUDE_PROJECT_DIR）
+assertion failed: 【子目录里起的会话（CLAUDE_PROJECT_DIR 指着子目录，V6 (3c) 的原病）】`echo hello` 被拦了 …
+test result: FAILED. 0 passed; 1 failed
+
+### boss（总管那行 || fallback）
+assertion failed: 【另一个 git 仓库里（git 成功了，但那边没有守卫）】`echo hello` 被拦了 …
+test result: FAILED. 0 passed; 1 failed
+
+### z2（本轨的药）
+test result: ok. 1 passed; 0 failed
+```
+
+三条坏命令**全部红在 payload ②**，各红在自己那一种 cwd 上；本轨这条全绿。
+
+**交付状态（补丁未跑）——「这条必须红」**：
+
+```text
+running 10 tests
+test the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session ... FAILED
+（其余 9 条 ok）
+
+panicked at crates/app/tests/guard.rs:485:13:
+assertion `left == right` failed: 【仓库外（2026-09-13 锁死会话的那种 cwd）】`echo hello` 被拦了 —— 这条命令在这种 cwd 下找不到守卫，于是把**一切**都拦掉。…
+  left: 2
+ right: 0
+
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+这件事在测试自己的文档注释里写明了（「跑之前是红的，跑之后必须绿，交付时红是对的」），
+**没有 `#[ignore]`**。
+
+### ③ 模块头改了什么
+
+`:25-31` 那六行是假的（还写着 hook 命令是 `python3 "$CLAUDE_PROJECT_DIR/…"`，并花五行解释
+一条 V6 已经修掉的病）。换成：现在的命令形态 → 两条病史各治了什么（2026-09-12 的 cwd 漂移、
+2026-09-13 的仓库外锁死）→ 回退判据为什么是 `[ -f ]` 而不是 `||` → ⑤ 为什么故意保持变砖。
+
+**「它验不了的那件事」那一段：判断是仍然成立，但范围收窄了，所以重写而不是删掉。**
+新那条测试把「命令在各种 cwd 下找不找得到守卫」从形状层推进到了行为层；但它读的始终是
+`settings.json` 的**内容**，一份内容完美却压根没被 Claude Code 加载的配置，这里每一条都会绿。
+所以「它挂上了」照旧只有开场自检那一条能验：Read 一下守卫脚本自己，必须被拦。
+
+模块头末尾另加了 ④ 那张表的精简版（三列：撞到的写法 / 判定 / 标准绕法）——
+下一个执行者最可能在那儿找它。
+
+### ④ 误拦归类表
+
+八次散在四份回执里（派单说的是「X1 1 + Y1 2 + Z1 3 + 总管 2」，实际上**第十节 Y2 也有 2 次**，
+台账里的四份合起来正好 8；总管那两次是在这 8 之外的），加上本轨自己撞到的。
+历史那几条只有转述，**本轨逐条复跑取了原话**：
+
+| # | 撞到的写法 | 守卫报的原话 | 判定 |
+|---|---|---|---|
+| 1 | 开场自检：`Read .claude/hooks/guard_bash.py`（本轨） | `blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。` | **设计如此，别绕**。没有绕法 —— 这条正是开场自检要撞的那一条，撞不到才是出事了 |
+| 2 | `cat .claude/settings.json`（本轨） | `blocked: 该操作触碰受保护面 .claude/settings.json（读取位置）。…` | **设计如此**。`cat` 在 `READ_SAFE` 里没用：那只决定「这是读取位置」，`PROT_PATHS` 的 `readable=False` 连读取位置一起拦 |
+| 3 | `AITE_RELOCK=1 echo hi`（本轨） | `blocked: 该操作触碰受保护面 AITE_RELOCK（授权变量赋值）。…` | **设计如此**。改 `.claude/**` 只能出补丁脚本给人跑（本轨 ① 就是） |
+| 4 | `find . -name "*.rs" -exec ls {} \;`（Z1 撞过，本轨复现） | `blocked: 该操作触碰受保护面 冻结面（proto/** 与 core/crates/contracts/**）（find 的 -delete/-exec 覆盖面判不出来）。…` | **设计如此**。`-exec`/`-delete` 展开成什么算不出来。**标准绕法**：`ls` 列出来 + 点名 `rm -f` |
+| 5 | `git add core/crates/contracts/src/lib.rs`（总管撞过，本轨复现） | `blocked: 该操作触碰受保护面 core/crates/contracts/**（写入/执行位置）。…` | **固有代价**（扫命令文本，路径字面量判不出你是要加还是要改）。**标准绕法**：`git add -u` |
+| 6 | `cargo fmt --all`（Z1 / X1 撞过，本轨复现） | `blocked: 该操作触碰受保护面 core/crates/contracts/**（cargo fmt 写模式（用 cargo fmt --check））。…` | **固有代价**。提示里让用 `--check`，但收尾要的是真格式化。**标准绕法**：逐个文件 `rustfmt --edition 2024 <file>`，然后 `git status` 复核没动到别的 |
+| 7 | heredoc 正文里有配不平的引号 / 中文引号（Y1 1 次、Y2 1 次、Z1 1 次，本轨复现） | `blocked: 该操作触碰受保护面 <命令无法解析: No closing quotation>（解析失败）。…` | **固有代价**（守卫得先把命令解析成词才能判）。**标准绕法**：改用 Write 工具把正文落成文件，别用 heredoc |
+| 8 | heredoc 被判「不透明载荷」（Y2 1 次，归因写的是「正文太长」） | 本轨拿到的同名原话：`blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（不透明载荷）。…` | **固有代价，但 Y2 的归因要更正**：这个标签是**「受保护路径出现在判不出读/写的位置」**时打的，**不是**长度。本轨 3.7KB 与 32KB 的纯中文正文都**放行**，而一条正文里带受保护路径字面量的命令**当场被判「不透明载荷」**。**标准绕法**同 7（Write 工具落文件） |
+| 9 | 命令 / heredoc 正文里带 `*` 或 `**`（markdown 加粗），被反向匹配到 `PROBES` 里已删的 `aite/contracts/__init__.py`（X1 1 次、Y1 1 次） | 两份回执都没留原话 | **还能收窄 —— 已经收掉了**。V6 (3a) 在 `4969a8d` 把那条死探针删了。本轨复验两条：正文含 `**加粗**` 的 heredoc → 放行；`ls core/crates/*/src/lib.rs`（`*` 会展开到契约面）→ 放行 |
+| 10 | **会话被整体锁死**（总管，2026-09-13）：cwd 停在仓库外，`Bash` / `Read` / `Write` 全部同一条错 | **不是守卫在说话** —— 是 hook 命令自己炸了，本轨复现逐字：`fatal: not a git repository (or any of the parent directories): .git` + `…/Python: can't open file '/.claude/hooks/guard_bash.py': [Errno 2] No such file or directory`，退出码 **2** → PreToolUse 读作「拦截」 | **还能收窄 —— 本轨收了**。病不在守卫逻辑里，在 hook 命令缺恢复路径。① 的补丁治它，② 钉住它 |
+
+**三类各自的意思**：1–4 是**设计如此**，撞到就换写法，别去改守卫；5–8 是**扫命令文本的固有代价**，
+每条都给了标准绕法（那就是下一批派单模板要抄的东西）；9–10 是**真误拦 / 真缺陷**，
+而且都已经收掉了 —— 9 由 V6 收，10 由本轨收。**本轨一个字没碰 `guard_bash.py`**。
+
+### 给总管的三条命令
+
+```bash
+cd /Users/shensikai/Documents/Aite/.worktrees/task-z2
+AITE_RELOCK=1 python3 review/z2-guard-patch.py --check   # 先干跑，期望「命中 1 条 / 全部换掉 / 旧命令剩 0」、退出码 0
+AITE_RELOCK=1 python3 review/z2-guard-patch.py           # 真写
+cd core && cargo test -p aite --test guard               # 期望 10 passed; 0 failed
+```
+
+第三条跑完 `the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session`
+**必须转绿**；没转绿就是补丁没落到该落的地方，别往下走。
+
+### 测试数
+
+`cargo passed=852 → 853 条`，其中 **852 passed + 1 failed**：
+
+* `core/crates/app/tests/guard.rs` **+1**（9 → 10）：② 那条。
+* 红的就是它，**原因是 `review/z2-guard-patch.py` 还没跑**（`settings.json` 只有人能改）。
+  没有 `#[ignore]`，没有别的红点。
+
+收尾 `scripts/check.sh`：`OK 25 files`、`contracts passed=25 failed=0`、
+**`cargo passed=852 failed=1`**、go 六包全 `ok`、`passed 10/10`，退出码 **1**。
+A1/A2/A3/A4a/A4b/A4c/A4d/A5/C1/B-go/B8 **全部 exit 0**，唯一 `✗` 落在 B 全量 cargo test 上，
+失败名逐字 `error: test failed, to rerun pass -p aite --test guard` —— 就是上面那一条。
+`cargo clippy --workspace --all-targets -- -D warnings` 干净。冻结面一个字没动。
+
+`cargo fmt --all` 照例被守卫拦（碰冻结面），改用 `rustfmt --edition 2024 crates/app/tests/guard.rs`，
+`git status` 复核只有 `guard.rs` 一个改动文件 + `review/z2-guard-patch.py` 一个新文件。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| 台账第八节 X1 / 第九节 Y1 的「记账转出去的」里，`PROBES` 那条写着「`review/v6-guard-patch.py` 只有人能跑，**至今没跑**」 | **这条账已经过期**：`git log -- .claude` 显示 `4969a8d fix(guard): 落地 V6 的守卫补丁`，V6 那份补丁跑过了，死探针也确实删掉了（本轨行为层复验两条）。两处该销账 | 总管（销账即可，无代码） |
+| 台账第十节 Y2 的「撞到两次守卫误拦……一次『不透明载荷』（**正文太长**）」 | **归因错了**。「不透明载荷」是「受保护路径出现在判不出读/写的位置」时打的标签，与长度无关（本轨 32KB 纯正文放行，带受保护路径字面量的短命令当场被判）。按长度去绕会绕不掉 | 总管（改一句归因） |
+| 本派单「材料散在四份回执里（X1 1 次、Y1 2 次、**Z1 3 次**、总管这一侧 2 次）」 | 漏了**第十节 Y2 的 2 次**。台账里四份回执合起来正好 8 次（1+2+2+3），总管那两次是在这 8 之外的 —— 所以本轨的表是 10 行加自撞，不是 8 行 | 总管（下一批派单模板对一下数） |
+| `guard_bash.py` 的 `PROBES` / `PROT_PREFIXES` 等收窄 | 本轨纪律 4 明令只改 hook 命令那一处，守卫脚本一个字没碰。上表 5–8 那四条「固有代价」里，7（引号解析）与 8（不透明载荷）理论上还有收窄空间（例如 heredoc 正文不参与路径扫描），但那要动守卫 | 下一轮（守卫收窄那一轨） |
+| `.claude/settings.json` 的实际内容 | 本轨**一个字节都没读过**（`readable=False`）。所以「`settings.json` 里只有 1 条 PreToolUse 命令」这件事是靠 `pretooluse_commands()` 在测试运行时量出来的，不是看文件看出来的。补丁脚本按「命中几条换几条」写，多于 1 条也吃得下 | —（如实记着） |
+
+### 没做的 / 拿不准的
+
+1. **`--check` 没对真 `settings.json` 跑过。** 跑它要么得 `AITE_RELOCK=1`（守卫故意拦自我授权），
+   要么就是让脚本替我读一个 `readable=False` 的文件 —— 两条都是绕，所以没跑。
+   自验改成对合成件跑了八种情形（见 ①）。真目标那一遍归总管。
+2. **hook 命令交给哪个 shell 执行，没有实证。** ② 那条测试用的是 `sh -c`（POSIX 子集，
+   本轨这条命令是 POSIX 干净的，`bash -c` 下同样成立）。Claude Code 实际用哪个 shell 起 hook，
+   从会话内部量不出来。症状明确不会静默变味（真换了别的 shell，那条测试会直接红）。
+3. **⑤ 那种「两个来源都不可用」到底可不可达，没有实证。** Claude Code 给 hook 设
+   `CLAUDE_PROJECT_DIR` 是文档行为，但本轨没法从会话内部读到 hook 进程的环境。
+   真不可达的话 ⑤ 只是理论情形；可达的话它也仍然是 fail-closed，不会静默放行。
+4. **文档面一个字没动**（归 Z3）。本轨没有要转出去的文档改动 —— 自己的文字出口
+   （`guard.rs` 模块头 + 补丁脚本 docstring）够用了。
+5. **`.claude/hooks/guard_bash.py` 一个字没碰**（纪律 4）。上表 9 那条死探针是 V6 收的，
+   不是本轨。

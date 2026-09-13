@@ -22,12 +22,57 @@
 //! 之前第一件事就 `sys.exit(0)`）。不摘的话，只要有人用 `AITE_RELOCK=1 claude …` 起会话，
 //! 这一整份测试就变成一堆恒真断言 —— 正是它要防的那种东西。
 //!
-//! **它验不了的那件事**：守卫在**当前这个会话里有没有真的挂上**。hook 命令是
-//! `python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_bash.py"`，而 `CLAUDE_PROJECT_DIR`
-//! 在 claude 进程启动那一刻定死 —— 会话在仓库子目录里起（或先起 claude 再 `cd`），
-//! 它就指着子目录，文件不存在 → hook 执行失败 → 非阻塞放行、不报警 → 整场静默失效。
-//! 这里验的是「守卫脚本本身好使」和「hook 配置那条命令写得对」，**不是**「它挂上了」。
-//! 后者只有开场自检那一条能验：Read 一下守卫脚本自己，必须被拦。
+//! **hook 命令现在长这样**（`review/z2-guard-patch.py` 落的那一条）：
+//!
+//! ```text
+//! d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] \
+//!   || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"
+//! ```
+//!
+//! 它是两条病史叠出来的，两条都真踩过：
+//!
+//! 1. **cwd 漂移（2026-09-12）**：原来写的是 `python3 "$CLAUDE_PROJECT_DIR/…"`，而
+//!    `CLAUDE_PROJECT_DIR` 在 claude 进程启动那一刻定死 —— 会话在仓库子目录里起
+//!    （或先起 claude 再 `cd`），它就指着子目录 → 文件不存在 → hook 执行失败 →
+//!    **非阻塞放行、不报警** → 整场守卫静默失效。V6 (3c) 改成 `$(git rev-parse --show-toplevel)`
+//!    治好了这一条。
+//! 2. **仓库外把会话锁死（2026-09-13）**：(3c) 那一版没有恢复路径。会话 cwd 停在
+//!    `~/.claude/projects/…/memory`（不在任何 git 仓库里）时，命令展开成
+//!    `python3 "/.claude/hooks/guard_bash.py"` → 文件不存在 → 退出码 2 → PreToolUse
+//!    读作**拦截** → `Bash` / `Read` / `Write` 全是同一条错。而**会话 cwd 只能靠 Bash 的
+//!    `cd` 改，Bash 已经被拦** —— 会话变砖，只能由人重启。Z2 补的就是这一条。
+//!
+//! 回退判据是 **`[ -f ]`（那个根里到底有没有守卫）而不是 `||`（git 成功没有）**：cwd 落在
+//! **另一个** git 仓库里时 `git` 会成功并返回那边的根，`||` 分支于是永远不触发，照样变砖。
+//! 两个来源都不可用时仍然退出 2（**故意的** —— fail-closed 优先于不锁死）：命令的最后一句
+//! 永远是 `python3 "$d/…"`，`$d` 算成什么都好，文件不在就是 2。`[ -f ]` 这一探只能改变
+//! 「跑哪一份守卫」，改不了「到底跑不跑守卫」。
+//!
+//! 这三种 cwd 由 `the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session`
+//! 真跑命令钉着，两个 payload 都断（该拦的拦、该放的放）——
+//! 只断前者是恒真断言，一条把**一切**都拦掉的坏命令照样满足它。
+//!
+//! **它仍然验不了的那件事**：守卫在**当前这个会话里有没有真的挂上**。上面那条新测试把
+//! 「命令在各种 cwd 下找不找得到守卫」从形状层推进到了行为层，但它读的始终是
+//! `settings.json` 的**内容** —— 一份内容完美却压根没被 Claude Code 加载的配置，
+//! 这里每一条都会绿。所以「它挂上了」**照旧只有开场自检那一条能验**：
+//! Read 一下守卫脚本自己，**必须被拦**。
+//!
+//! ---
+//!
+//! **守卫拦过什么（八次误拦归类，精简版；全表在台账「十二、Z2 回执」）**。
+//! 撞上了先照「标准绕法」换写法，**别碰守卫**：
+//!
+//! | 撞到的写法 | 判定 | 标准绕法 |
+//! |---|---|---|
+//! | `AITE_RELOCK=1 …` | 设计如此 | 没有。改 `.claude/**` 只能出补丁脚本给人跑 |
+//! | `find … -delete` / `-exec` | 设计如此 | `ls` 列出来 + 点名 `rm -f` |
+//! | Read / `cat` 守卫自身或 `settings.json` | 设计如此 | 没有。这条正是开场自检要撞的那一条 |
+//! | 命令里出现受保护路径的**字面量**（`git add <那个路径>`） | 固有代价 | `git add -u` |
+//! | `cargo fmt --all`（写模式，碰冻结面） | 固有代价 | 逐个文件 `rustfmt --edition 2024 <file>` |
+//! | heredoc 正文里有配不平的引号 / 中文引号 | 固有代价 | 改用 Write 工具落文件，别用 heredoc |
+//! | heredoc 正文被判「不透明载荷」 | 固有代价 | 同上（本轨 32KB 中文正文没复现，判据不是纯长度） |
+//! | 正文里的 `**`（markdown 加粗）反向匹配到死探针 | 已收窄 | 不再复现：V6 (3a) 把 `aite/contracts/__init__.py` 从 `PROBES` 里删了（`4969a8d`） |
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -288,6 +333,163 @@ fn the_hook_command_uses_python3_not_python() {
             "hook 命令里出现了裸 python（本机没有这个命令，会 command not found → \
              hook 失败 → 非阻塞放行 → 守卫静默失效）：{c:?}"
         );
+    }
+}
+
+/// 在 `cwd` 下用 `sh -c` **真跑一遍** `settings.json` 里那条 hook 命令，返回退出码。
+///
+/// 和 `run_guard` 的分工：那个直接 `python3 <守卫脚本>`，验的是**守卫本身**好不好使；
+/// 这个跑的是**命令字符串**，验的是「在这个 cwd 下它到底还找不找得到守卫」。
+/// PreToolUse 的命令是交给 shell 执行的，所以这里也过一层 shell。
+///
+/// `CLAUDE_PROJECT_DIR` 按参数给 —— 它模拟的是「claude 进程是在哪个目录起的」，
+/// 而那个值在进程启动那一刻就定死了，正是 (3c) 那条病的病根。
+fn run_hook_command(cmd: &str, cwd: &Path, project_dir: &Path, payload: &Value) -> i32 {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .env("CLAUDE_PROJECT_DIR", project_dir)
+        .env_remove("AITE_RELOCK")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("起不来 sh");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(payload.to_string().as_bytes())
+        .expect("往 hook 命令写 payload");
+    child
+        .wait_with_output()
+        .expect("等 hook 命令退出")
+        .status
+        .code()
+        .expect("hook 命令是被信号杀掉的，没有退出码")
+}
+
+/// `git rev-parse --show-toplevel` 在 `dir` 下的结果；不在任何仓库里就是 `None`。
+fn git_toplevel(dir: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// hook 命令找不到守卫时**必须还能被人救回来**，不许把会话变成砖头。
+///
+/// 上面那条 `the_hook_command_uses_python3_not_python` 只看命令的**形状**。形状对、
+/// 而在某个 cwd 下它把**一切**都拦掉 —— 这种病它一个字也看不见。2026-09-13 真踩了：
+/// 会话 cwd 停在 `~/.claude/projects/…/memory`（不在任何 git 仓库里），
+/// `$(git rev-parse --show-toplevel)` 失败 → 命令展开成 `python3 "/.claude/hooks/guard_bash.py"`
+/// → 文件不存在 → 退出码 2 → `Bash` / `Read` / `Write` 全部同一条错。
+/// 而**会话 cwd 只能靠 Bash 的 `cd` 改，Bash 已经被拦** —— 只能由人重启。
+///
+/// 三种 cwd 一起钉，因为它们各自锁着一种退化：
+///
+/// * **仓库外** —— 上面那条病史本身；
+/// * **另一个 git 仓库里** —— `git` 会**成功**并返回那边的根，所以「`git` 失败才回退」
+///   这种写法（`d=$(…) || d="$CLAUDE_PROJECT_DIR"`）在这里仍然变砖。判据得是
+///   「找到的那个根里有没有守卫」，不是「git 成功没有」；
+/// * **子目录里起的会话**（`CLAUDE_PROJECT_DIR` 指着子目录）—— 这是 V6 (3c) 治的那条
+///   原病（2026-09-12），锁着「别退回纯 `$CLAUDE_PROJECT_DIR`」。
+///
+/// **两个 payload 都要断，缺一条这测试就没意义**：只断「该拦的拦住了」是**恒真断言** ——
+/// 一条把所有东西都拦掉的坏命令照样满足它。要分辨「守卫在工作」和「守卫在乱拦」，
+/// 只有「该放行的真放行了」这一条能做到。
+///
+/// **它在 `review/z2-guard-patch.py` 跑之前是红的，跑之后必须绿。** 交付时红是对的，
+/// 不是失败：这条测试读的是 `settings.json` 的真实内容，而那个文件在守卫的保护面里
+/// （`readable=False`），只有人能改。红在第二个 payload（该放行的被拦了）。
+#[test]
+fn the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session() {
+    let root = repo_root().canonicalize().expect("仓库根算不出来");
+    let outside = tempfile::tempdir().expect("建不了临时目录");
+    let other = tempfile::tempdir().expect("建不了临时目录");
+
+    // 前提要量，不能假设：`TMPDIR` 通常不在任何 git 仓库里，但「通常」不是判据。
+    assert!(
+        git_toplevel(outside.path()).is_none(),
+        "临时目录 {} 落在一个 git 仓库里（{:?}）—— 这条用例要的是「仓库外」那种 cwd。\
+         换个 TMPDIR 再跑，别把它当回归失败",
+        outside.path().display(),
+        git_toplevel(outside.path())
+    );
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(other.path())
+            .status()
+            .expect("起不来 git")
+            .success(),
+        "git init 没成 —— 这条用例要一个「有 git 仓库但没有守卫」的 cwd"
+    );
+    let other_root = git_toplevel(other.path()).expect("git init 完了却不是仓库");
+    assert!(
+        !Path::new(&other_root)
+            .join(".claude/hooks/guard_bash.py")
+            .exists(),
+        "临时仓库 {other_root} 里居然有守卫 —— 这条用例要的是「那边没有守卫」"
+    );
+
+    // 子目录：模拟「会话在 core/crates/app 里起」，CLAUDE_PROJECT_DIR 因此指着子目录。
+    let subdir = root.join("core/crates/app");
+    assert!(subdir.is_dir(), "{} 不在", subdir.display());
+
+    let scenarios: &[(&str, &Path, &Path)] = &[
+        (
+            "仓库外（2026-09-13 锁死会话的那种 cwd）",
+            outside.path(),
+            &root,
+        ),
+        (
+            "另一个 git 仓库里（git 成功了，但那边没有守卫）",
+            other.path(),
+            &root,
+        ),
+        (
+            "子目录里起的会话（CLAUDE_PROJECT_DIR 指着子目录，V6 (3c) 的原病）",
+            &subdir,
+            &subdir,
+        ),
+    ];
+
+    let cmds = pretooluse_commands();
+    assert!(
+        !cmds.is_empty(),
+        "settings.json 里没有 PreToolUse 命令 hook"
+    );
+
+    // 写冻结面：无论 cwd 在哪都得拦住。**这一条单独看是恒真的**（坏命令也「通过」）。
+    let must_block = json!({
+        "tool_name": "Write",
+        "tool_input": {"file_path": "proto/aite/v1/events.proto"},
+    });
+    // 谁都不碰的一条命令：无论 cwd 在哪都得放行。**承重墙在这儿。**
+    let must_pass = json!({"tool_name": "Bash", "tool_input": {"command": "echo hello"}});
+
+    for cmd in &cmds {
+        for (label, cwd, project_dir) in scenarios {
+            assert_eq!(
+                run_hook_command(cmd, cwd, project_dir, &must_block),
+                BLOCKED,
+                "【{label}】写冻结面没被拦 —— 守卫在这种 cwd 下压根没跑起来，\
+                 而 hook 失败是非阻塞放行且不报警：{cmd:?}"
+            );
+            assert_eq!(
+                run_hook_command(cmd, cwd, project_dir, &must_pass),
+                0,
+                "【{label}】`echo hello` 被拦了 —— 这条命令在这种 cwd 下找不到守卫，\
+                 于是把**一切**都拦掉。而会话 cwd 只能靠 Bash 的 `cd` 改，Bash 也拦着，\
+                 会话从内部出不来、只能由人重启。命令要留一条回退路径：{cmd:?}"
+            );
+        }
     }
 }
 
