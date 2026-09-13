@@ -76,6 +76,9 @@ cwd 落在**另一个 git 仓库**里时（这台机器上还有 ~/Documents/MAO
 **在跑本补丁之前是红的**（它真去跑 `settings.json` 里那条命令），跑完必须转绿。
 这不是失败，是这条测试的本分 —— 它要是在补丁之前就绿，说明它没在验真东西。
 
+**从哪一版换过来都行**：锚点有两条候选（V6 (3c) 那一版、总管的应急版），命中哪条换哪条，
+两条都不命中才拒写。所以这份补丁在「还没动过」和「已经落了应急版」两种现状下都能跑。
+
 **用法**（在仓库根跑）：
 
     AITE_RELOCK=1 python3 review/z2-guard-patch.py --check   # 干跑，不写盘
@@ -114,6 +117,21 @@ NEW_CMD = (
     f'python3 "$d/{GUARD_REL}"'
 )
 
+# 总管 2026-09-13 被锁死当天手工落进 settings.json 的应急版（派单里那一行）。
+# 它治好了「仓库外变砖」，但判据是 `||`（git 成功没有）而不是 `[ -f ]`（那个根里
+# 有没有守卫）—— 情形 ④「cwd 落在另一个 git 仓库里」下 git 会成功，`||` 分支
+# 永不触发，照样变砖。所以它也是要换掉的对象，不是终点。
+STOPGAP_CMD = (
+    f'd=$(git rev-parse --show-toplevel 2>/dev/null) || d="$CLAUDE_PROJECT_DIR"; '
+    f'python3 "$d/{GUARD_REL}"'
+)
+
+# 从哪一版换过来都行 —— 命中哪一条换哪一条，两条都不命中才算对不上。
+ANCHORS = [
+    ("V6 (3c) 那一版", OLD_CMD),
+    ("总管的应急版（|| 判据）", STOPGAP_CMD),
+]
+
 # (3c) 之前那一版。只用来把「已经退回去了」这种情况报成人话，不参与替换。
 PRE_V6_CMD = f'python3 "$CLAUDE_PROJECT_DIR/{GUARD_REL}"'
 
@@ -142,10 +160,11 @@ def build_edits(root: pathlib.Path) -> list[Edit]:
     return [
         Edit(
             settings,
-            "PreToolUse hook 命令：加一条恢复路径（仓库外 / 别的仓库里都别锁死）",
-            json_escaped(OLD_CMD),
+            f"PreToolUse hook 命令：从{label}换成带 [ -f ] 回退的那一条",
+            json_escaped(old),
             json_escaped(NEW_CMD),
         )
+        for label, old in ANCHORS
     ]
 
 
@@ -206,6 +225,8 @@ def main() -> int:
     problems: list[str] = []
     expected: dict[pathlib.Path, int] = {}
 
+    # 候选锚点之间是「或」：hook 命令只会是其中一版，命中哪条换哪条。
+    # 一条都不命中才是对不上 —— 那才说明现状是这份补丁没预料到的第三种形态。
     for e in edits:
         n = e.hits(staged[e.path])
         if n >= 1:
@@ -214,16 +235,20 @@ def main() -> int:
             staged[e.path] = e.apply(staged[e.path])
         else:
             print(f"[  命中 0] {e.path.name}: {e.label}")
-            print(f"           └ {diagnose(staged[e.path])}")
-            problems.append(f"{e.path.name}: {e.label}（命中 0 条，期望 ≥1）")
+
+    for p in paths:
+        if expected.get(p, 0) == 0:
+            print(f"           └ {diagnose(staged[p])}")
+            problems.append(f"{p.name}: 候选锚点一条都没命中（期望其中一条 ≥1）")
 
     # 「换掉的条数 == 命中的条数」：命中几条就必须换掉几条，一条都不许剩。
-    for e in edits:
-        if e.path not in expected:
+    for p in paths:
+        if p not in expected:
             continue
-        left = staged[e.path].count(e.old)
-        done = staged[e.path].count(e.new)
-        if left != 0 or done != expected[e.path]:
+        left = sum(staged[p].count(json_escaped(old)) for _, old in ANCHORS)
+        done = staged[p].count(json_escaped(NEW_CMD))
+        e = type("E", (), {"path": p})()
+        if left != 0 or done != expected[p]:
             problems.append(
                 f"{e.path.name}: 换掉的条数对不上 —— 命中 {expected[e.path]}、"
                 f"换成新命令 {done}、旧命令还剩 {left}"
