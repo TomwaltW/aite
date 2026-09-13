@@ -72,21 +72,27 @@ core/target/debug/aite preflight --json          # 机器可读
 四个参数：`--config PATH`（默认 `config/aite.yaml`，不存在则退到 `config/aite.example.yaml`）、
 `--offline`、`--json`、`--chat-id ID`。
 
-> ⚠️ **要看真选项，两个子命令都得写成 `-- --help`（多一个 `--`）。** 不加那个 `--`
-> 就被 clap 截胡，打出来的是一句不含任何真实选项的 `[ARGS]...`。四个写法实测如下：
+> ℹ️ **`--help` 带不带那个 `--` 都行了（W3 ③ 修的）。** 从前不加 `--` 会被 clap 截胡，
+> 打出来的是一句不含任何真实选项的 `[ARGS]...`，**而退出码还是 0** —— 坏掉的帮助和好的
+> 帮助在脚本里长得一模一样。四个写法实测如下：
 >
 > | 写法 | 打出什么 | 走哪 | 退出码 |
 > |---|---|---|---|
-> | `aite preflight -- --help` | ✅ 手写用法，四个参数全在 | stdout | 0 |
-> | `aite run -- --help` | ✅ 手写用法，三个参数全在 | stdout | 0 |
-> | `aite preflight --help` | ❌ 被 clap 截胡，只回 `[ARGS]...` | stdout | 0 |
-> | `aite run --help` | ❌ 同上 | stdout | 0 |
+> | `aite preflight --help` | ✅ 手写用法，四个参数全在 | stdout | 0 |
+> | `aite preflight -- --help` | ✅ 同上，与上一行逐字节相同 | stdout | 0 |
+> | `aite run --help` | ✅ 手写用法，三个参数全在 | stdout | 0 |
+> | `aite run -- --help` | ✅ 同上，与上一行逐字节相同 | stdout | 0 |
 >
-> **不带 `--` 的那两个仍然是坏的**，而且退出码是 0 —— 脚本里判不出来，只能靠人眼
-> 看有没有真选项。根治要动 `core/crates/app/src/main.rs` 的 clap 声明
-> （`#[arg(trailing_var_arg = true, allow_hyphen_values = true)]` 把 `--help` 吞了），
-> 归口 R0，至今没人接。<!-- 台账：不带 `--` 的两个写法仍未修，归 R0 / W3 -->
-> （`aite run -- --help` 原先走 **stderr + 退出码 2**，V6 ④b 已改成 stdout + 0，与 preflight 同口径。）
+> 改的是 `core/crates/app/src/main.rs`：四个转发型子命令（run / evals / evidence /
+> preflight）各加一个 `#[command(disable_help_flag = true)]`，把 `--help` / `-h` 从 clap
+> 手里还给各自的手写解析器。`-h` 与 `--help` 一视同仁；`aite evals --help` /
+> `aite evidence --help` 从前同病，一并修了；`aite contracts` 的参数是真 clap 子命令，
+> 本来就没这个病、也没被波及。
+>
+> **带 `--` 的那两个写法逐字节没变** —— 那是 V6 ④b 修好的那半，W3 拿改动前后的
+> stdout / stderr / 退出码逐个 `cmp` 过（顺带核了顶层 `aite --help` 与 `aite contracts`
+> 的四个写法、四条业务路径，都没变）。回归在 `core/crates/app/tests/cli_smoke.rs`：
+> 八个写法各一条、`-h` 四条，外加一条「带不带 `--` 打的必须是同一份」防「只修一半」。
 
 `--offline` 的真输出长这样（实测原样；`config/aite.yaml` 由 `config/aite.example.yaml`
 复制而来，环境里只设了 `AITE_MODEL_API_KEY`。唯一的改动是那两行 NOTE 的正文很长，

@@ -109,8 +109,8 @@ jobs:
       - name: "两个镜像真编出来"
         run: docker compose build
 
-      # README.md:90 写着「--offline 只跑 1、2、7，不碰网络也不碰 docker，CI 用这一档」——
-      # 在此之前 CI 里并没有对应步骤。这一条让那句话成立。
+      # README 的「命令面」一节写着「`--offline` 只跑 1、2、7（不碰网络也不碰 docker，
+      # 适合没凭证的机器；**CI 用的就是这一档**）」—— 这一步就是让那句话成立的那一条。
       # 注意镜像的 ENTRYPOINT 就是 `aite`，所以命令里不要再写一遍。
       - name: "preflight --offline（配置 / 环境变量 / 落盘目录）"
         env:
@@ -160,6 +160,44 @@ jobs:
           # ---- 没有崩溃循环
           test "$(docker inspect --format '{{.RestartCount}}' aite-core-1)" = 0
           test "$(docker inspect --format '{{.RestartCount}}' aite-edge-1)" = 0
+
+      # ⑤ 两个 Dockerfile 的运行层都没有 USER，两个进程都以 root 跑。这一步是那条账的
+      # **判据本身**，不是顺手加的一道校验 —— 它只在 Linux 上说得清：
+      #   · macOS 上验不出来：Docker Desktop 的 bind mount 过 VirtioFS，会把 uid 映射
+      #     回宿主用户（本机实测 owner 是当前用户 501:0，容器里明明是 root 建的）。
+      #     W1 报这条账时看的就是那一档，所以它只能写「Linux 未验证」。
+      #   · Linux 不映射，而 ./data 不入库（.gitignore 挡着 /data/）—— checkout 里
+      #     压根没有这个目录，bind mount 时由 dockerd 自己建，于是连挂载点都是
+      #     root:root 0755，core 落的 data/aite.db 是 root:root 0644。
+      #
+      # **该守的那条是「读得动」**：data/aite.db 就是证据链的主存
+      # （config 的 storage.sqlite_path），宿主机那条 `aite evidence show` 只需要读它。
+      # 0644 + 0755 对任何用户都开着读，所以这一步在现状下是绿的 —— 它红的那天说明
+      # 权限位或 umask 真的变了，那才是「宿主机拿不到自己的证据文件」。
+      #
+      # 写和删是另一回事：root 拥有 → 非 root 写不进、删不掉、也没法在 ./data 里新建。
+      # 只打印不判死（这一步不是安全基线门禁），那笔账连后果一起记在
+      # review/review-findings-2026-09-12-vmerge.md 的 W3 回执里。
+      #
+      # ./data/run 要排掉：它是命名卷的挂载点，比 ./data 这条 bind 更深、盖住了它，
+      # 在 runner 上看是空目录，两个 socket 只在容器里看得见。
+      - name: "⑤ ./data 的产物宿主机读得动（Linux 的 uid 不映射）"
+        run: |
+          set -euo pipefail
+          echo "runner: uid=$(id -u) gid=$(id -g) user=$(id -un)"
+          echo "---- ./data 下的 owner / 权限位（这就是这一条要留下的原始输出）"
+          find ./data -not -path './data/run' -not -path './data/run/*' \
+            -exec stat -c '%u:%g %a %F %n' {} ';'
+          echo "---- 硬判据：每个文件宿主机都读得动"
+          bad=0
+          for f in $(find ./data -type f -not -path './data/run/*'); do
+            if head -c1 "$f" >/dev/null 2>&1; then echo "READ OK      $f"
+            else echo "READ DENIED  $f"; bad=1; fi
+          done
+          test "$bad" = 0 || { echo "宿主机读不到自己的证据文件 —— ⑤ 那条账成真了"; exit 1; }
+          echo "---- 只记录不判死：宿主机往 ./data 里写得进去吗"
+          touch ./data/.w3-write-probe 2>/dev/null && echo "WRITE OK" || echo "WRITE DENIED（./data 归 root，见上面注释）"
+          mkdir -p ./data/.w3-mkdir-probe 2>/dev/null && echo "MKDIR OK" || echo "MKDIR DENIED（./data 归 root，见上面注释）"
 
       - name: "红了把两边日志都打出来"
         if: failure()

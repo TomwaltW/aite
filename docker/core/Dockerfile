@@ -102,6 +102,38 @@ COPY config/aite.example.yaml /app/config/aite.example.yaml
 # 十个 P0 场景：镜像里也能跑 B8（`docker compose run --rm core evals run evals/p0 ...`）。
 COPY evals /app/evals
 
+# ---------------------------------------------------------------- 以谁的身份跑
+#
+# **刻意没有 `USER`：core 以 root 跑。** 这不是漏了，是 W3 ⑤ 量过之后留下的。
+#
+# 这条账原本的说法是「Linux 上 `data/evidence` 会是 root 拥有，宿主机那条
+# `aite evidence show` 可能读不了」，而且只在 macOS 上验过 —— macOS 验不出来：
+# Docker Desktop 的 bind mount 过 VirtioFS，会把 uid 映射回宿主用户（实测 owner
+# 是当前用户，容器里明明是 root 建的）。
+#
+# Linux 上的实测（真镜像真起飞，`./data` 换成命名卷绕开 VirtioFS 的映射）：
+#
+#   0:0 755 directory    data/            ← ./data 不入库，bind mount 时由 dockerd 建
+#   0:0 644 regular file data/aite.db     ← 证据链主存（storage.sqlite_path）
+#   0:0 755 directory    data/evidence/
+#   0:0 755 directory    data/artifacts/
+#
+# 以宿主机用户（GitHub runner 是 uid 1001）去碰同一批文件：
+#   READ  OK      ← **原来那条担心不成立**：0644 + 0755 对任何用户都开着读，
+#                    `aite evidence show` 在 Linux 上照常跑得通
+#   WRITE DENIED
+#   MKDIR DENIED  ← 但宿主机写不进、删不掉，也没法在 ./data 里新建
+#
+# 「读得动」这一条是硬门禁，钉在 .github/workflows/ci.yml 的 compose-smoke 里
+# （把 data/aite.db 的权限位改成 0600，那一步就红并点名它 —— 本机实跑验过）。
+#
+# 为什么没顺手加 `USER`：写不进那半边确实是个真后果（Linux 上 compose 跑过一次之后，
+# 宿主机直跑 `aite run` 会因为落盘目录不可写起不来），但修它的代价不在这一行 ——
+# 命名卷 `run:` 的挂载点属主得跟着换（两个 socket 要建得出来）、`./data` 这条 bind
+# mount 在宿主机那边是当前用户而容器里是新 uid。那笔账连后果一起记在
+# review/review-findings-2026-09-12-vmerge.md 的 W3 回执里，不在这一轮的范围内。
+# **真要加的话 core 是先降的那个**：它不碰 Docker daemon，代价比 edge 小得多。
+
 # 直接 exec 二进制，**不过 shell** —— blocker 1（登录 shell 洗掉 PATH）从形态上就没了。
 ENTRYPOINT ["aite"]
 CMD ["run", "--config", "config/aite.yaml"]

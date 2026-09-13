@@ -374,9 +374,10 @@ fn run_rejects_a_grace_that_would_overflow_duration() {
 
 /// ④b(i)：`aite run -- -h` 要用法进 stdout + 退出码 0，不是 stderr + 2。
 ///
-/// **`aite run --help` 仍然被 clap 截胡**（打的是 clap 那份不含任何真实选项的帮助）——
-/// 根治要在 `main.rs` 的 `Run` variant 上加 `#[command(disable_help_flag = true)]`，
-/// 而 `main.rs` 归 R0。所以这里钉的是够得着的那条。
+/// 不带 `--` 的 `aite run --help` **已经不被 clap 截胡了**（W3 ③ 在 `main.rs` 的 `Run`
+/// variant 上加了 `#[command(disable_help_flag = true)]`）。这条留着的理由变了：它钉的
+/// 不再是「够得着的那条」，而是**带 `--` 的写法一个字节都没跟着变** —— 两个写法现在
+/// 打的是同一份用法，见下面 `help_with_and_without_the_dashes_prints_the_very_same_thing`。
 #[test]
 fn run_help_after_double_dash_goes_to_stdout_with_exit_zero() {
     let out = aite()
@@ -424,9 +425,9 @@ fn evals_demo_fixture_help_goes_to_stdout_with_exit_zero() {
 
 /// ④d 的邻居：子命令位置上的 `--help` 也要 stdout + 退出码 0。
 ///
-/// 够得着的写法是 `aite evals -- --help`（原来是「不认识的子命令」→ stderr + 2）。
-/// **`aite evals --help`（不加 `--`）仍然被 clap 截胡**，跟 `aite run --help` 同病 ——
-/// 打的是 clap 那份不含任何真实选项的帮助，根治要动 `main.rs`（归 R0）。
+/// 写法是 `aite evals -- --help`（原来是「不认识的子命令」→ stderr + 2）。
+/// 不加 `--` 的 `aite evals --help` 从前跟 `aite run --help` 同病（被 clap 截胡），
+/// **W3 ③ 一并修了** —— 两个写法现在打同一份用法。这条钉的是带 `--` 那半没变。
 #[test]
 fn evals_help_in_the_subcommand_slot_goes_to_stdout_with_exit_zero() {
     let out = aite()
@@ -471,4 +472,137 @@ fn contracts_lock_write_requires_relock_env() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("AITE_RELOCK"));
+}
+
+// --- W3 ③：四个转发型子命令的 `--help`，带不带 `--` 都得是真帮助 -------------------
+//
+// **病**：run / evals / evidence / preflight 的参数不由 clap 解析（`trailing_var_arg`
+// + `allow_hyphen_values`，见 `main.rs` 的 `Cmd`），所以 clap 不知道任何一个真实选项，
+// 它自动生成的那份 `--help` 里只有一句 `[ARGS]...` —— **而退出码是 0**。坏掉的帮助和
+// 好的帮助在脚本里长得一模一样，`aite run --help | grep -q -- --grace` 这种判据静悄悄
+// 地永远不中。根治是在 `main.rs` 给这四个 variant 加 `disable_help_flag = true`，
+// 让 `--help` / `-h` 跟着 argv 落进手写解析器。
+//
+// **为什么钉在这个文件里**：病长在 `main.rs` 那一层，而 clap 的截胡只在真进程里发生。
+// 单元测试直调 `cli::run_capture(...)` 看不见 `main.rs` —— V6 的提交里明写过
+// 「原来那条回归就是从这一层躲过去的」。
+//
+// **`[ARGS]...` 是坏帮助的指纹**：那是 clap 对一个它一无所知的位置参数的唯一写法。
+// 正向断言（有没有某个真实选项名）与反向断言（有没有这个指纹）两头都要，
+// 少一头都能被「打一份别的空帮助」蒙过去。
+
+/// 一个子命令 + 它真用法里必然出现的一个真实选项名（`--help` 好了才打得出来）。
+const HELP_CASES: [(&str, &str); 4] = [
+    ("run", "--grace"),
+    ("preflight", "--offline"),
+    ("evals", "demo-fixture"),
+    ("evidence", "show"),
+];
+
+/// 八个写法（四个子命令 × 带不带 `--`）：stdout + stderr 空 + 退出码 0 + 有真实选项名。
+///
+/// 带 `--` 的那四个是 V6 刚修好的，这里一并钉住 —— **它们的行为一个字节都不许变**
+/// （`snap.sh` 那轮逐字节对比在 W3 回执里；这条是留在门禁里的那一半）。
+#[test]
+fn help_on_the_four_forwarding_subcommands_is_real_with_and_without_the_dashes() {
+    for (sub, needle) in HELP_CASES {
+        for extra in [vec![], vec!["--"]] {
+            let mut args = vec![sub];
+            args.extend(extra.iter().copied());
+            args.push("--help");
+            let shown = args.join(" ");
+
+            let out = aite()
+                .args(&args)
+                .current_dir(repo_root())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+
+            assert_eq!(out.status.code(), Some(0), "aite {shown}：{stderr}");
+            assert!(stderr.is_empty(), "aite {shown} 往 stderr 写了：{stderr}");
+            assert!(
+                stdout.contains(needle),
+                "aite {shown} 打的帮助里没有真实选项 {needle}：{stdout}"
+            );
+            assert!(
+                !stdout.contains("[ARGS]..."),
+                "aite {shown} 打的是 clap 那份空帮助（`[ARGS]...`）：{stdout}"
+            );
+        }
+    }
+}
+
+/// `-h` 与 `--help` 一视同仁 —— 短写法是排障时手最顺的那个，别只修长的。
+#[test]
+fn short_help_on_the_four_forwarding_subcommands_is_real_too() {
+    for (sub, needle) in HELP_CASES {
+        let out = aite()
+            .args([sub, "-h"])
+            .current_dir(repo_root())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "aite {sub} -h：{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(stdout.contains(needle), "aite {sub} -h：{stdout}");
+        assert!(!stdout.contains("[ARGS]..."), "aite {sub} -h：{stdout}");
+    }
+}
+
+/// 带 `--` 与不带 `--` 打的必须是**同一份**帮助。
+///
+/// 这条防的是「只修一半」：不带 `--` 的那半改好了、带 `--` 的那半被顺手改成别的样子，
+/// 上面两条各自都还绿（两边都有真实选项名、都没有 `[ARGS]...`），只有这条会红。
+#[test]
+fn help_with_and_without_the_dashes_prints_the_very_same_thing() {
+    for (sub, _) in HELP_CASES {
+        let plain = aite()
+            .args([sub, "--help"])
+            .current_dir(repo_root())
+            .output()
+            .unwrap();
+        let dashed = aite()
+            .args([sub, "--", "--help"])
+            .current_dir(repo_root())
+            .output()
+            .unwrap();
+        assert_eq!(
+            plain.stdout,
+            dashed.stdout,
+            "aite {sub} --help 与 aite {sub} -- --help 打的不是同一份：\n{}\n----\n{}",
+            String::from_utf8_lossy(&plain.stdout),
+            String::from_utf8_lossy(&dashed.stdout)
+        );
+        assert_eq!(plain.status.code(), dashed.status.code(), "aite {sub}");
+    }
+}
+
+/// 顶层与 `contracts` 不在这次改动面里，**它们的帮助不许被顺带改掉**。
+///
+/// 真踩过一次：说明文字写成 `///` 挂在 `enum Cmd` 上，被 clap derive 当成顶层命令的
+/// about，`aite --help` 的第一行从「Aite core（Rust）」变成了那段说明。降级成 `//`
+/// 才修掉。`contracts` 的参数是真 clap 子命令，帮助本来就带着 `lock`。
+#[test]
+fn top_level_and_contracts_help_are_untouched() {
+    let top = aite().args(["--help"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&top.stdout);
+    assert_eq!(top.status.code(), Some(0));
+    assert!(
+        stdout.starts_with("Aite core（Rust）"),
+        "顶层帮助的 about 被顶掉了：{stdout}"
+    );
+    for sub in ["run", "contracts", "evals", "evidence", "preflight"] {
+        assert!(stdout.contains(sub), "顶层帮助该列出 {sub}：{stdout}");
+    }
+
+    let contracts = aite().args(["contracts", "--help"]).output().unwrap();
+    let text = String::from_utf8_lossy(&contracts.stdout);
+    assert_eq!(contracts.status.code(), Some(0));
+    assert!(text.contains("lock"), "contracts 的帮助该带着 lock：{text}");
 }
