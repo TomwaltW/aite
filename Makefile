@@ -62,8 +62,67 @@ compose-config:  ## compose 编排可解析（与 .github/workflows/ci.yml 同�
 compose-build:  ## 建三个镜像：core、edge、沙箱（沙箱在 images profile 里）
 	docker compose --profile images build
 
-compose-up: compose-build  ## 一条命令起飞：先把三个镜像建齐，再起两个常驻 service
-	docker compose up -d
+# 两个容器以非 root 跑（2026-09-13 AA1 降权），代价是起飞前**宿主机这一侧**要先备三件事。
+# 这一段与 .github/workflows/ci.yml 的「容器身份」那一步同源 —— 那边是 runner 版，这边是本机版。
+# 2026-09-15（BB3）之前这条 target 一件都没做，Linux 上 `make compose-up` 因此起不来：
+# core 死在 `aite 起不来：建不出目录 data/evidence：Permission denied`，配
+# restart: unless-stopped 就是崩溃循环。macOS 撞不到（VirtioFS 双向翻译 uid）。
+#
+# ① `mkdir -p data` —— data/ 的**内容**不入库、**目录本身**入库（data/.gitkeep，见
+#    .gitignore 那条 `/data/*` + `!/data/.gitkeep`）。两者覆盖的不是同一个时刻，所以都留着：
+#    .gitkeep 管「这棵树是 git 给出来的」那一刻，这条 mkdir 管「目录后来没了」。
+#    边界实测过（2026-09-15，一次性空仓）：`git clean -xdf` 之后 data/ 与 data/.gitkeep
+#    都还在、里面别的全没了；`git archive HEAD | tar -t` 里 **data/.gitkeep 也在**
+#    （所以「tarball 里没有它」那个说法是错的，别再写）。真正只有 mkdir 接得住的是：
+#    有人手工把整个 data/ 删了（`git status` 会显示 ` D data/.gitkeep`）、树不是 checkout
+#    出来的（rsync / 拷贝 / 别的打包方式）、或者哪天 .gitkeep 被谁清掉了。
+#    这条命令幂等、一行、零成本，当保险留着。
+#    目录不在的话 bind mount 时由 dockerd 建成 root:root 0755，非 root 容器当场写不进去。
+#
+# ② `AITE_UID` / `AITE_GID` —— 两个 service 的 `user:`。**必须解析出同一个 uid**：
+#    两个进程互相 connect 对方的 unix socket，而 connect 要 socket 文件的写权限，
+#    socket 是 `srwxr-xr-x`、只有属主有写位。问 `id` 自己，不写死。
+#
+# ③ `AITE_DOCKER_GID` —— 只有 edge 用（它要读 /var/run/docker.sock）。要的是 **daemon
+#    那一侧**的取值，判别式就是「它是不是一个本机的真 socket」：
+#      · 真 socket（Linux 的 docker-ce）：宿主机与容器同一个内核，bind mount 不翻译 uid/gid，
+#        直接 `stat -c %g` 就是对的 —— 与 CI 逐字同源。本机能量到的那半证据：nsenter 进
+#        Docker Desktop 的 Linux VM（`Linux 6.12.76-linuxkit`，真 Linux 内核）里看
+#        /var/run/docker.sock 是 `0:0 660 socket`，而容器 bind-mount 进去看到的也是
+#        `0:0 660 socket` —— 两侧一致。（gid 的取值本身在别人的 Linux 上是 root:docker，本机验不到。）
+#      · 符号链接（macOS 的 Docker Desktop，实测指向 ~/.docker/run/docker.sock）：宿主机
+#        stat 出来是 `0:1`（root:daemon），容器里看到的却是 `0:0` —— 直接 stat 会给出错的值。
+#        这一档落回 0，也就是 docker-compose.yml 里那个默认值，Desktop 上它是对的。
+#    `! -L` 那一半不是多余的：`-S` 对**指向** socket 的符号链接同样成立（test 跟随链接），
+#    只用 `-S` 判别的话 macOS 会走进 stat 分支。而 `stat -c` 是 GNU 写法，macOS 的 BSD stat
+#    报 `stat: illegal option -- c` 退 1 —— 所以再兜一层 `|| echo 0`，给「真 socket 但没有
+#    GNU stat」的机器留条退路。
+#
+#    **刻意不用** AA1 记账里那条
+#    `docker run --rm -v /var/run/docker.sock:... alpine stat -c %g /var/run/docker.sock`：
+#    它测的确实是 daemon 视角、correct-by-construction，代价是给起飞命令加一条
+#    **镜像 / registry 依赖**。本机实测：alpine 在缓存里时这一发 0.92s；不在时是
+#    `Error response from daemon: failed to resolve reference docker.io/library/alpine...`
+#    退 125 —— compose 一步都还没跑就死了。起飞命令不该因为拉不到一个探针镜像而失败。
+#    真碰上判别不了的编排（远端 daemon、Linux 上的 Docker Desktop —— 那边 /var/run/docker.sock
+#    也是个符号链接，会走进 `else` 拿到 0，而 Desktop 的 VM 里正好就是 0），
+#    或者你就是想按 AA1 那条走，手动问一次再传进来：
+#      AITE_DOCKER_GID=$$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+#        alpine stat -c %g /var/run/docker.sock) make compose-up
+#
+# 三个变量**外部传了就一律听外部的**（CI 就是从 $$GITHUB_ENV 传进来的），下面只在没传时兜底。
+compose-up: compose-build  ## 一条命令起飞：建齐三个镜像 → 备好宿主机一侧 → 起两个常驻 service
+	mkdir -p data
+	@set -eu; \
+	uid=$${AITE_UID:-$$(id -u)}; \
+	gid=$${AITE_GID:-$$(id -g)}; \
+	if [ -n "$${AITE_DOCKER_GID:-}" ]; then dgid=$$AITE_DOCKER_GID; \
+	elif [ -S /var/run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then \
+		dgid=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 0); \
+	else dgid=0; fi; \
+	echo "容器身份：AITE_UID=$$uid AITE_GID=$$gid AITE_DOCKER_GID=$$dgid"; \
+	set -x; \
+	AITE_UID=$$uid AITE_GID=$$gid AITE_DOCKER_GID=$$dgid docker compose up -d
 	@docker compose ps
 
 compose-down:  ## 停掉两个 service（要连命名卷一起收就自己加 -v，先确认没别人在用 project aite）

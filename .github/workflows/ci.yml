@@ -82,7 +82,7 @@ jobs:
           env -u FEISHU_APP_ID -u FEISHU_APP_SECRET -u FEISHU_BOT_OPEN_ID -u AITE_MODEL_API_KEY \
             docker compose config --services | sort | tr '\n' ' ' | grep -qx 'core edge '
 
-      # config/aite.yaml 不入库（.gitignore:14），checkout 里根本没有，而两个 service 的
+      # config/aite.yaml 不入库（.gitignore 的 `config/aite.yaml` 那条），checkout 里根本没有，而两个 service 的
       # command 都指着它 —— 所以 CI 得自己造。两份而不是一份，因为 core 与 edge 读的是
       # **同一个 platform 字段**，含义却相反：
       #   · core：`platform: fake` 会被直接拒绝起飞（app.rs:143-146，fake 是「必须由调用方
@@ -110,8 +110,11 @@ jobs:
       #   · AITE_DOCKER_GID —— 只有 edge 用：它要读 /var/run/docker.sock，那个 socket
       #     在 Linux 上归 root:docker，docker 组的 gid 各机器不同。从 socket 自己问最准。
       #     传错的后果：Ping 失败 → EdgeStatus.sandbox_ok false → preflight 第 6 组 FAIL。
-      # `mkdir -p data` 也不能省：data/ 不入库（.gitignore:11），checkout 里没有它，
-      # 不先建的话 bind mount 时由 dockerd 建成 **root:root 0755**，非 root 的容器当场
+      # `mkdir -p data` 现在是**冗余但留着**的一条：2026-09-15（BB3）起 data/ 这个**目录**
+      # 入库了（data/.gitkeep；内容仍然一条都不入库，见 .gitignore 的 `/data/*` +
+      # `!/data/.gitkeep`），所以 checkout 出来就有它、就归 runner。留着是因为它接的是
+      # 另一个时刻 —— 目录被谁删了、或者这一步换到一棵不是 checkout 出来的树上跑。
+      # 目录不在的话 bind mount 时由 dockerd 建成 **root:root 0755**，非 root 的容器当场
       # 写不进去 —— 实测症状是 `aite 起不来：建不出目录 data/evidence：Permission denied`，
       # 而且配 restart: unless-stopped 就是崩溃循环。先建出来它就归 runner，与 `user:` 对上。
       - name: "容器身份：uid/gid 问 runner，docker 组 gid 问 socket，并把 ./data 先建出来"

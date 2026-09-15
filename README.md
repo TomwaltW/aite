@@ -86,7 +86,7 @@ core/target/debug/aite run                       # 组装并起飞
 容器方式（**两个多阶段真镜像，不是把仓库挂进去现编**）：
 
 ```bash
-make compose-up      # = 先建三个镜像（core / edge / 沙箱），再 docker compose up -d，再 ps
+make compose-up      # = 建齐三个镜像（core / edge / 沙箱）→ 备好宿主机一侧（见下）→ up -d → ps
 make compose-ps      # 看谁就绪：STATUS 一栏带 healthy / Restarting
 make compose-logs    # = docker compose logs -f --tail=200 core edge
 make compose-down    # 停（要连命名卷一起收自己加 -v）
@@ -101,6 +101,24 @@ make compose-config  # 只校验编排能不能解析，不打印取值
 > `config --services` 都看不见它）。edge 只 `ImageInspect`、**不 pull**，镜像不在就报
 > 「沙箱镜像不存在」。
 
+> ℹ️ **够不着 `proxy.golang.org` 的机器建不出 edge 镜像。** 症状是
+> `docker compose build edge` 停在
+> `loading deprecation for github.com/grpc-ecosystem/grpc-health-probe … i/o timeout`
+> 退 1 —— `go install pkg@version` **一定**会查一次 deprecation，模块早就躺在 BuildKit 的
+> cache mount 里也照查不误（实测：同一次 build 里 `go build` 那一层 1.8s 就过了，
+> 死的只有这一层）。`docker/edge/Dockerfile` 为此留了两个**可选** build arg ——
+> 不传时取的就是 Go 自己的内置默认值，**CI 那条路一个字不变**：
+>
+> ```bash
+> docker compose build --build-arg GOPROXY=https://goproxy.cn,direct edge   # 换个够得着的 proxy
+> # 完全不通网、但模块已经在 cache mount 里：
+> docker compose build --build-arg GOPROXY=file:///go/pkg/mod/cache/download \
+>                      --build-arg GOSUMDB=off edge
+> ```
+>
+> **别把它们写死进 Dockerfile**：写死等于把镜像钉在某个地区的镜像站上，而且 CI 会悄悄
+> 不再验「真 proxy 上这个版本还在不在」这条依赖 —— runner 每次都是冷缓存，那边才是门禁。
+
 两个 service 有 healthcheck，但**判据不一样**，别照抄：
 
 - **edge** 探标准 gRPC health（`grpc-health-probe`，探针二进制烤在镜像里），
@@ -114,7 +132,8 @@ make compose-config  # 只校验编排能不能解析，不打印取值
 两个 service 都配了日志轮转 `max-size 10m` / `max-file 5`：默认 json-file 驱动无上限，
 配上 `restart: unless-stopped`，崩溃循环时日志涨得很快。
 
-**两个容器以非 root 跑（2026-09-13 起）。Linux 上起飞前要多做两件事：**
+**两个容器以非 root 跑（2026-09-13 起）。起飞前宿主机这一侧要先备三件事** ——
+**`make compose-up` 自己会做（2026-09-15 起），只有手敲 `docker compose up -d` 才要自己敲：**
 
 ```bash
 mkdir -p data                                              # ① 先建出来，别让 dockerd 建
@@ -123,10 +142,15 @@ AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) \
   docker compose up -d                                     # ② 三个变量传进去
 ```
 
-- **① `mkdir -p data`** —— `data/` 不入库，不先建的话 bind mount 时由 dockerd 建成
-  `root:root 0755`，非 root 的容器当场写不进去（症状：`aite 起不来：建不出目录
-  data/evidence：Permission denied`，配 `restart: unless-stopped` 就是崩溃循环）。
-  先建出来它就归当前用户，与 `user:` 的取值对得上。
+- **① `mkdir -p data`** —— `data/` 的**内容**不入库、**目录本身**入库
+  （`data/.gitkeep`，2026-09-15 起）。checkout 出来就有它，`git clean -xdf` 之后它也还在
+  （实测：clean 只清掉 `data/` 里未跟踪的那些），`git archive` 导出的树里同样带着它。
+  所以 `mkdir -p` 接的是剩下那几种：有人手工把整个目录删了、树不是 git 给出来的
+  （rsync / 拷贝）、或者哪天 `.gitkeep` 被谁清掉。一行、幂等，当保险留着。
+  目录不在的话 bind mount 时由 dockerd 建成 `root:root 0755`，
+  非 root 的容器当场写不进去（症状：`aite 起不来：建不出目录 data/evidence：Permission
+  denied`，配 `restart: unless-stopped` 就是崩溃循环）。先建出来它就归当前用户，
+  与 `user:` 的取值对得上。**两条覆盖的不是同一个时刻，所以都留着。**
 - **② `AITE_UID` / `AITE_GID`** —— 镜像里的默认身份是 `1001:1001`，而 `./data` 是
   bind mount、宿主机那边归**当前用户**，uid 每台机器都不一样，只能从宿主机传进来。
   **两个 service 必须是同一个 uid**：它们互相 connect 对方的 unix socket，而 connect
@@ -137,13 +161,29 @@ AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock) \
 - **macOS 上这三条都不用管**：Docker Desktop 的 bind mount 过 VirtioFS，会双向翻译 uid
   （容器里看见的是它自己的 uid，宿主机看见的是当前用户），`make compose-up` 照旧。
   也正因为翻译，**macOS 上验不出这套东西对不对** —— 判据在 CI（Linux runner）那一侧。
+  ⚠️ 上面那句 `stat -c '%g' /var/run/docker.sock` **在 macOS 上敲不出正确答案**：
+  `stat -c` 是 GNU 写法，BSD stat 直接 `illegal option -- c`；就算换成 `stat -f '%g'`，
+  那个路径在 Docker Desktop 上是个**符号链接**（→ `~/.docker/run/docker.sock`），
+  宿主机侧量出来是 `0:1`，而容器里看到的是 `0:0`。macOS 上正确的取值就是默认的 `0`。
 - 换了 `AITE_UID` 之后要 `docker compose down -v`：`run:` 那个命名卷是 sticky 的
   （`1777`），上一个 uid 留下的残留 socket 新 uid 删不掉。会响，不是静默。
 
-> ℹ️ `make compose-up` **不传这三个变量**（`Makefile` 里那条 target 就是
-> `docker compose up -d`）。macOS 上没影响；Linux 上要么按上面那样手敲，要么先
-> `export AITE_UID=$(id -u) AITE_GID=$(id -g) AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)`
-> 再 `make compose-up`。
+> ℹ️ **`make compose-up` 现在自己把这三件事做齐了**（2026-09-15 起。在那之前它只有一句
+> `docker compose up -d`，**Linux 上因此起不来** —— core 死在建不出 `data/evidence`）。
+> 它做的事与 `.github/workflows/ci.yml` 的「容器身份」那一步同源：`mkdir -p data`；
+> `AITE_UID` / `AITE_GID` 问 `id` 自己；`AITE_DOCKER_GID` 按「`/var/run/docker.sock`
+> 是不是一个**本机的真 socket**」判别 —— 是（Linux 的 docker-ce）就直接 `stat -c '%g'`，
+> 是符号链接（macOS 的 Docker Desktop）就落回 `0`。
+> **三个变量你自己 `export` 过的话它一律听你的**，所以 CI 那条路一个字都不用改。
+> 起飞时它会先打一行 `容器身份：AITE_UID=… AITE_GID=… AITE_DOCKER_GID=…`，
+> 实际用了什么看那一行，不用猜。
+>
+> 判别不了的编排（远端 daemon、Linux 上的 Docker Desktop —— 它那个 `/var/run/docker.sock`
+> 也是符号链接）自己问一次再传进去：
+> `AITE_DOCKER_GID=$(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine stat -c %g /var/run/docker.sock) make compose-up`。
+> `make compose-up` 默认**不**走这条，因为它会给起飞命令加一条镜像 / registry 依赖：
+> 镜像不在本机时这一发就是 `Error response from daemon: failed to resolve reference` 退 125，
+> compose 一步都还没跑就死了。
 
 > ⚠️ `docker compose config` 会把 `${VAR}` **解析成取值**再打出来，它的完整输出是带密钥的。
 > 要贴给别人用 `docker compose config --services`；要校验语法用 `make compose-config`，
