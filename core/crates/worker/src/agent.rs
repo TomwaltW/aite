@@ -39,6 +39,21 @@ pub const MAX_CONSECUTIVE_SANDBOX_ERRORS: u32 = 2;
 pub const REPEAT_NUDGE_AT: u32 = 3;
 pub const MAX_CONSECUTIVE_REPEATS: u32 = 5;
 
+/// `tool_result` 证据里 `content_summary` 的长度上限（字符数，`clip` 会折叠空白）。
+///
+/// 为什么是 200：`Task.result_summary` 用的就是这个数（本文件 `deliver()` 里的
+/// `clip(reply, 200)`），排障时两处长度一致好对照。够装下一条 Python traceback 的
+/// 最后一行（`SandboxError` / `ModuleNotFoundError: No module named 'xxx'` 这种），
+/// 而那正是 §8 第 6 条说「排 M3 的沙箱问题时最疼」的那一行。
+///
+/// **摘要不做脱敏，也没有任何脱敏器认得它** —— `preflight` 的 `Redactor` 只在起飞
+/// 自检那条路上、只认配置里的环境变量名，根本不在证据这条路上；`evidence show` 的
+/// `redact()` 是**渲染时**按键名打码的，只作用在 `tool_call` 的 `arguments` 上。
+/// 这不是新开的口子：`tool_call` 证据早就把 `arguments` **全文**原样存进去了，
+/// 摘要存的是同一趟调用的输出侧，风险面没有变大。真要收紧，该收的是整个证据面的
+/// 写入侧脱敏，那是单独一件事（见回执「记账转出去的」）。
+pub const MAX_TOOL_SUMMARY_CHARS: usize = 200;
+
 /// 组装入口（RΩ 按这个接，名字别自己发明）。
 pub struct WorkerDeps {
     pub store: Arc<dyn SessionStore>,
@@ -434,10 +449,20 @@ impl AgentWorker {
                 }
                 let item_id = ctx.task.checklist[idx].id.clone();
                 let state = ctx.task.checklist[idx].state;
+                // BB2 ③：带上这一项的文本。原来只有 `id` + `state`，单看一条
+                // `checklist_op` 读不懂 —— `aite evidence show` 靠回放前面的 `add`
+                // 事件补了回来，但那意味着**每个消费方都得自己回放**。
+                // 代价比 §8 估的小得多：`checklist_add` 那边已经 `clip(·, 20)` 过，
+                // 一份副本最多 20 个字符，不是「文本不短」。
+                let item_text = ctx.task.checklist[idx].text.clone();
                 // "checklist_check"[10:] == "check"；"checklist_fail"[10:] == "fail"
                 let op = &call.name[10..];
-                self.checklist_evidence(&ctx.task.id, op, json!({"id": item_id, "state": state}))
-                    .await?;
+                self.checklist_evidence(
+                    &ctx.task.id,
+                    op,
+                    json!({"id": item_id, "state": state, "text": item_text}),
+                )
+                .await?;
                 let content = texts::checklist_marked(&item_id, state.as_str());
                 self.local_result(ctx, call, true, &content, None).await
             }
@@ -487,6 +512,7 @@ impl AgentWorker {
                 "ok": ok,
                 "error": code.map(|c| c.as_str()),
                 "content_hash": sha256_hex(content.as_bytes()),
+                "content_summary": clip(content, MAX_TOOL_SUMMARY_CHARS),
                 "duration_ms": 0,
             }),
         )
@@ -537,6 +563,10 @@ impl AgentWorker {
 
         let result = gateway.call(&self.tool_context(ctx), call).await;
         let code = result.error.as_ref().map(|e| e.code);
+        // BB2 ③：沙箱 id 进证据。Gateway 是在这次调用里按需 acquire 的，所以要在
+        // **调用之后**问它 —— 调用前问只会拿到 None。没有沙箱的工具（发消息、读历史）
+        // 这里是 null，不是漏记。有了它，「哪个容器该收没收」就不用靠时间先后猜。
+        let sandbox_id = gateway.sandbox_id_of(&ctx.task.id).await;
         self.append_evidence(
             &ctx.task.id,
             EvidenceKind::ToolResult,
@@ -546,6 +576,12 @@ impl AgentWorker {
                 "ok": result.ok,
                 "error": code.map(|c| c.as_str()),
                 "content_hash": sha256_hex(result.content.as_bytes()),
+                // BB2 ③：摘要。原来失败时证据里只有 `error` 的错误码，拿不到那一行
+                // 具体的报错文本 —— 排沙箱问题时最疼的就是这个。
+                // **摘要不进 `content_hash`**：那个 hash 是对 content 全文算的，
+                // 摘要只是同一份 content 的另一个视图，进去了就变成「改摘要即改哈希」。
+                "content_summary": clip(&result.content, MAX_TOOL_SUMMARY_CHARS),
+                "sandbox_id": sandbox_id,
                 "duration_ms": result.duration_ms,
             }),
         )
@@ -722,6 +758,12 @@ impl AgentWorker {
 
         ctx.task.status = TaskStatus::Delivered;
         ctx.task.result_summary = clip(reply, 200);
+        // 收卡片在写终态证据**之前**（BB2 ② 起）。卡片推送现在自己会写一条
+        // `card_updated` 证据，而 `delivered` / `failed` / `cancelled` 必须是链上
+        // 最后一条 —— `evidence show` 的「终态」就是拿最后一行的 kind 认的
+        // （`cli.rs::is_terminal_kind`），`app/tests` 那两条贯通用例也钉着这一点。
+        // 先收卡片、再落终态，链的收口顺序才和「任务真的结束了」对得上。
+        self.close_card(ctx, CardStatus::Delivered).await?;
         self.append_evidence(
             &ctx.task.id,
             EvidenceKind::Delivered,
@@ -732,7 +774,6 @@ impl AgentWorker {
             }),
         )
         .await?;
-        self.close_card(ctx, CardStatus::Delivered).await?;
         self.finish(ctx).await?;
         Ok(ctx.task.clone())
     }
@@ -750,26 +791,26 @@ impl AgentWorker {
         if let Err(err) = self.platform.send_text(&msg).await {
             tracing::error!(task = %ctx.task.id, %err, "worker.fail_notice_failed");
         }
+        self.close_card(ctx, CardStatus::Failed).await?; // 次序理由见 deliver()
         self.append_evidence(
             &ctx.task.id,
             EvidenceKind::Failed,
             json!({"reason": text, "steps": ctx.task.steps}),
         )
         .await?;
-        self.close_card(ctx, CardStatus::Failed).await?;
         self.finish(ctx).await?;
         Ok(ctx.task.clone())
     }
 
     async fn cancel(&self, ctx: &mut RunContext) -> Result<Task, RunError> {
         ctx.task.status = TaskStatus::Cancelled;
+        self.close_card(ctx, CardStatus::Cancelled).await?; // 次序理由见 deliver()
         self.append_evidence(
             &ctx.task.id,
             EvidenceKind::Cancelled,
             json!({"steps": ctx.task.steps}),
         )
         .await?;
-        self.close_card(ctx, CardStatus::Cancelled).await?;
         self.finish(ctx).await?;
         Ok(ctx.task.clone())
     }
@@ -882,6 +923,8 @@ impl aite_contracts::TaskWorker for AgentWorker {
         let mut ctx = RunContext {
             card: CardCoalescer::new(
                 self.platform.clone(),
+                self.evidence.clone(),
+                task.id.clone(),
                 self.config.worker.card_update_min_interval_ms,
                 self.clock.clone(),
             ),

@@ -198,7 +198,29 @@ async fn evidence_chain_covers_the_run() {
     assert_eq!(kinds[0], EvidenceKind::TaskCreated);
     assert_eq!(kinds[1], EvidenceKind::EventReceived);
     assert_eq!(ev.count_kind(&run.task.id, EvidenceKind::ModelCall), 4);
-    assert_eq!(ev.count_kind(&run.task.id, EvidenceKind::ChecklistOp), 2);
+    // `checklist_op` 现在装两类东西：checklist 本身的操作，和卡片的发送 / 更新
+    // （BB2 ②，复用同一个 kind，靠 `op` 区分）。所以这里按 `op` 数，不按 kind 数 ——
+    // 按 kind 数的话，卡片多推一次这条断言就得跟着改一个数字，而它想钉的根本不是卡片。
+    let ops: Vec<String> = ev
+        .payloads(&run.task.id, EvidenceKind::ChecklistOp)
+        .iter()
+        .map(|p| p["op"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        ops.iter().filter(|o| *o == "add" || *o == "check").count(),
+        2,
+        "checklist 本身的操作：add ×1 + check ×1，实际 {ops:?}"
+    );
+    assert_eq!(
+        ops.iter().filter(|o| *o == "card_sent").count(),
+        1,
+        "send_card 至多一次，证据里也只该有一条，实际 {ops:?}"
+    );
+    assert_eq!(
+        ops.iter().filter(|o| *o == "card_updated").count(),
+        run.h.platform.card_updates().len(),
+        "证据里的 card_updated 条数必须等于平台真被调到的 update_card 次数，实际 {ops:?}"
+    );
     assert_eq!(
         ev.count_kind(&run.task.id, EvidenceKind::ToolCall),
         4,
@@ -267,10 +289,12 @@ async fn gateway_tool_result_is_recorded_as_hash() {
         [
             "call_id",
             "content_hash",
+            "content_summary",
             "duration_ms",
             "error",
             "name",
-            "ok"
+            "ok",
+            "sandbox_id"
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>()
@@ -281,6 +305,12 @@ async fn gateway_tool_result_is_recorded_as_hash() {
         results[0]["content_hash"],
         json!(sha256_hex(b"read_document ok"))
     );
+    // BB2 ③：摘要是 content 的另一个视图，**不进 content_hash** —— 上面那条
+    // `content_hash` 断言仍然是对全文算的，摘要加进 payload 之后它一个字符都没变。
+    assert_eq!(results[0]["content_summary"], json!("read_document ok"));
+    // read_document 不碰沙箱，所以这里是 null；「没有沙箱」和「漏记了」在证据里
+    // 长得不一样（漏记是这个键根本不在，上面 keys 那条钉着）。
+    assert_eq!(results[0]["sandbox_id"], Value::Null);
     assert_eq!(run.h.gateway.calls().len(), 1);
 }
 

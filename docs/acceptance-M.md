@@ -1109,15 +1109,38 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 
 ## 8. 跑这份剧本时发现的观测缺口
 
-写剧本时发现有几件真机排障需要的事，现在**查不到**。这里只记录，
-代码改动不属于本轨，留给下一轮：
+写剧本时发现有几件真机排障需要的事，当时**查不到**。第 1、2、5、6、7 条由 BB2 轨
+（2026-09-15）处理完了，逐条标在下面；第 3、4 条仍然只是记录。
 
 1. **`created_at` 不进 hash 链。** `hash = chain_hash(prev_hash, payload_hash)`，
    而 `payload_hash` 只覆盖 payload —— 改掉 `events.jsonl` 里所有时间戳，
    链校验照样全绿。M2/M3 的时序判断建立在这些时间戳上，值得知道它没被保护。
+   ✅ **BB2 复现过也治了，但补丁还没落地**：拿一份真跑出来的 17 条证据目录，
+   把 seq=8 的 `created_at` 往后挪 37 分钟（挪完它比 seq=9 还晚），
+   `aite evidence show` 照样打「hash 链 OK · 17 条全部闭合」、退出码 0、root_hash 一字未改。
+   治法是新增 `chain_hash_at(prev, payload_hash, created_at)`，落盘与两处校验一起换。
+   改动横跨契约冻结面，交付形态是**补丁脚本** `review/bb2-created-at-chain-patch.py`，
+   由人跑（要 `AITE_RELOCK=1`）+ 重锁。命令链见台账第十九节。
+   ⚠️ **补丁落地之后旧证据目录一律判红**（旧口径链本来就证明不了自己的时序）。
+   `evidence show` 会把它认成「旧口径 —— 不是被改过」并只报一条，不是一堆 hash 对不上。
+   **跑 M1–M6 之前先把已有 `data/evidence/` 整个挪到 `data/evidence-p0.1-legacy/`。**
 2. **卡片的发送与更新不写 evidence，也没有日志。** M3 明确要求「卡片至少更新 3 次
    且不新增消息」，但 `send_card` / `update_card` 在证据里没有任何痕迹，
    只能靠肉眼数。建议加 `card_sent` / `card_updated` 两类事件（或复用 `checklist_op`）。
+   ✅ **BB2 已做（复用 `checklist_op`，不动 `EvidenceKind`）。** 事件发在
+   `CardCoalescer` 真调平台的那两行后面，所以数的是「真发出去了几次」而不是
+   「worker 想更新几次」—— W4 的合并把后者压小了，M3 要的是前者。
+   两条 `tracing::info!`（`worker.card_sent` / `worker.card_updated`）也补上了。
+   **M3 现在这么数**：
+
+   ```bash
+   aite evidence show <task_id> --only checklist_op --json \
+     | python3 -c "import json,sys; rows=json.load(sys.stdin)['events']; \
+       print(sum(1 for r in rows if r['fields'].get('op')=='card_updated'))"
+   ```
+
+   每条 `card_updated` 带 `push`（真调出去的第几次，从 1 起连续）与 `merged`
+   （这一次折叠了多少次待发变更）。`push` 断号就是漏记，不是少推。
 3. **被丢弃的事件不留痕。** R1/R2/R8 丢弃事件时只加内存计数器，INFO 级别没有日志。
    **core 侧计数器没有查看入口**（`counters()` 全仓零调用方；只有 `events.dropped`
    经 `!status` 尾巴漏出来一点），所以 M4 判「没投递 vs 投递了被丢」只能去开放平台
@@ -1135,8 +1158,20 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 5. **`checklist_op` 的 check/fail 只记 `id` 和 `state`，不带那一项的文本。**
    `aite evidence show` 已经通过回放前面的 `add` 事件把文本补了回来，
    但这意味着**单看一条 `checklist_op` 是读不懂的**，任何别的消费方都得自己回放。
+   ✅ **BB2 已做：check/fail 的 payload 多一个 `text`。** 原来担心的代价（「文本不短，
+   证据会变大」）不成立 —— `checklist_add` 那边已经 `clip(·, 20)` 过，一份副本最多
+   20 个字符。`evidence show` 仍然会回放补文本，所以旧证据目录照旧读得懂。
 6. **`tool_result` 只有 `content_hash`，没有摘要。** 工具失败时证据里只有
    `error` 的错误码（`timeout` / `sandbox` / `invalid_args` …），
    拿不到那一行具体的报错文本。排 M3 的沙箱问题时这一点最疼。
+   ✅ **BB2 已做：`tool_result` 多一个 `content_summary`**（折叠空白后截到 200 字符，
+   与 `Task.result_summary` 同一个长度）。**它不进 `content_hash`** —— 那个 hash 照旧
+   对 content 全文算，摘要只是同一份内容的另一个视图。
+   ⚠️ **摘要不做脱敏**，也没有任何脱敏器认得它（`preflight` 的 `Redactor` 只在起飞
+   自检那条路上、只认配置里的环境变量名）。这不是新开的口子：`tool_call` 证据早就把
+   `arguments` 全文原样存进去了。真要收紧，该收的是整个证据面的写入侧脱敏。
 7. **沙箱 id 不进证据。** 任务和容器对不上号，M3 查「哪个容器该收没收」
    只能靠时间先后猜。
+   ✅ **BB2 已做：走 Gateway 的 `tool_result` 多一个 `sandbox_id`**（在调用**之后**问
+   `sandbox_id_of`，因为容器是这次调用里按需 acquire 的）。不碰沙箱的工具这里是
+   `null` —— 「没有沙箱」和「漏记了」因此分得开（键一定在，值可能是 null）。
