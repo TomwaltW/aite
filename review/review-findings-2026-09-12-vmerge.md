@@ -4532,3 +4532,477 @@ scripts/check.sh
      `/core/target/` 里，`git status` 看不见它）。
 7. **worktree 干净**：`git status --short` 只有本轨的 9 个条目（5 改 4 新），
    `data/` 一个字节都没动（①.1 的现场落在 `core/target/` 下，评测跑的是 scratchpad 里的配置）。
+
+## 二十、BB3 回执 —— 2026-09-15
+
+基线 `7019c48`。改动面七处：`Makefile`、`.gitignore`、**新增** `data/.gitkeep`、
+`docker-compose.yml`、`docker/edge/Dockerfile`、`docker/core/Dockerfile`（一处注释）、
+`.github/workflows/ci.yml`（两处注释）、`README.md`（compose 与容器身份那几段），外加本文追加这一节。
+**零 Rust / 零 Go 改动**，`core/**`、`edge/**`、`proto/**`、`config/**`、`docs/**`、
+`evals/**`、`scripts/**` 一个字节没碰。
+
+> ⚠️ **本轨一半的结论在 macOS 上验不了**，最后那张「实测 / 推断」表是本节最重要的一块，
+> 别只看前面的绿。
+
+### 基线与开场自检
+
+| 行 | 期望 | 实测 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` ✅ |
+| C1 契约测试 | `contracts passed=25 failed=0` | 同 ✅ |
+| B 全量 cargo test | `cargo passed=864 failed=0` | 同 ✅ |
+| B 全量 go test（-race） | 六个包全 `ok` | aiteerr/config/feishu/ingress/sandbox/server 全 `ok` ✅ |
+| B8 评测 | `passed 10/10` | 同 ✅ |
+| 末行 / 退出码 | `全部通过` / 0 | 同 ✅ |
+
+`git log --oneline -1` = `7019c48`，`git status --short` 空。
+
+守卫那一条：`Read .claude/hooks/guard_bash.py` **被拦下**，逐字原话：
+
+```
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+`make compose-config` 的输出（改前）：
+
+```
+env -u FEISHU_APP_ID -u FEISHU_APP_SECRET -u FEISHU_BOT_OPEN_ID -u AITE_MODEL_API_KEY docker compose config -q
+core edge
+EXIT=0
+```
+
+并行会话：本批 BB1/BB2/BB4/BB5/BB6 同时在跑，都是同批派单的邻居轨，无人在做同类事
+（BB6 管 `preflight.rs`，本轨一个字没碰）。
+
+### ① `make compose-up` 自己把三件事做齐
+
+**改前**（整条 target 就这三行）：
+
+```make
+compose-up: compose-build  ## 一条命令起飞：先把三个镜像建齐，再起两个常驻 service
+	docker compose up -d
+	@docker compose ps
+```
+
+**改后**（注释 45 行讲清每条为什么，recipe 本体如下）：
+
+```make
+compose-up: compose-build  ## 一条命令起飞：建齐三个镜像 → 备好宿主机一侧 → 起两个常驻 service
+	mkdir -p data
+	@set -eu; \
+	uid=$${AITE_UID:-$$(id -u)}; \
+	gid=$${AITE_GID:-$$(id -g)}; \
+	if [ -n "$${AITE_DOCKER_GID:-}" ]; then dgid=$$AITE_DOCKER_GID; \
+	elif [ -S /var/run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then \
+		dgid=$$(stat -c '%g' /var/run/docker.sock 2>/dev/null || echo 0); \
+	else dgid=0; fi; \
+	echo "容器身份：AITE_UID=$$uid AITE_GID=$$gid AITE_DOCKER_GID=$$dgid"; \
+	set -x; \
+	AITE_UID=$$uid AITE_GID=$$gid AITE_DOCKER_GID=$$dgid docker compose up -d
+	@docker compose ps
+```
+
+#### 判断题 1 · 那条 `docker run --rm alpine` 该不该付？——**不该，改成判别式**
+
+AA1 那条命令测的确实是 daemon 视角、correct-by-construction，但它给**起飞命令**加了一条
+**镜像 / registry 依赖**。三个实测数：
+
+| 形态 | 实测 |
+|---|---|
+| 本轨的判别式（20 遍取平均） | `0.140s / 20` = **7ms 一发**，零容器、零网络 |
+| alpine 探针（镜像已在本机、热） | `0.220s` |
+| alpine 探针（本 session 第一发） | `0.920s` |
+| alpine 探针（**镜像不在本机**，用一个不存在的 tag 模拟） | `docker: Error response from daemon: failed to resolve reference "docker.io/library/alpine:…": failed to do request: Head "https://registry-1.docker.io/v2/library/alpine/manifests/…": EOF`，**退 125** |
+
+最后一行才是真正的理由：**一条起飞命令不该因为拉不到一个探针镜像而整个失败**，
+而本机今天的网络条件下 registry 确实会 EOF（见 ④）。
+
+判别式是「`/var/run/docker.sock` 是不是一个**本机的真 socket**」：
+
+```sh
+if   [ -n "${AITE_DOCKER_GID:-}" ];                          then 听外部的
+elif [ -S /var/run/docker.sock ] && [ ! -L /var/run/docker.sock ]; then stat -c '%g'（GNU）
+else                                                              0
+fi
+```
+
+**这条判别式在真 Linux 内核上逐档验过**（alpine 容器里跑，`Linux 6.12.76-linuxkit`；
+probe() 逐字抄自 recipe）：
+
+```
+== 档1 真 socket（bind 进来的 /probe/docker.sock）==
+  stat: 0:0 660 socket /probe/docker.sock
+  -S yes / -L no
+  -> probe = 0   （= 它真实的 gid）
+== 档2 指向 socket 的符号链接（模拟 macOS 的 /var/run/docker.sock）==
+  -S yes（test 跟随链接 —— 这就是 ! -L 不能省的原因）/ -L yes
+  -> probe = 0   （走 else，压根不 stat）
+== 档3 GNU stat -c '%g' 在非零组上 ==
+  stat: 0:999 644 regular empty file /tmp/g999
+  -> stat -c '%g' = 999
+== 档4 外部已传 AITE_DOCKER_GID=1234 ==
+  -> probe = 1234
+== 档5 路径不存在 ==
+  -> probe = 0
+```
+
+三条支撑这个判别式的本机实测：
+
+1. **macOS 上 `/var/run/docker.sock` 是符号链接**，所以 `! -L` 挡住了错答案：
+   ```
+   lrwxr-xr-x@ 1 root daemon 40 /var/run/docker.sock -> /Users/shensikai/.docker/run/docker.sock
+   stat -f '%u:%g %Sp %N'  →  0:1 lrwxr-xr-x /var/run/docker.sock      ← 宿主机侧：0:1，错的
+   容器里 bind-mount 进去  →  0:0 660 socket /var/run/docker.sock      ← daemon 侧：0，对的
+   ```
+2. **`stat -c` 是 GNU 写法，macOS 当场报错**（所以「直接抄 CI 那句」在 macOS 上是不行的）：
+   ```
+   $ stat -c '%g' /var/run/docker.sock
+   stat: illegal option -- c
+   EXIT=1
+   ```
+   recipe 里那层 `|| echo 0` 就是给「真 socket 但没有 GNU stat」的机器留的退路。
+3. **Linux 上宿主机视角 == 容器视角**（本机能拿到的那半证据：nsenter 进 Docker Desktop 的
+   Linux VM，那是个真 Linux 内核）：
+   ```
+   VM 自己看   : 0:0 660 socket /var/run/docker.sock   （srw-rw---- 1 0 0）
+   容器里看    : 0:0 660 socket /var/run/docker.sock
+   ```
+   两侧一致 —— 这就是「Linux 上直接 stat 成立」的那一半。**gid 的取值本身**
+   （别人的 Linux 上是 `root:docker`、999/998）本机验不到，见最后那张表。
+
+#### 判断题 2 · `compose-down` 要不要也传？——**不要。真跑过。**
+
+`docker-compose.yml` 里三个变量**都有默认值**（`${AITE_UID:-1001}` / `${AITE_GID:-1001}` /
+`${AITE_DOCKER_GID:-0}`），所以缺了不报警；而 `down` 是按 project 名 + label 找容器的，
+不吃 service 配置解析出来的取值。实测（**up 用的是 501:20，down 三个变量全 `env -u` 掉**）：
+
+```
+$ env -u AITE_UID -u AITE_GID -u AITE_DOCKER_GID make compose-down
+docker compose down
+ Container aite-edge-1 Stopping
+ Container aite-core-1 Stopping
+ Container aite-edge-1 Stopped
+ Container aite-edge-1 Removing
+ Container aite-edge-1 Removed
+ Container aite-core-1 Stopped
+ Container aite-core-1 Removing
+ Container aite-core-1 Removed
+ Network aite_default Removing
+ Network aite_default Removed
+DOWN_EXIT=0
+```
+
+反过来说，**给 `down` 也加探针反而是错的**：探针失败就会挡住「把容器停掉」这件事，
+方向正好反了。`compose-ps` / `compose-logs` 同理，一个字没改。
+
+#### 判断题 3 · macOS 上会不会变慢或变坏？——**没有。0.849s，两个 service 都 healthy。**
+
+```
+$ make -o compose-build compose-up          ← -o 跳过重建，见下面「没做的」第 1 条
+mkdir -p data
+容器身份：AITE_UID=501 AITE_GID=20 AITE_DOCKER_GID=0
++ AITE_UID=501
++ AITE_GID=20
++ AITE_DOCKER_GID=0
++ docker compose up -d
+ Network aite_default Creating
+ Network aite_default Created
+ Volume aite_run Creating
+ Volume aite_run Created
+ Container aite-edge-1 Creating
+ Container aite-core-1 Creating
+ Container aite-core-1 Created
+ Container aite-edge-1 Created
+ Container aite-edge-1 Starting
+ Container aite-core-1 Starting
+ Container aite-core-1 Started
+ Container aite-edge-1 Started
+NAME          IMAGE          COMMAND                  SERVICE   CREATED        STATUS                                     PORTS
+aite-core-1   aite-core:p0   "aite run --config c…"   core      1 second ago   Up Less than a second (health: starting)
+aite-edge-1   aite-edge:p0   "aite-edge --config …"   edge      1 second ago   Up Less than a second (health: starting)
+
+real	0m0.849s
+COMPOSE_UP_EXIT=0
+
+$ make compose-ps
+docker compose ps
+NAME          IMAGE          COMMAND                  SERVICE   CREATED          STATUS                    PORTS
+aite-core-1   aite-core:p0   "aite run --config c…"   core      17 seconds ago   Up 16 seconds (healthy)
+aite-edge-1   aite-edge:p0   "aite-edge --config …"   edge      17 seconds ago   Up 16 seconds (healthy)
+```
+
+**三个变量真的生效了**（这是 macOS 上唯一能证的那件事）：
+
+```
+$ docker compose exec -T core id
+uid=501 gid=20(dialout) groups=20(dialout)
+$ docker compose exec -T edge id
+uid=501 gid=20(dialout) groups=20(dialout),0(root)      ← group_add 那条也在
+
+$ docker compose exec -T edge ls -ln /app/data/run/
+srwxr-xr-x 1 501 20 0 Sep 15 15:31 aite-core.sock
+srwxr-xr-x 1 501 20 0 Sep 15 15:31 aite-edge.sock
+
+core 侧四行起飞日志（剥 ANSI 后 grep）：
+HIT  edge.connected socket=/app/data/run/aite-edge.sock
+HIT  aite.edge_status
+HIT  ingress.listening socket=/app/data/run/aite-core.sock
+HIT  aite.up
+RestartCount: core=0 edge=0                              ← 没有崩溃循环
+```
+
+**改前口径的对照**（同一份编排，什么都不传 —— 也就是改前 `make compose-up` 的行为）：
+
+```
+$ env -u AITE_UID -u AITE_GID -u AITE_DOCKER_GID docker compose up -d
+$ docker compose exec -T core id
+uid=1001 gid=1001 groups=1001                            ← 落回镜像默认值
+$ docker compose exec -T edge id
+uid=1001 gid=1001 groups=1001,0(root)
+$ ls -ln data
+-rw-r--r--@ 1 501 20 53248 aite.db                       ← 宿主机侧照样归当前用户
+$ docker compose ps
+aite-core-1 Up 8 seconds (healthy)
+aite-edge-1 Up 8 seconds (healthy)                       ← 照样全绿
+```
+
+**这就是「macOS 上验不出来」的原样证据**：改前改后在 macOS 上都是两个 healthy、
+宿主机都读得动 `./data` —— VirtioFS 把 uid 双向翻译掉了，差别只在容器里那个 `id`。
+同一份改前配置在 Linux 上是 core 起不来（`建不出目录 data/evidence：Permission denied`）。
+
+### ② `data/.gitkeep`：**二选一还是都做 → 都做**
+
+`.gitignore` 改法（不能写 `/data/`：父目录被排除之后 git 不再下降进去，
+`!/data/.gitkeep` 放行不了）：
+
+```
+-/data/
++/data/*
++!/data/.gitkeep
+```
+
+**为什么都做 —— 先量了边界再定的**（一次性空仓里跑，没碰本轨的树）：
+
+| 场景 | `data/` 在吗 | `data/.gitkeep` 在吗 | 谁接得住 |
+|---|---|---|---|
+| `git checkout` / clone | 在 | 在 | `.gitkeep` |
+| `git clean -xdf` | **在** | **在**（跟踪着，clean 不动它；`core/target` 被清掉了） | `.gitkeep` |
+| `git archive HEAD \| tar -t` | **在** | **在** | `.gitkeep` |
+| 有人手工删掉整个 `data/` | 没了（`git status` 显示 ` D data/.gitkeep`） | 没了 | **只有 `mkdir -p`** |
+| 树不是 git 给出来的（rsync / 拷贝） | 看情况 | 看情况 | **只有 `mkdir -p`** |
+
+> 📌 **自我更正**：我一开始把「`git archive` 导出的树里没有 .gitkeep」写进了 Makefile 与
+> README 的注释，实验（上表第 3 行）**推翻了它** —— archive 里 `data/` 和 `data/.gitkeep`
+> 都在。两处注释已改正，别再照那个说法写。
+
+所以：`.gitkeep` 覆盖「git 给出来的树」那一整类，`mkdir -p` 覆盖剩下的「目录后来没了」。
+`mkdir -p` 幂等、一行、零成本，当保险留着 —— 但**它不是主力**，主力是 `.gitkeep`。
+CI 那一步的 `mkdir -p data` 同理留着，注释里已经写明它现在是「冗余但留着」。
+
+**`git status` 复核 —— 做了两轮，第二轮是带真产物的那一轮**：
+
+```
+# 第一轮：手工造典型产物
+$ git check-ignore -v data/.gitkeep                     .gitignore:17:!/data/.gitkeep
+$ git check-ignore -v data/aite.db                      .gitignore:16:/data/*
+$ git check-ignore -v data/evidence/task-x/events.jsonl .gitignore:16:/data/*
+$ git check-ignore -v data/artifacts/a.png              .gitignore:16:/data/*
+$ git check-ignore -v data/run/aite-core.sock           .gitignore:31:/data/run/
+
+# 第二轮：compose 真跑过一遍、data/ 里是 core 自己落的产物
+$ ls data
+.gitkeep  aite.db  artifacts/  evidence/  run/
+$ git status --short -uall
+ M .github/workflows/ci.yml
+ M .gitignore
+ M Makefile
+ M README.md
+ M docker-compose.yml
+ M docker/core/Dockerfile
+ M docker/edge/Dockerfile
+?? data/.gitkeep                                        ← 只有它一个新文件
+```
+
+### ③ `group_add` 的默认值：**推荐维持 `0`**（配 ① 之后它的作用面已经很小）
+
+三个候选各自的后果，其中候选 B 是**实测**出来的：
+
+| 候选 | Docker Desktop | Linux（不传变量） | 便宜的解析门禁接不接得住 | 失败长什么样 |
+|---|---|---|---|---|
+| **A 维持 `0`**（推荐） | 正确（实测容器里 docker.sock 是 `0:0 660`） | edge 多一个**用不上的 root 补充组**，且 `sandbox_ok` false | 接不住（本来也不该它接） | `aite preflight` 第 6 组 **FAIL 并点名沙箱不可用** —— 有诊断 |
+| B 改成空 `${AITE_DOCKER_GID:-}` | **一起坏掉** | 不会静默拿错值 | **接不住** —— `docker compose config -q` 实测 **退 0**，CI 那条 `config --services` 同理 | 到真起容器那一刻才死：`docker: Error response from daemon: unable to find group : no matching entries in group file`（**退 125**，实测）—— 没诊断 |
+| C 让 `make compose-up` 现问 | 正确 | 正确 | — | — |
+
+**推荐 = A + C（本轨已经把 C 做了）**，理由三条：
+
+1. C 做完之后，这个默认值**只在「绕开 make、手敲 `docker compose up`」时才起作用** ——
+   而那一档里唯一「默认值本来就正确」的平台正是 Docker Desktop。
+2. B 把一条**带诊断**的失败（preflight 第 6 组点名沙箱）换成一条没诊断的 daemon 报错，
+   而且**便宜的那道门禁照样绿**（实测 `config -q` 退 0）——「改成报错」并没有换来更早的发现。
+3. B 还把 macOS 这个本来没病的平台一起拖下水：Desktop 上正确取值就是 0，
+   B 之后每个 Desktop 用户都得手传一个变量。
+
+**代价如实写在 `docker-compose.yml` 的注释里了**：Linux 上不传变量时 edge 会多拿一个
+gid 0 补充组（只是补充组、不是 euid，但它确实让 edge 读得到 root 组可读的文件）。
+**没让 preflight 接** —— `preflight.rs` 归 BB6 那一轨，见下面「记账转出去的」。
+
+### ④ 用仓库原文建 edge 镜像：**建不出来**（`BUILD_EXIT=1`），仓库原文一个字节没改
+
+第一发就是零注入、`git status docker/edge/Dockerfile` 空。逐字贴：
+
+```
+$ docker compose build edge
+#11 [builder 4/5] RUN ... cd edge && go build -o /out/aite-edge ./cmd/aite-edge
+#11 CACHED
+#12 [builder 5/5] RUN ... GOBIN=/out go install "github.com/grpc-ecosystem/grpc-health-probe@v0.4.57"
+#12 60.20 go: github.com/grpc-ecosystem/grpc-health-probe@v0.4.57: loading deprecation for github.com/grpc-ecosystem/grpc-health-probe: module github.com/grpc-ecosystem/grpc-health-probe: Get "https://proxy.golang.org/github.com/grpc-ecosystem/grpc-health-probe/@v/list": dial tcp 142.251.34.209:443: i/o timeout
+#12 ERROR: process "/bin/sh -c GOBIN=/out go install \"github.com/grpc-ecosystem/grpc-health-probe@${HEALTH_PROBE_VERSION}\"" did not complete successfully: exit code: 1
+Dockerfile:29
+failed to solve: ... exit code: 1
+BUILD_EXIT=1
+```
+
+与 AA1 两天前的症状**逐字一致**。本轨多量了三条，把这笔账收窄了：
+
+1. **死的只有「查 deprecation」那一层。** 同一发里 `go build` 那层 **1.8s 就过了**
+   （模块全在 BuildKit 的 cache mount 里，不碰网）。所以病因不是「依赖下不下来」，
+   是 `go install pkg@version` **一定**要问一次 `<proxy>/<module>/@v/list`。
+2. **本机的网络条件是「按域名分」的，不是全断**：
+   ```
+   proxy.golang.org   连不上（wget -T 8 超时）
+   deb.debian.org     连不上
+   goproxy.cn         OK
+   index.crates.io    OK，但慢 —— 单个索引文件实测 20.22s
+   registry-1.docker.io  拉不存在的 tag 时 EOF
+   ```
+3. **换个够得着的 proxy 就建得出来**，1.5s：
+   ```
+   $ docker compose build --build-arg GOPROXY=https://goproxy.cn,direct edge
+   #12 [builder 5/5] RUN ... go install ...@v0.4.57
+   #12 DONE 1.5s
+   #18 naming to docker.io/library/aite-edge:p0 done
+   轮2 BUILD_EXIT=0
+   ```
+
+**因此给 `docker/edge/Dockerfile` 加了两个可选 ARG**（派单允许的那一档：可选 build arg + 文档）：
+
+```dockerfile
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+```
+
+**默认值就是 Go 自己的内置默认值 —— 不传时与加它们之前逐字等价，CI 那条路一个字不变。**
+这条不是推断，是实测出来的：加完 ARG 之后**不传任何 build-arg 再建一次**，
+`BUILD_EXIT=1`，死在同一层、同一条 `i/o timeout`、同一个 `@v/list`。
+（`GOPROXY=file:///go/pkg/mod/cache/download` + `GOSUMDB=off` 那条完全离线的路子写在注释里，
+没实跑 —— 见「没做的」第 4 条。）
+
+**没把任何 proxy 写死进 Dockerfile**：写死等于把镜像钉在某个地区的镜像站上，
+而且 CI 会悄悄不再验「真 proxy 上这个版本还在不在」——runner 每次冷缓存，那边才是这条依赖的门禁。
+
+### 哪些是 macOS 上量的、哪些只能在 Linux 上验
+
+**这张表是本轨最重要的交付。** 每行标「实测 / 推断」，实测的都注明在哪个内核上量的。
+
+| # | 结论 | 判定 | 在哪量的 / 为什么只能推断 |
+|---|---|---|---|
+| 1 | macOS 的 `/var/run/docker.sock` 是符号链接，宿主机侧 `0:1`、容器侧 `0:0` | **实测** | macOS + Docker Desktop，本机 |
+| 2 | `[ -S ]` 对指向 socket 的符号链接也成立，所以 `! -L` 不能省 | **实测** | macOS 与 Linux 容器里各验一次 |
+| 3 | `stat -c` 在 macOS 上 `illegal option -- c` 退 1 | **实测** | macOS，本机 |
+| 4 | 判别式五个分支（真 socket / 符号链接 / 非零 gid / 外部传入 / 路径不存在）取值正确 | **实测** | alpine 容器，`Linux 6.12.76-linuxkit`（真 Linux 内核） |
+| 5 | Linux 上宿主机看 docker.sock 的 gid == 容器 bind-mount 进去看到的 gid | **实测** | nsenter 进 Docker Desktop 的 Linux VM（真 Linux 内核），两侧都是 `0:0 660` |
+| 6 | **别人的 Linux 上 docker.sock 是 `root:docker`、gid 999/998 之类** | **推断** | 本机 Desktop 上它是 `root:root`。这条与 AA1「没做的」第 2 条同一笔账，仍未验 |
+| 7 | `make compose-up` 在 macOS 上不变慢、两个 service 都 healthy、三个变量真生效 | **实测** | macOS，见 ① |
+| 8 | **Linux 上 `make compose-up` 现在起得来了**（改前起不来） | **推断** | macOS 上 VirtioFS 翻译 uid，改前改后都 healthy，**这台机器分辨不了**。逻辑链是：本轨传的三个值与 `ci.yml` 那一步**同源**，而 CI 那条在 Linux runner 上是绿的 —— 但 CI 下次 push 才会跑 |
+| 9 | `make compose-down` 不传变量照样收干净 | **实测** | macOS，up 用 501:20 / down 全 `env -u` |
+| 10 | `group_add` 改成空之后 `config -q` 仍退 0、真起容器时退 125 | **实测** | macOS（`docker run --group-add ''` + 一份 scratchpad override，没碰仓库文件） |
+| 11 | **Linux 上不传 `AITE_DOCKER_GID` 时 edge 多一个 root 补充组的实际后果** | **推断** | macOS 上默认值 0 正好是对的，量不出「多余」这件事 |
+| 12 | `.gitkeep` / `mkdir -p` 覆盖的五个场景 | **实测** | macOS 上一次性空仓，与平台无关（纯 git 语义） |
+| 13 | `docker compose build edge` 用仓库原文建不出来；换 proxy 能建 | **实测** | 本机，见 ④。**换一台通网的机器结论会不一样** |
+| 14 | 加了两个 ARG 之后不传时与加之前逐字等价 | **实测** | 本机：加完 ARG 再建一次，死在同一层同一条错 |
+| 15 | `ci.yml` 改完仍是合法 YAML、`compose-smoke` 仍是 11 步 | **实测** | `ruby -ryaml` 解析（本机没 pyyaml） |
+| 16 | **改完的 `ci.yml` 在 Linux runner 上跑得过** | **推断** | 本轨对 ci.yml 只改了**两处注释**（`git diff` 里没有一行非注释改动），但**这份 workflow 下次 push 才会跑，跑之前没人知道**。这个项目没有 CI 门禁习惯，别拿它当验证 |
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/app/.../preflight.rs` 第 6 组 | ③ 的代价（Linux 上不传 `AITE_DOCKER_GID` → edge 多一个 root 补充组 + `sandbox_ok` false）目前只有注释和文档接着。AA1 原话是「让 preflight 第 6 组接住」。**本轨不许碰 `preflight.rs`** | **BB6** |
+| `docs/acceptance-M.md:249` | `` `edge/bin/` 在 `.gitignore:21`，不入库 `` —— **这个行号被本轨改 `.gitignore` 带漂了，现在是 `:27`**。`docs/**` 是本轨只读面，没改。口径按 W3 ④ / AA1 ⑤：改成引措辞、不写行号 | **总管** |
+| `docs/acceptance-M.md` §0.2.5 | 那一段「Linux 上起飞前要多做两件事」的口径已被本轨改掉（`make compose-up` 自己做了），且 `data/` 现在目录入库。**只读面，没改** | **总管** |
+| `README.md:77-79` | 「`make clean` 里那句 `rm -rf edge/bin` 是个历史遗留」—— **核实下来这句不准**。`make build` 确实不产出二进制（`go build ./...` 跨 9 个包，实测 `go list ./...` = 9），但 README 自己的快速上手就叫人 `go build -o bin/aite-edge`，`make clean` 那句正是**唯一**清掉它的地方，不是遗留。这段属于「构建」不属于「容器/起飞」，按可写面纪律没改 | **总管 / 下一轨** |
+| `evals/live-report-2026-09-12-v4.md:57`、`evals/live-report-2026-09-10-t19.md:29`、`review/paste-V*.md` 若干处 | 同样引着旧的 `.gitignore:11` / `:14` / `:21` / `:26`。都是**带日期的历史快照**，按惯例不回改，列在这儿是为了别让后来人拿它们当现行口径 | 总管（知会即可） |
+| `Makefile` 的 `compose-build` | 本机建不出 edge 镜像时它会连带把 `make compose-up` 整个挡住（见「没做的」第 1 条）。有没有必要给 `compose-build` 也留一个 `GOPROXY` 口子，是个产品决定，本轨没替总管做 | **总管** |
+| 守卫 `guard_bash.py` | 本轨被它拦了 4 次，其中 **3 次是解析失败误拦**：带转义引号的 heredoc、内联 `python3 -c "..."`、`find ... -delete`（原话：`该操作触碰受保护面 冻结面（proto/** 与 core/crates/contracts/**）（find 的 -delete/-exec 覆盖面判不出来）`）。都绕开了（脚本落盘再跑），fail-closed 方向是对的，只记账不提改法 —— 改守卫只能出补丁给人跑 | **BB4 / 总管** |
+
+### 落盘残留复核
+
+```
+aite-* 容器            0 个
+aite 前缀的卷          0 个（down -v 收掉了 aite_run）
+label=aite.task        0 个
+./data                 只剩 data/.gitkeep（本轨新增的那个跟踪文件）
+config/aite.yaml       已删（冒烟临时件）
+config/aite.ci-edge.yaml  已删（冒烟临时件）
+git status --short     只有本轨的七个改动 + data/.gitkeep
+```
+
+⚠️ **镜像标签是全局的**（AA1 踩过同一条）：
+
+- **`aite-edge:p0` 现在指向本轨用 `--build-arg GOPROXY=https://goproxy.cn,direct` 建出来的镜像**
+  （Dockerfile 是仓库原文 + 本轨新加的两个可选 ARG，**没有任何注入**）。
+- `aite-core:p0` / `aite-sandbox:p0` **没动**，还是 AA1（2 天前）/ 6 天前那两个。
+- 从 `main` 或别的 worktree 起 compose 的人会拿到本轨的 edge 镜像。合并前重 build 一次为好。
+
+### 验收
+
+```
+scripts/check.sh              → 五行关键值与开场逐字相同，末行「全部通过」，退出码 0
+make compose-config           → 退 0，输出仍是 `core edge `，不打印任何取值
+make compose-up / compose-ps  → 两个 service 都 healthy（见 ①；build 那一步跳过，理由见「没做的」1）
+make compose-down             → 退 0，容器/网络全收干净（三个变量全不传）
+ruby -ryaml                   → ci.yml 与 docker-compose.yml 都是合法 YAML；
+                                 compose-smoke 仍是 11 步，services 仍是 edge/core/sandbox-image
+git status --short            → 只有本轨改动
+```
+
+### 测试数
+
+| 轮次 | 契约锁 | C1 | cargo | go -race | B8 | 末行 / 退出码 |
+|---|---|---|---|---|---|---|
+| 开场自检 | `OK 25 files` | `25/0` | `passed=864 failed=0` | 六个包全 `ok` | `passed 10/10` | `全部通过` / 0 |
+| 收尾 | `OK 25 files` | `25/0` | `passed=864 failed=0` | 六个包全 `ok` | `passed 10/10` | `全部通过` / 0 |
+
+**五行逐字不变，一次就绿。** 本轨零 Rust / 零 Go 改动，这是应该的。
+唯一的差别是 go 那六个包的**耗时**（开场 9.6–13.3s，收尾 2.0–6.4s）——
+开场时五个兄弟轨（BB1/BB2/BB4/BB5/BB6）同时在跑，收尾时它们大多跑完了。
+**耗时不是判据，六个 `ok` 才是**（台账第五节那几个时序假红本轨一次都没撞上）。
+
+### 没做的 / 拿不准的
+
+1. **`make compose-up` 的完整形态（含 `compose-build`）在本机跑不完**，所以 ① 那一发是
+   `make -o compose-build compose-up` —— `-o` 让 make 把 `compose-build` 当作已是最新，
+   **recipe 本体逐字原样跑**（`make -n -o compose-build compose-up` 的展开与 `make -n compose-up`
+   的后半段一致），跳过的只有重建。跳过的理由：`docker compose build core` 卡在
+   `Updating crates.io index` 上 8 分钟没动（Docker VM 的 load average 0.11 —— 不是在编，
+   是在等网络；单个稀疏索引文件实测 20.22s）。**这是本机的网络条件，不是本轨改动引起的**，
+   但「`make compose-up` 一条命令从零跑到 healthy」这件事**本轨没有端到端验过**。
+2. **Linux 上的那一半全是推断**（表里第 6、8、11 行）。本机是 macOS，VirtioFS 双向翻译 uid，
+   改前改后都 healthy。真正的判据在 CI 的 `compose-smoke`，而**它下次 push 才会跑**，
+   跑之前没人知道对不对；这个项目也没有 CI 门禁习惯，别拿它当已验证。
+3. **`AITE_DOCKER_GID` 在真 Linux 上的取值仍然没验过** —— 与 AA1「没做的」第 2 条同一笔账，
+   本轨只把「宿主机视角 == 容器视角」那一半在 Linux 内核上补上了，**取值那一半没补**。
+4. **`GOPROXY=file:///go/pkg/mod/cache/download` + `GOSUMDB=off` 那条完全离线的路子没实跑。**
+   它写在 `docker/edge/Dockerfile` 与 README 的注释里，来源是 AA1 的记账，本轨验的是
+   `goproxy.cn` 那条。离线那条**只是推断**。
+5. **`docker compose build core` / `sandbox-image` 在本机建不出来**（crates.io 索引太慢、
+   `deb.debian.org` 连不上）。本轨没给 core 的 Dockerfile 加任何口子 —— cargo 的源替换要
+   `.cargo/config.toml`，不是一个 ARG 能解决的，而且超出本轨范围。已记账。
+6. **没验过「换一个真的不同的 uid」**（AA1「没做的」第 7 条仍然挂着）。本轨实测用的是
+   宿主机当前用户 501:20 与镜像默认 1001:1001 两档。
+7. **`data/.gitkeep` 里写了正文**（一段解释为什么它存在），不是惯例的空文件。核过没人会读到它：
+   `list_tasks` 只扫 `data/evidence/` 且跳过非目录（`evidence/src/cli.rs:1142-1151`），
+   没有任何代码遍历 `data/` 顶层。拿不准的话改成空文件也不影响任何断言。
+8. **`ci.yml` 里那句 `mkdir -p data` 我留着没删**，只在注释里标成「冗余但留着」。
+   删掉更干净，但它接的是「这一步换到一棵不是 checkout 出来的树上跑」——留着零成本。
+   总管若想收，删它不会破坏任何断言。

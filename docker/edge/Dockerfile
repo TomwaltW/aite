@@ -10,6 +10,26 @@
 ARG GO_VERSION=1.27.1
 FROM golang:${GO_VERSION}-trixie AS builder
 
+# ---- 受限网络下怎么建（2026-09-15 BB3 加）------------------------------------
+# 下面两个 ARG **不传的话与加它们之前逐字等价**：取的就是 Go 自己的内置默认值
+# （`GOPROXY=https://proxy.golang.org,direct`、`GOSUMDB=sum.golang.org`）。
+# **CI 那条路一个字不变** —— runner 每次都是冷缓存，必须走真 proxy，那边才是这条依赖的门禁。
+#
+# 为什么要留这个口子：下面那句 `go install pkg@version` **一定会查一次 deprecation**
+# （`GET <proxy>/<module>/@v/list`），模块已经躺在 BuildKit 的 cache mount 里也照查不误。
+# 本机 2026-09-15 实测（AA1 两天前同样）：
+#   go: github.com/grpc-ecosystem/grpc-health-probe@v0.4.57: loading deprecation for ...:
+#   Get "https://proxy.golang.org/.../@v/list": dial tcp 142.250.77.209:443: i/o timeout
+# `docker compose build edge` 因此退 1。够得着别的 proxy 就能建出来：
+#   docker compose build --build-arg GOPROXY=https://goproxy.cn,direct edge
+# 完全不通网、但模块已经在 cache mount 里的机器，让缓存自己当 proxy：
+#   --build-arg GOPROXY=file:///go/pkg/mod/cache/download --build-arg GOSUMDB=off
+#
+# **别把这两条写死进 Dockerfile**：写死就等于把镜像钉在某一个地区的镜像站上，
+# 而且 CI 会悄悄不再验「真 proxy 上这个版本还在不在」这条依赖。
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+
 WORKDIR /src
 COPY edge ./edge
 

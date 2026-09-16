@@ -7,8 +7,14 @@ __pycache__/
 # grep 类自检）都会连各轨的代码一起扫。
 /.worktrees/
 
-# 运行期数据（StorageConfig 的默认落盘位置）
-/data/
+# 运行期数据（StorageConfig 的默认落盘位置）。
+# **目录本身入库、内容一律不入库**（2026-09-15 BB3）。写成 `/data/*` + 一条放行，
+# 不能写 `/data/`：git 的规则是「父目录被排除之后就不再下降进去」，那样下面那条
+# `!/data/.gitkeep` 放行不了（`git check-ignore -v data/.gitkeep` 会指到 `/data/` 这行）。
+# 为什么要让目录入库：两个容器以非 root 跑，`./data` 是 bind mount，checkout 里没有它的话
+# dockerd 会替你建成 root:root 0755，非 root 容器当场写不进去。见 Makefile 的 compose-up。
+/data/*
+!/data/.gitkeep
 
 # 本地实配（含真实取值；仓库里只留 config/aite.example.yaml）
 config/aite.yaml
@@ -19,5 +25,7 @@ config/aite.yaml
 # Rust / Go 构建产物（2026-09-11 重写起）
 /core/target/
 /edge/bin/
-# core ↔ edge 的 unix socket
+# core ↔ edge 的 unix socket。上面那条 `/data/*` 已经盖住它了（BB3 改法之后），
+# 这一行留着是为了把「socket 不入库」这个意图写在明处 —— 哪天有人把 `/data/*` 收窄，
+# 它还接得住。
 /data/run/

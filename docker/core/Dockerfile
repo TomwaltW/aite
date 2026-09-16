@@ -175,7 +175,9 @@ COPY evals /app/evals
 #   · 换 `AITE_UID` 之后必须 `docker compose down -v`。sticky 位只让属主删自己的文件，
 #     上一个 uid 留下的残留 socket 新 uid 删不掉 —— core 会报「已经有人在监听」或
 #     bind 失败，edge 会报清残留失败。是**响的**，但要知道该怎么收。
-#   · Linux 上 `./data` 必须**先存在且归当前用户**。它不入库（.gitignore:11），
+#   · Linux 上 `./data` 必须**先存在且归当前用户**。目录本身入库（data/.gitkeep）、
+#     内容不入库（.gitignore 的 `/data/*` + `!/data/.gitkeep`；2026-09-15 BB3 改，
+#     行号漂过一次，所以这里写措辞不写行号）；目录不在的话
 #     不先建的话 dockerd 会替你建成 root:root 0755，非 root 的容器当场写不进去。
 #     CI 在 up 之前 `mkdir -p data`；手起飞见 README 与 docs/acceptance-M.md §0.2.5。
 #   · macOS 上这两条都撞不到，也验不出来：VirtioFS 双向翻译 uid（实测容器里看见的是

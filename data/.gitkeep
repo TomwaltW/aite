@@ -1,0 +1,12 @@
+这个文件唯一的作用是让 `data/` 这个**目录**跟着 checkout 出来。
+
+两个容器以非 root 跑（2026-09-13 AA1 降权），而 `./data` 是 bind mount。目录不存在时
+dockerd 会在挂载那一刻替你建出来，属主是 **root:root 0755** —— 非 root 的容器当场写不进去，
+症状是 `aite 起不来：建不出目录 data/evidence：Permission denied`，配 restart: unless-stopped
+就是崩溃循环。有了这个文件，checkout 出来的 `data/` 就归当前用户，与 `user:` 的取值对得上。
+
+目录里除了它自己，**什么都不入库**（.gitignore 的 `/data/*` + `!/data/.gitkeep`）：
+aite.db、evidence/、artifacts/、run/ 全是运行期产物。
+
+它只管「checkout 之后」那一刻。已有的树上有人把 data/ 删掉的情况由 `make compose-up`
+里那句 `mkdir -p data` 接住 —— 两条覆盖的不是同一个时刻，所以都留着。

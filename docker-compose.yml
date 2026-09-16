@@ -80,6 +80,20 @@ services:
     #   AITE_DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
     # 传错的后果不是静默的：daemon 连不上 → Ping 失败 → EdgeStatus.sandbox_ok false
     # → `aite preflight` 第 6 组 FAIL 并点名沙箱不可用。
+    #
+    # **默认值为什么还是 0 —— 2026-09-15（BB3）把这个决定翻出来复审过一次，维持。**
+    # `make compose-up` 现在自己把这个值问出来了（真 socket 就 stat，符号链接就落回 0），
+    # 所以这个默认值只在「绕开 make、手敲 docker compose up」时才起作用 —— 而那一档里
+    # 唯一「默认值本来就正确」的平台正是 Docker Desktop。
+    # 改成空（`${AITE_DOCKER_GID:-}`）的后果实测过，不划算：`docker compose config -q`
+    # **照样退 0**（便宜的那道解析门禁根本接不住它，CI 那条 `config --services` 同理），
+    # 要到真起容器那一刻才死在
+    #   `Error response from daemon: unable to find group : no matching entries in group file`（退 125）
+    # —— 等于把一条「preflight 第 6 组 FAIL 并点名沙箱不可用」的**带诊断的**失败，换成一条
+    # 没诊断的 daemon 报错，还把 macOS 这个本来没病的平台一起拖下水。
+    # 代价如实写在这儿：**Linux 上不传这个变量时，edge 会多拿一个用不上的 root 补充组**
+    # （gid 0 只是补充组，不是 euid，但它确实让 edge 读得到 root 组可读的文件 ——
+    # 走 `make compose-up` 就没这回事）。
     group_add:
       - "${AITE_DOCKER_GID:-0}"
     # 默认两个 service 吃同一份 config/aite.yaml —— 那是真机验收（docs/acceptance-M.md）
@@ -93,15 +107,18 @@ services:
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_BOT_OPEN_ID: ${FEISHU_BOT_OPEN_ID:-}
     volumes:
-      # 真配置 config/aite.yaml 不入库（.gitignore:14），只能挂进来。
+      # 真配置 config/aite.yaml 不入库（.gitignore 的 `config/aite.yaml` 那条），只能挂进来。
       # 挂的是整个目录而不是那一个文件：文件不存在时 docker 会替你建一个**同名空目录**，
       # 那种错比「配置读不到」难查得多。
       - ./config:/app/config:ro
       # data/ 必须是 bind mount：SQLite 与证据链要在宿主机上看得到，
       # 否则 docs/acceptance-M.md §0.3 的第二个观察窗（evidence show）直接废掉。
-      # ⚠️ **Linux 上起飞前先 `mkdir -p data`。** 它不入库（.gitignore:11），不先建的话
-      #    dockerd 会替你建成 root:root 0755，而上面 `user:` 里那个非 root 身份写不进去
-      #    —— core 会死在建表那一步。先建出来它就归当前用户，与 `user:` 的取值对得上。
+      # ⚠️ **Linux 上起飞前先 `mkdir -p data`** —— 走 `make compose-up` 的话它自己做了
+      #    （2026-09-15 BB3），手敲 `docker compose up -d` 才要自己敲。
+      #    这个目录**本身**入库（data/.gitkeep），**内容**不入库（.gitignore 的 `/data/*`
+      #    + `!/data/.gitkeep` 两条；2026-09-15 之前是一条 `/data/`，行号也因此漂过一次，
+      #    所以这里不再写行号）。目录不在的话 dockerd 会替你建成 root:root 0755，
+      #    而上面 `user:` 里那个非 root 身份写不进去 —— core 会死在建表那一步。
       #    macOS 撞不到（VirtioFS 翻译 uid）。
       - ./data:/app/data
       # 两个 socket 都落在这里，两个 service 共享它（比 ./data 那层更深，所以盖住它）
