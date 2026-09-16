@@ -4,7 +4,7 @@
 //!
 //! | # | 组 | 判据 |
 //! |---|---|---|
-//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且它起得来**：`worker.system_prompt_path` 指到的文件真的在、`platform` / `model.provider` 的取值不需要注入、`storage.sqlite_path` 已有的那个文件真能当库打开（配置不存在退到样例，算 WARN；后三者是 FAIL） |
+//! | 1 | 配置可加载 | `config/aite.yaml` 读得出来，**且它起得来**：`worker.system_prompt_path` 指到的文件真的在、`platform` / `model.provider` 的取值不需要注入、`model` 段填得齐（`base_url` / `model` / 密钥环境变量）、`storage.sqlite_path` 已有的那个文件真能当库打开**而且写得进**（配置不存在退到样例，算 WARN；后四者是 FAIL） |
 //! | 2 | 环境变量齐 | config 里所有 `*_env` 点到的变量**在不在**（取值一个字都不打）。`platform: fake` 时 SKIP |
 //! | 3 | 飞书凭证有效 | 换得到 `tenant_access_token`。`platform: fake` 时 SKIP |
 //! | 4 | 飞书身份对得上 | `GET /open-apis/bot/v3/info` 的 `bot.open_id` == `FEISHU_BOT_OPEN_ID`。`platform: fake` 时 SKIP |
@@ -14,7 +14,7 @@
 //!
 //! **第 1 组为什么不只验「解析得出来」**：2026-09-12 与 2026-09-13 总管连着撞上**三次**
 //! 「preflight 说可以起飞、`aite run` 退出码 2」，病根是同一个 —— 配置解析成功 ≠ 它起得来，
-//! 而七组里**没有一组**去问后半句。所以第 1 组管四件事，而不是新开第 8 / 9 / 10 组
+//! 而七组里**没有一组**去问后半句。所以第 1 组管五件事，而不是新开第 8 / 9 / 10 组
 //! （`docs/dev-spec-2026-09-11-rustgo.md:308` 的「七组自检」是冻结面）：
 //!
 //! 1. **yaml 解析得出来**（原本就有的那件事）。
@@ -28,15 +28,32 @@
 //!    `build_app` 明文拒绝、退出码 2。判据见 [`injection_fault`]，与 `app.rs` 那两条
 //!    不等式同源。这一档下第 2/3/4 组一并 SKIP —— fake 平台压根不连飞书，那三组的
 //!    判据对它毫无意义（理由写在各自那一行里，见 [`FAKE_PLATFORM_SKIP`]）。
-//! 4. **`storage.sqlite_path` 上已经有的那个文件真能当库打开**：指着一个内容不是 SQLite
-//!    的文件时，起飞会死在建表那一步（`run.rs` 的 `store.init()`），退出码 2。第 7 组接不住
-//!    这一条 —— 它验的是「三个路径的最近已存在祖先**目录**写得进去」，不是「这个**文件**
-//!    是不是个库」，两件事。判据见 [`sqlite_fault`]，**纯读、文件不在就不探**。
+//! 4. **`model` 段填得齐**（2026-09-15 折进来的第四件）：`model.base_url` / `model.model`
+//!    两个字段和 `model.api_key_env` 点到的那个环境变量，少一样 `build_app` 第 5 步
+//!    （`build_model` → `OpenAiCompatModel::from_config`）就拒绝起飞，退出码 2。
+//!    **这三件本来就住在第 5 组里**，而第 5 组整个被 `--offline` 跳过 —— 于是三种
+//!    「`--offline` 全绿而 `aite run` 退出码 2」（实测在案，见 BB6 回执那张表）。
+//!    它们是**纯配置 / 纯环境变量，压根不需要联网**，所以这是分组分错了地方，不是离线判不了。
+//!    判据见 [`model_config_fault`]，与第 5 组共用 [`model_blanks`]，两边不会分家。
+//!    只在 `model.provider == openai_compat` 那一档问 —— 照抄 `build_model` 的短路顺序：
+//!    provider 不对时它在更早一步就拒绝了，那一条归上面第 3 件。
+//! 5. **`storage.sqlite_path` 上已经有的那个文件真能当库打开、而且写得进**：指着一个内容
+//!    不是 SQLite 的文件时，起飞会死在建表那一步（`run.rs` 的 `store.init()`），退出码 2；
+//!    **内容合法但文件只读**（`chmod 444`）时同一步照样死，报的是
+//!    `建表失败（…）：sqlite: attempt to write a readonly database`。第 7 组两条都接不住 ——
+//!    它验的是「三个路径的最近已存在祖先**目录**写得进去」，这里问的是「这个**文件**
+//!    是不是个库、我写不写得动它」，两件事。判据见 [`sqlite_fault`]，
+//!    **纯读探内容 + 纯开一个写句柄探权限，一个字节不写、文件不在就不探**。
 //!
-//! 四件事**一次报齐**（口径照第 5 组「缺什么一次报齐」），不是撞上第一条就早退。
+//! 五件事**一次报齐**（口径照第 5 组「缺什么一次报齐」），不是撞上第一条就早退。
 //! 它们都不碰网络也不碰 docker，所以 `--offline` 下照样跑 —— 这正是要紧的地方：
-//! 上面三种「全绿而起不来」在 `--offline` 下也全绿，第 5/6 组那种「被 offline 跳过」
+//! 上面那几种「全绿而起不来」在 `--offline` 下也全绿，第 5/6 组那种「被 offline 跳过」
 //! 的口子救不了它们。
+//!
+//! **`--offline` 的「全绿」到此承诺什么**：这七组里凡是不联网就判得出来的，`--offline`
+//! 都判过了 —— 剩下的口子只有「真的要联网 / 要 docker 才知道」那几种（端点连不连得上、
+//! 飞书凭证对不对、两边契约版本一致不一致、沙箱起不起得来），外加 `config/aite.yaml`
+//! 不存在退到样例的那一档（见下面 `fell_back`）。边界那张表在 BB6 回执里。
 //!
 //! **红线：任何输出都不得出现密钥取值。** 第一道是代码里根本不去打它们；第二道是
 //! [`Redactor`] —— 所有 detail / fix / extra 在渲染前都过一遍，把已知的取值抹掉。
@@ -443,7 +460,83 @@ fn injection_fault(cfg: &AiteConfig) -> Option<(String, String)> {
     ))
 }
 
-/// 第 ① 组的第四件事：`storage.sqlite_path` 上**已经有的**那个文件真能当库用。
+/// `model` 段里「少填了什么」——**第 ① 组第四件事与第 5 组共用的那半张嘴**。
+///
+/// 返回 `(缺的东西, 各自怎么补)`，两个 `Vec` 一一对应、都按 base_url → model → 密钥的顺序。
+/// 判据逐字照 [`OpenAiCompatModel::from_config`]（`base_url` / `model` 两个 trim 后非空 +
+/// [`resolve_api_key`] 拿得到非空取值）—— `build_model` 走的就是它，所以这三条**就是**
+/// 起飞路径上那一步的拒绝条件本身。
+///
+/// **为什么抽出来**：这三件同时是第 ① 组的判据（「这份配置起不起得来」，`--offline` 下照跑）
+/// 和第 5 组的前置（「端点通不通」，得先有 base_url 才谈得上去连）。两处各写一遍的话，
+/// 契约哪天给 `ModelConfig` 加第四个必填项，只会有一边跟上 —— 而漏的那边不会有任何测试红。
+/// `the_first_row_and_the_fifth_speak_with_one_mouth` 拿同一份配置把两边的措辞钉在一起。
+fn model_blanks(mcfg: &ModelConfig, env: &HashMap<String, String>) -> (Vec<String>, Vec<String>) {
+    let mut blanks: Vec<String> = Vec::new();
+    let mut fixes: Vec<String> = Vec::new();
+    if mcfg.base_url.trim().is_empty() {
+        blanks.push("model.base_url".to_string());
+        fixes.push("model.base_url 填百炼 / 智谱的 OpenAI 兼容端点".to_string());
+    }
+    if mcfg.model.trim().is_empty() {
+        blanks.push("model.model".to_string());
+        fixes.push("model.model 填模型名".to_string());
+    }
+    if resolve_api_key(mcfg, env).unwrap_or_default().is_empty() {
+        blanks.push(format!("环境变量 {}", mcfg.api_key_env));
+        fixes.push(format!(
+            "export {}=<模型厂商控制台里的 API Key>（只放环境变量）",
+            mcfg.api_key_env
+        ));
+    }
+    (blanks, fixes)
+}
+
+/// 第 ① 组的第四件事：`model` 段填得齐 —— **本来住在第 5 组，被 `--offline` 连窝端掉**。
+///
+/// 返回 `(那一行说什么, 怎么补)`；填得齐（或者压根轮不到它）时返回 `None`。
+///
+/// **病史（2026-09-15，同一族的第四、五、六次）**：`model.base_url` 空 / `model.model` 空 /
+/// `AITE_MODEL_API_KEY` 没 export，三种配置下 `preflight --offline` 都是
+/// 「汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4 / 全部没红，可以起飞。」退出码 0，
+/// 紧接着 `aite run` 退出码 2（`模型配置不完整：ModelConfig.base_url 是空的` 等三句）。
+/// 前两条 X1 / Y2 两轮都记过「归第 5 组，被 `--offline` 跳过」并当成既有边界留着；
+/// 第三条谁都没记过（第 2 组在 `--offline` 下把缺变量降成 WARN，于是它连个红都没有）。
+///
+/// **这不是「离线判不了」，是分组分错了地方。** 这三件一个字节的网络流量都不需要：
+/// 两个是 yaml 里的字段，一个是环境变量在不在。「端点通不通」才要联网，那半留在第 5 组。
+///
+/// **只在 `provider == openai_compat` 那一档问**，照抄 `build_model` 的短路顺序：provider
+/// 不是它时 `build_model` 在更早一步就拒绝了（那一条归 [`injection_fault`]），根本走不到
+/// `from_config`，此时 `base_url` 填没填**确实不影响起飞**。代价是 `provider: scripted`
+/// 外加 base_url 空的配置要分两轮才报齐 —— 与 `platform: fake` 下第 2 组整组 SKIP 同一种
+/// 取舍（Y2 记过），推迟一轮、不会静默放行。
+///
+/// **和第 5 组的重叠是刻意留的，不是忘了删。** 第 ① 组问「这份配置起不起得来」（`--offline`
+/// 下照跑），第 5 组问「端点通不通」（要联网）；全跑那一档两行会同时红，说的是同一件事的
+/// 两面。更要紧的是第 5 组还是**兜底**：下面 `fell_back`（`config/aite.yaml` 不存在、退到样例）
+/// 那一档第 ① 组按下不表，那时候唯一还会报这三件的就是第 5 组。所以 `check_model` 一个字没动。
+fn model_config_fault(cfg: &AiteConfig, env: &HashMap<String, String>) -> Option<(String, String)> {
+    if cfg.model.provider != ModelProvider::OpenaiCompat {
+        return None;
+    }
+    let (blanks, fixes) = model_blanks(&cfg.model, env);
+    if blanks.is_empty() {
+        return None;
+    }
+    Some((
+        format!(
+            "model 段填不全，缺：{} —— aite run 装模型那一步会被拒（退出码 2）",
+            blanks.join(" / ")
+        ),
+        format!(
+            "{}；这几件第 5 组也查，但 --offline 把整个第 5 组跳过了 —— 它们不联网也判得出来，所以第 1 组先问一遍",
+            fixes.join("、")
+        ),
+    ))
+}
+
+/// 第 ① 组的第五件事：`storage.sqlite_path` 上**已经有的**那个文件真能当库用。
 ///
 /// 返回 `(那一行说什么, 怎么补)`；没毛病（或者压根没得探）时返回 `None`。
 ///
@@ -460,6 +553,20 @@ fn injection_fault(cfg: &AiteConfig) -> Option<(String, String)> {
 /// 才报 `SQLITE_NOTADB`。所以判据是**开一次库 + 逼它读一次文件头**，而不是只 open 一下
 /// （只 open 的话这条判据恒真，等于没加）。
 ///
+/// **探不出来的那一半，2026-09-15 补掉了（BB6）**：文件是个好库、但它自己只读
+/// （`chmod 444`、或者所在卷只读）时，`init()` 的 `CREATE TABLE` 照样炸 ——
+/// `建表失败（…）：sqlite: attempt to write a readonly database`，实测在案。
+/// Z1 当时记的是「要覆盖它得真往库里写一次，那就把第 ① 组从纯读变成有副作用，不划算」——
+/// **那个前提不成立**：不用写。`OpenOptions::write(true).open()` 只是向内核要一个写句柄，
+/// 没有 `O_CREAT` 也没有 `O_TRUNC`，一个字节不落、连 mtime 都不动，而它问出来的正是
+/// `CREATE TABLE` 要的那件事（权限位 / ACL / 只读挂载 / immutable 一次答齐，
+/// 比 `access(2)` 诚实 —— 口径与第 7 组 [`writable_dir`] 那段理由同源）。
+/// 拿到就立刻丢掉，`drop` 即 `close`。
+///
+/// **和第 7 组仍然是两件事，没有重叠**：那一组问「三个路径的最近已存在**祖先目录**写不写得
+/// 进去」（`CREATE TABLE` 还要在父目录里建 journal，归它管，`chmod 500` 父目录那一种它接得住）；
+/// 这里问「`sqlite_path` 上那个**文件本身**我写不写得动」。父目录可写而文件 444 时只有这一条看得见。
+///
 /// **零副作用是硬要求**（第 ① 组是「配置可加载」，把文件建出来不该是它的事；X1 那条
 /// prompt 判据是纯读）：
 ///
@@ -468,12 +575,11 @@ fn injection_fault(cfg: &AiteConfig) -> Option<(String, String)> {
 ///   `SqliteSessionStore::open`（它会 `create_dir_all` 父目录、并新建库文件）**永远建不出
 ///   任何东西来**：走到它跟前时，文件和父目录都已经在了。
 /// * `:memory:` 直接放过（[`IN_MEMORY_SQLITE`]，store 认这个取值）。
-/// * 探针本身只读：`PRAGMA schema_version` 一个字节都不写，跑完就 `close()`。
+/// * 内容探针只读：`PRAGMA schema_version` 一个字节都不写，跑完就 `close()`。
+/// * 权限探针也只读：要一个写句柄、不写、立刻丢掉（见上）。
 ///
-/// **探不出来的那一半，如实记在这儿**：文件是个好库、但它自己只读（或者所在卷只读）时，
-/// `init()` 的 `CREATE TABLE` 照样会炸，这条判据看不见 —— 它只读，读得动就算过。
-/// 第 7 组也接不住：那一组问的是**目录**写不写得进去。要覆盖它得真往库里写一次，
-/// 那就把第 ① 组从纯读变成有副作用，不划算。
+/// **两条探针的顺序是「先内容后权限」**：内容不对时「写不写得动」这句话没有意义，
+/// 报一条更要紧的就够了（一个字段一条毛病，别让一行结论同时说两种病）。
 async fn sqlite_fault(cfg: &AiteConfig, repo_root: &Path) -> Option<(String, String)> {
     let raw = cfg.storage.sqlite_path.clone();
     if raw == IN_MEMORY_SQLITE {
@@ -494,7 +600,8 @@ async fn sqlite_fault(cfg: &AiteConfig, repo_root: &Path) -> Option<(String, Str
             // 探完就还回去：preflight 后面几组不该带着一条打开的连接跑。
             let _ = store.close().await;
             match verdict {
-                Ok(_) => return None,
+                // 内容是个好库 —— 再问一句「我写不写得动它」，`CREATE TABLE` 要的是这个。
+                Ok(_) => return readonly_fault(&raw, &abs),
                 Err(e) => e.to_string(),
             }
         }
@@ -512,6 +619,35 @@ async fn sqlite_fault(cfg: &AiteConfig, repo_root: &Path) -> Option<(String, Str
              （{EXAMPLE_CONFIG_PATH} 里是 {DEFAULT_SQLITE_PATH}）；\
              当前那个文件读得到但不是库，`aite run` 会走到建表那一步才炸 —— \
              退出码 2、`aite 起不来：建表失败（…）`，preflight 这边不拦的话你要到那时才知道",
+            abs.display()
+        ),
+    ))
+}
+
+/// 「这个库文件我写不写得动」——[`sqlite_fault`] 的后半句，写得动就返回 `None`。
+///
+/// 只要一个写句柄，不写、不建、不截断，拿到就 `drop`。理由与那一侧的分工写在
+/// [`sqlite_fault`] 的文档注释里；这里只记一条容易被当 bug「修掉」的事实：
+/// **以 root 跑时这一探针会放行一个 444 的文件**，那不是漏判 —— root 下
+/// `CREATE TABLE` 本来也写得进去，两边说的是同一件事。
+fn readonly_fault(raw: &str, abs: &Path) -> Option<(String, String)> {
+    let why = match std::fs::OpenOptions::new().write(true).open(abs) {
+        Ok(_) => return None,
+        Err(e) => e.to_string(),
+    };
+    Some((
+        format!(
+            "storage.sqlite_path 指着的库文件写不进去：{raw} → {}（{}）",
+            abs.display(),
+            tail(&why, 160)
+        ),
+        format!(
+            "给 {} 加写权限（`chmod u+w`；所在卷是只读挂载的话得换个位置），\
+             或者把配置里的 storage.sqlite_path 指到一个写得动的库\
+             （{EXAMPLE_CONFIG_PATH} 里是 {DEFAULT_SQLITE_PATH}）；\
+             当前那个文件是个好库、读得动，但 `aite run` 建表时要往里写 —— \
+             退出码 2、`aite 起不来：建表失败（…）：sqlite: attempt to write a readonly database`。\
+             第 7 组查的是目录写不写得进去，接不住这一条",
             abs.display()
         ),
     ))
@@ -581,11 +717,18 @@ fn arm_redactor(
 // 1 配置可加载
 // --------------------------------------------------------------------------
 
-/// `async` 只为了第四件事（[`sqlite_fault`] 要 `await` 一次库探针）—— 前三件都是纯函数。
+/// `async` 只为了第五件事（[`sqlite_fault`] 要 `await` 一次库探针）—— 前四件都是纯函数。
+///
+/// 吃 `env` 是第四件事（[`model_config_fault`]）要的：`model.api_key_env` 点到的那个变量
+/// 在不在，是 `build_model` 的拒绝条件之一。传的是**同一份快照**（`run_checks` 从
+/// `env_snapshot()` 拿的那个），不是现读进程环境 —— 与第 2/3/4/5 组同源，不会出现
+/// 「第 1 组说没有、第 2 组说有」。**取值一个字都不会进这一组的输出**（[`model_blanks`]
+/// 只报变量名），红线照旧。
 async fn check_config(
     path: &Path,
     fell_back: bool,
     repo_root: &Path,
+    env: &HashMap<String, String>,
 ) -> (CheckResult, Option<AiteConfig>) {
     let cfg = match load_config(path) {
         Ok(c) => c,
@@ -609,12 +752,16 @@ async fn check_config(
     extra.insert("sandbox_image".into(), json!(cfg.sandbox.image));
     extra.insert("config_path".into(), json!(path.display().to_string()));
 
-    // 配置解析成功 ≠ 它起得来。下面三件事都是**硬起飞前提**（起飞路径上拒绝起飞的原文
-    // 就是它们：前两件在 `build_app`，第三件在 `run.rs` 的 `store.init()`），所以都是 FAIL
-    // 不是 WARN —— 见模块头「第 1 组为什么不只验解析」。
+    // 配置解析成功 ≠ 它起得来。下面四件事都是**硬起飞前提**（起飞路径上拒绝起飞的原文
+    // 就是它们：前三件在 `build_app` 的第 2/3/5 步，第四件在 `run.rs` 的 `store.init()`），
+    // 所以都是 FAIL 不是 WARN —— 见模块头「第 1 组为什么不只验解析」。
+    //
+    // **排的顺序照 `build_app` 真正走的那一条路**（prompt → 注入 → 模型 → SQLite）：
+    // 一行里并列几条毛病时，读者从左到右看到的就是起飞会依次撞上的顺序。
+    // 第 5 步（模型）在第 6 步（SQLite）前面这件事 Y2 隔离病灶时被绊过一次，写在这儿留个记号。
     //
     // **一次报齐，不是撞上第一条就早退**：口径照第 5 组那句「缺什么一次报齐，别让人补完
-    // base_url 重跑一遍才发现还缺 key」。三条都犯了的配置，一轮就能全改完。
+    // base_url 重跑一遍才发现还缺 key」。四条都犯了的配置，一轮就能全改完。
     // 只命中一条时这一行与「只验 prompt」那天**逐字相同**（涟漪最小）。
     let mut faults: Vec<String> = Vec::new();
     let mut fixes: Vec<String> = Vec::new();
@@ -663,7 +810,34 @@ async fn check_config(
         }
     }
 
-    // 其三：`storage.sqlite_path` 上已经有的那个文件真能当库打开（`run.rs` 的
+    // 其三：`model` 段填得齐（`build_app` 第 5 步 `build_model` 那三条拒绝条件）。
+    // 见 [`model_config_fault`]。
+    //
+    // **`fell_back` 那一档按下不表**：`config/aite.yaml` 不存在、退到样例时，preflight 看的
+    // 根本不是你要起飞的那份配置（`aite run` 压根不退样例，`load_config` 当场报
+    // 「配置文件不存在」退出码 2）。样例里 `base_url` / `model` 天生是空的 —— 那是模板，
+    // 不是毛病，CI 的 `preflight --offline` 门禁跑的正是这一档。下面那条 WARN 会把这两个
+    // 字段点名说清（「cp 一份并填上 model.base_url / model.model」），不是静默放过；
+    // 真要体检样例本身，`--config config/aite.example.yaml` 显式指过去就会照常 FAIL。
+    // 这一档还有第 5 组兜着（全跑时它照样 FAIL）—— 那正是 `check_model` 不动的理由之一。
+    if fell_back {
+        extra.insert("model_config_ok".into(), json!(true));
+        extra.insert("model_config_checked".into(), json!(false));
+    } else {
+        extra.insert("model_config_checked".into(), json!(true));
+        match model_config_fault(&cfg, env) {
+            Some((why, fix)) => {
+                extra.insert("model_config_ok".into(), json!(false));
+                faults.push(why);
+                fixes.push(fix);
+            }
+            None => {
+                extra.insert("model_config_ok".into(), json!(true));
+            }
+        }
+    }
+
+    // 其四：`storage.sqlite_path` 上已经有的那个文件真能当库打开、而且写得进（`run.rs` 的
     // `store.init()` 建表那一步）。见 [`sqlite_fault`]。
     let sqlite_abs = resolve_under(repo_root, &cfg.storage.sqlite_path);
     extra.insert(
@@ -1200,31 +1374,13 @@ async fn check_model(
     }
 
     // 缺什么一次报齐，别让人补完 base_url 重跑一遍才发现还缺 key。
-    let mut blanks: Vec<String> = Vec::new();
-    if mcfg.base_url.trim().is_empty() {
-        blanks.push("model.base_url".to_string());
-    }
-    if mcfg.model.trim().is_empty() {
-        blanks.push("model.model".to_string());
-    }
-    let api_key = resolve_api_key(mcfg, env).unwrap_or_default();
-    if api_key.is_empty() {
-        blanks.push(format!("环境变量 {}", mcfg.api_key_env));
-    }
+    //
+    // **判据一个字没变，只是搬进了 [`model_blanks`]** —— 第 ① 组 2026-09-15 起也问同样这三件
+    // （它不联网，所以 `--offline` 下也问得出来），两边共用一份就不会分家。
+    // 这一组仍然是 FAIL 而不是「第 1 组已经报了、这里降级」：`fell_back` 那一档第 ① 组按下
+    // 不表，那时候唯一还会报这三件的就是这里。详见 [`model_config_fault`] 末段。
+    let (blanks, fixes) = model_blanks(mcfg, env);
     if !blanks.is_empty() {
-        let mut fixes: Vec<String> = Vec::new();
-        if mcfg.base_url.trim().is_empty() {
-            fixes.push("model.base_url 填百炼 / 智谱的 OpenAI 兼容端点".to_string());
-        }
-        if mcfg.model.trim().is_empty() {
-            fixes.push("model.model 填模型名".to_string());
-        }
-        if api_key.is_empty() {
-            fixes.push(format!(
-                "export {}=<模型厂商控制台里的 API Key>（只放环境变量）",
-                mcfg.api_key_env
-            ));
-        }
         let mut extra = Map::new();
         extra.insert("missing".into(), json!(blanks));
         return fail(
@@ -1235,6 +1391,7 @@ async fn check_model(
         .with_fix(fixes.join("；"))
         .with_extra(extra);
     }
+    let api_key = resolve_api_key(mcfg, env).unwrap_or_default();
     redactor.add(&api_key, &mcfg.api_key_env);
 
     let model = match OpenAiCompatModel::from_config(mcfg, env) {
@@ -1746,7 +1903,7 @@ pub async fn run_checks(
     arm_redactor(redactor, &env_var_names(&AiteConfig::default()), env);
 
     let mut notes: Vec<Note> = Vec::new();
-    let (cfg_result, cfg) = check_config(&config_path, fell_back, &opts.repo_root).await;
+    let (cfg_result, cfg) = check_config(&config_path, fell_back, &opts.repo_root, env).await;
     let mut checks = vec![cfg_result];
 
     let Some(cfg) = cfg else {
@@ -2075,6 +2232,24 @@ mod tests {
     const FAKE_APP_SECRET: &str = "unit-fake-app-secret";
     const FAKE_OPEN_ID: &str = "ou_unit_fake_open_id";
     const PLACEHOLDER: &str = "的取值已隐去";
+
+    /// 一份填得齐的 `model` 段（yaml 片段）。
+    ///
+    /// 第 ① 组第四件事要 `base_url` / `model` 都非空，而契约默认值是**空串** ——
+    /// 不写这两行的话每条用例都会多红一条，而那不是被测行为，是脚手架没跟上
+    /// （与 X1 那天给 `write_prompt` 立的理由同一条）。
+    const MODEL_FILLED: &str = "model:\n  base_url: http://127.0.0.1:1/v1\n  model: fake-model\n";
+
+    /// [`check_config`] 那个 `env` 入参的默认给法：只放模型密钥。
+    ///
+    /// 名字从契约默认值来，不写字面量 —— 契约哪天改了 `api_key_env` 的默认名，
+    /// 这里自动跟上，不会变成一条「密钥永远缺」的恒红脚手架。
+    fn unit_env() -> HashMap<String, String> {
+        HashMap::from([(
+            AiteConfig::default().model.api_key_env,
+            FAKE_KEY.to_string(),
+        )])
+    }
 
     // ---- 脱敏：纯函数 ------------------------------------------------------
 
@@ -2474,7 +2649,7 @@ mod tests {
         let bad = root.path().join("bad.yaml");
         std::fs::write(&bad, "platform: 不存在的平台\n").expect("write");
 
-        let (r, cfg) = check_config(&bad, false, root.path()).await;
+        let (r, cfg) = check_config(&bad, false, root.path(), &unit_env()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_none(), "读不出来就不该交出 config");
@@ -2529,11 +2704,13 @@ mod tests {
         let path = root.path().join("aite.yaml");
         std::fs::write(
             &path,
-            "worker:\n  system_prompt_path: aite/worker/prompts/platform.md\n",
+            format!(
+                "{MODEL_FILLED}worker:\n  system_prompt_path: aite/worker/prompts/platform.md\n"
+            ),
         )
         .expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path()).await;
+        let (r, cfg) = check_config(&path, false, root.path(), &unit_env()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
@@ -2565,13 +2742,13 @@ mod tests {
         let path = sub.join("aite.yaml");
         std::fs::write(
             &path,
-            "worker:\n  system_prompt_path: prompts/platform.md\n",
+            format!("{MODEL_FILLED}worker:\n  system_prompt_path: prompts/platform.md\n"),
         )
         .expect("write");
         std::fs::create_dir_all(root.path().join("prompts")).expect("mkdir");
         std::fs::write(root.path().join("prompts/platform.md"), "# 假 prompt\n").expect("write");
 
-        let (r, _cfg) = check_config(&path, false, root.path()).await;
+        let (r, _cfg) = check_config(&path, false, root.path(), &unit_env()).await;
 
         assert_eq!(r.status, Status::Ok, "{} / {}", r.detail, r.fix);
         assert_eq!(
@@ -2684,13 +2861,13 @@ mod tests {
     async fn check_config_fails_but_still_hands_over_the_config_when_the_platform_is_fake() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("aite.yaml");
-        std::fs::write(&path, "platform: fake\n").expect("write");
-        // prompt 那条判据别来插一脚：把契约默认那个路径真建出来。
+        // model 段填齐、prompt 真建出来：另外两条判据都别来插一脚，这条只问注入。
+        std::fs::write(&path, format!("platform: fake\n{MODEL_FILLED}")).expect("write");
         let prompt = root.path().join(DEFAULT_SYSTEM_PROMPT_PATH);
         std::fs::create_dir_all(prompt.parent().expect("有父目录")).expect("mkdir");
         std::fs::write(&prompt, "# 假 prompt\n").expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path()).await;
+        let (r, cfg) = check_config(&path, false, root.path(), &unit_env()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
@@ -2716,7 +2893,7 @@ mod tests {
         )
         .expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path()).await;
+        let (r, cfg) = check_config(&path, false, root.path(), &unit_env()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some());
@@ -2825,7 +3002,7 @@ mod tests {
         )
         .expect("write");
 
-        let (r, cfg) = check_config(&path, false, root.path()).await;
+        let (r, cfg) = check_config(&path, false, root.path(), &unit_env()).await;
 
         assert_eq!(r.status, Status::Fail, "{}", r.detail);
         assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
@@ -2853,6 +3030,235 @@ mod tests {
         }
         assert_eq!(r.extra["sqlite_ok"], json!(false));
         assert_eq!(r.extra["sqlite_probed"], json!(true));
+        // 这份配置的 `base_url` / `model` 也是空的，但 `provider: scripted` 那一档
+        // `build_model` 在更早一步就拒绝了 —— **第四件事不许在这儿插一脚**，报一条
+        // 此刻不成立的毛病只会把人往错方向带。反向断言，配 `model_config_fault` 的 provider 闸。
+        assert!(!r.detail.contains("model 段填不全"), "{}", r.detail);
+        assert_eq!(r.extra["model_config_ok"], json!(true));
+    }
+
+    // ---- 第 ① 组的第四件事：model 段填得齐（BB6，2026-09-15） ----------------
+
+    /// 填得齐的 `model` 段不许误伤 —— 三样都在就是 `None`。
+    ///
+    /// 恒真断言的反面：下面那条报三件，这条钉「不该报的时候一个字都不报」。
+    #[test]
+    fn model_config_fault_lets_a_filled_in_config_through() {
+        let mut cfg = AiteConfig::default();
+        cfg.model.base_url = "http://127.0.0.1:1/v1".to_string();
+        cfg.model.model = "fake-model".to_string();
+
+        assert!(model_config_fault(&cfg, &unit_env()).is_none());
+    }
+
+    /// 三件全缺时**一次报齐**，而且「怎么补」也是三件 —— 口径照第 5 组那句原话。
+    ///
+    /// 变量名要露面、取值一个字都不许（这一条也是红线的一环：`unit_env()` 里放的是
+    /// [`FAKE_KEY`]，它不能出现在任何一句里）。
+    #[test]
+    fn model_config_fault_reports_all_three_blanks_in_one_go() {
+        let cfg = AiteConfig::default(); // base_url / model 都是空串
+        let (why, fix) = model_config_fault(&cfg, &HashMap::new()).expect("三件全缺该报");
+
+        for keyword in ["model.base_url", "model.model", &cfg.model.api_key_env] {
+            assert!(why.contains(keyword), "没报齐，缺 {keyword}：{why}");
+            assert!(fix.contains(keyword), "「怎么补」缺 {keyword}：{fix}");
+        }
+        assert!(why.contains("退出码 2"), "少了不补的后果：{why}");
+    }
+
+    /// **只在 `provider == openai_compat` 那一档问** —— 照抄 `build_model` 的短路顺序。
+    ///
+    /// provider 不对时 `build_model` 在更早一步就拒绝了（那一条归 [`injection_fault`]），
+    /// 根本走不到 `from_config`，此时 `base_url` 填没填确实不影响起飞。
+    /// 谁哪天把这道闸拿掉，`check_config_reports_all_four_faults_in_one_go` 那份
+    /// `provider: scripted` 的配置会多报一条不成立的毛病。
+    #[test]
+    fn model_config_fault_only_asks_when_the_provider_is_openai_compat() {
+        let mut cfg = AiteConfig::default(); // base_url / model 空，密钥也不给
+        cfg.model.provider = ModelProvider::Scripted;
+
+        assert!(model_config_fault(&cfg, &HashMap::new()).is_none());
+    }
+
+    /// **第 ① 组和第 5 组用的是同一张嘴**（[`model_blanks`]）—— 两边措辞不许分家。
+    ///
+    /// 这两组问的是不同的事（「起不起得来」vs「端点通不通」），但「少填了什么」这半句
+    /// 必须逐字一致：各写一遍的话，契约哪天给 `ModelConfig` 加第四个必填项，只会有一边
+    /// 跟上，而漏的那边不会有任何测试红。
+    #[tokio::test]
+    async fn the_first_row_and_the_fifth_speak_with_one_mouth() {
+        let cfg = AiteConfig::default(); // 三件全缺
+        let env = HashMap::new();
+
+        let (why, _fix) = model_config_fault(&cfg, &env).expect("第 ① 组该报");
+        let fifth = check_model(&cfg, &env, &mut Redactor::new()).await;
+
+        assert_eq!(fifth.status, Status::Fail, "{}", fifth.detail);
+        for keyword in ["model.base_url", "model.model", &cfg.model.api_key_env] {
+            assert!(why.contains(keyword), "第 ① 组少说了 {keyword}：{why}");
+            assert!(
+                fifth.detail.contains(keyword),
+                "第 5 组少说了 {keyword}：{}",
+                fifth.detail
+            );
+        }
+    }
+
+    /// `fell_back`（`config/aite.yaml` 不存在、退到样例）那一档**按下不表**。
+    ///
+    /// 样例里 `base_url` / `model` 天生是空的 —— 那是模板不是毛病，而且 preflight 这时候
+    /// 看的根本不是你要起飞的那份配置（`aite run` 不退样例，`load_config` 当场报
+    /// 「配置文件不存在」）。下面那条 WARN 会把这两个字段点名说清，不是静默放过；
+    /// CI 的 `preflight --offline` 门禁跑的正是这一档。
+    ///
+    /// 显式 `--config` 指到同一份样例（`fell_back=false`）时照常 FAIL —— 后半段钉的就是
+    /// 「按下不表」只对退样例那一档成立，不是把判据整个关掉。
+    #[tokio::test]
+    async fn check_config_keeps_quiet_about_the_model_section_when_it_fell_back_to_the_example() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("aite.example.yaml");
+        std::fs::write(&path, "platform: feishu\n").expect("write");
+        let prompt = root.path().join(DEFAULT_SYSTEM_PROMPT_PATH);
+        std::fs::create_dir_all(prompt.parent().expect("有父目录")).expect("mkdir");
+        std::fs::write(&prompt, "# 假 prompt\n").expect("write");
+
+        let (fell, _) = check_config(&path, true, root.path(), &unit_env()).await;
+
+        assert_eq!(fell.status, Status::Warn, "{} / {}", fell.detail, fell.fix);
+        assert_eq!(fell.extra["model_config_checked"], json!(false));
+        assert!(
+            fell.fix.contains("model.base_url"),
+            "退样例那条 WARN 得自己把这两个字段说清：{}",
+            fell.fix
+        );
+
+        let (explicit, _) = check_config(&path, false, root.path(), &unit_env()).await;
+
+        assert_eq!(explicit.status, Status::Fail, "{}", explicit.detail);
+        assert!(
+            explicit.detail.contains("model.base_url"),
+            "{}",
+            explicit.detail
+        );
+        assert_eq!(explicit.extra["model_config_checked"], json!(true));
+    }
+
+    /// 第四件事加进来之后仍然**一次报齐**，不是撞上第一条就早退。
+    ///
+    /// [`check_config_reports_all_four_faults_in_one_go`] 走的是 `provider: scripted` 那一档，
+    /// 第四件正好被短路掉；这一条补上 `openai_compat` 那一档，三件（prompt / model 段 /
+    /// sqlite）同时命中，钉的是第四件确实进了收集队列而不是自己 return。
+    #[tokio::test]
+    async fn check_config_reports_the_model_section_alongside_the_others() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("aite.db"),
+            "definitely not a sqlite database",
+        )
+        .expect("写坏库");
+        let path = root.path().join("aite.yaml");
+        std::fs::write(
+            &path,
+            "platform: feishu\nmodel:\n  provider: openai_compat\nworker:\n  \
+             system_prompt_path: aite/worker/prompts/platform.md\nstorage:\n  \
+             sqlite_path: aite.db\n",
+        )
+        .expect("write");
+
+        let (r, cfg) = check_config(&path, false, root.path(), &HashMap::new()).await;
+
+        assert_eq!(r.status, Status::Fail, "{}", r.detail);
+        assert!(cfg.is_some(), "配置本身是好的，后面六组还要用它");
+        for keyword in [
+            "worker.system_prompt_path",
+            "model.base_url",
+            "model.model",
+            "storage.sqlite_path",
+        ] {
+            assert!(
+                r.detail.contains(keyword),
+                "三件事没报齐，缺 {keyword}：{}",
+                r.detail
+            );
+        }
+        assert_eq!(r.extra["model_config_ok"], json!(false));
+        assert_eq!(r.extra["sqlite_ok"], json!(false));
+        assert_eq!(r.extra["system_prompt_ok"], json!(false));
+    }
+
+    // ---- 第 ① 组第五件事的后半句：库文件写不写得动（BB6，2026-09-15） --------
+
+    /// 好库但**只读**：报 FAIL，而且探针一个字节都不许写。
+    ///
+    /// Z1 当年记的是「要覆盖它得真往库里写一次，不划算」——**那个前提不成立**：
+    /// `OpenOptions::write(true).open()` 只是向内核要一个写句柄，没有 `O_CREAT` 也没有
+    /// `O_TRUNC`，长度 / mtime / 内容一律不动。这条把「不动」钉死：三样跑完都得和跑前一样。
+    ///
+    /// **以 root 跑这一条会红** —— 那不是 bug：root 下 `CREATE TABLE` 本来也写得进去，
+    /// 判据和起飞路径说的仍是同一件事。CI 的 core 容器是降权用户（compose 那边 V6 改的）。
+    #[test]
+    fn the_readonly_probe_never_writes_anything() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+
+        // 1) 写得动的普通文件：放行。
+        let ok_db = root.path().join("ok.db");
+        std::fs::write(&ok_db, b"whatever").expect("建文件");
+        assert!(readonly_fault("ok.db", &ok_db).is_none());
+
+        // 2) chmod 444：报 FAIL，「怎么补」三件齐（当前值 / 怎么改 / 不补的后果）。
+        let ro = root.path().join("ro.db");
+        std::fs::write(&ro, b"whatever").expect("建文件");
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).expect("改只读");
+        let before = std::fs::metadata(&ro).expect("元数据");
+
+        let (why, fix) = readonly_fault("ro.db", &ro).expect("只读该报");
+
+        assert!(why.contains("storage.sqlite_path"), "{why}");
+        assert!(fix.contains(&ro.display().to_string()), "少了当前值：{fix}");
+        assert!(fix.contains("chmod u+w"), "少了「怎么改」：{fix}");
+        assert!(
+            fix.contains("attempt to write a readonly database"),
+            "少了不补的后果（`store.init()` 的原话）：{fix}"
+        );
+        // 探针零副作用：长度、mtime、内容三样都不许变。
+        let after = std::fs::metadata(&ro).expect("元数据");
+        assert_eq!(before.len(), after.len(), "探针把文件写长了");
+        assert_eq!(
+            before.modified().expect("mtime"),
+            after.modified().expect("mtime"),
+            "探针动了 mtime"
+        );
+        assert_eq!(
+            std::fs::read(&ro).expect("读回来"),
+            b"whatever",
+            "探针改了内容"
+        );
+    }
+
+    /// 同一条判据接在 [`sqlite_fault`] 后面：好库 + 只读 → FAIL，而且说的是**写不进去**
+    /// 而不是「当不了库」。
+    ///
+    /// 两条探针的顺序（先内容后权限）也在这儿：一个字段一条毛病，一行结论不同时说两种病。
+    #[tokio::test]
+    async fn the_db_probe_also_asks_whether_it_can_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        let db = root.path().join("aite.db");
+        // 0 字节在 SQLite 眼里是一个合法的空库 —— 内容那半过得去，卡的只能是权限。
+        std::fs::write(&db, b"").expect("建空库");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).expect("改只读");
+        let mut cfg = AiteConfig::default();
+        cfg.storage.sqlite_path = "aite.db".to_string();
+
+        let (why, _fix) = sqlite_fault(&cfg, root.path()).await.expect("只读库该报");
+
+        assert!(why.contains("写不进去"), "{why}");
+        assert!(
+            !why.contains("当不了 SQLite 库"),
+            "报错报成内容不对了：{why}"
+        );
     }
 
     /// 对拍 Python 的 `test_missing_env_var_fails_and_names_it`：非 offline 下缺变量就是

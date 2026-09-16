@@ -117,8 +117,12 @@ core/target/debug/aite preflight --json          # 机器可读
 > 八个写法各一条、`-h` 四条，外加一条「带不带 `--` 打的必须是同一份」防「只修一半」。
 
 `--offline` 的真输出长这样（实测原样；`config/aite.yaml` 由 `config/aite.example.yaml`
-复制而来，环境里只设了 `AITE_MODEL_API_KEY`。唯一的改动是那两行 NOTE 的正文很长，
-在这里省成一句，原文逐字抄在 §0.1.1）：
+复制而来**并填上了 `model.base_url` / `model.model`**，环境里只设了 `AITE_MODEL_API_KEY`。
+唯一的改动是那两行 NOTE 的正文很长，在这里省成一句，原文逐字抄在 §0.1.1）：
+
+> ⚠️ **「填上了」这半句 2026-09-15 起是硬的**：原样复制、不填那两行的话，第 1 组现在当场
+> `FAIL`、退出码 1（`model 段填不全，缺：model.base_url / model.model`）。从前它是绿的，
+> 而 `aite run` 照样退出码 2 —— 见下面那条 ⚠️。
 
 ```
 Aite 起飞前自检
@@ -144,7 +148,8 @@ Aite 起飞前自检
 
 七组分别是：① 配置可加载（问的是「这份配置**起得来**吗」：yaml 解析得出来、
 `worker.system_prompt_path` 指得到、`platform` / `model.provider` 不需要注入、
-`storage.sqlite_path` 上已经有的那个文件真能当库打开）
+`model` 段填得齐（`base_url` / `model` / 密钥环境变量）、
+`storage.sqlite_path` 上已经有的那个文件真能当库打开**而且写得进**）
 ② 环境变量齐 ③ 飞书凭证有效 ④ 飞书身份对得上
 ⑤ 模型端点通 ⑥ 沙箱可用 ⑦ 落盘目录可写。**任一 FAIL 就别往下走** —— M1–M6 里
 八成的「没反应」都是这七项里的某一项没配好，在这里花 60 秒比在群里瞎试便宜得多。
@@ -154,11 +159,26 @@ Aite 起飞前自检
 第 ④ 组尤其要过：它拿 token 查机器人自身信息、和 `FEISHU_BOT_OPEN_ID` 的取值比对。
 **配错了应用时 M1 会完全静默**（收得到事件但认不出 @ 的是自己），没有任何报错。
 
-> ⚠️ **`--offline` 全绿 ≠ core 起得来。** 实测：拿 `config/aite.example.yaml` 原样跑
-> `--offline`，上面那份输出是 `FAIL 0`，但 `aite run` 会退出码 2 ——
-> `aite 起不来：模型配置不完整：ModelConfig.base_url 是空的：填百炼 / 智谱的 OpenAI 兼容端点`。
-> 管 `base_url` / `model` 有没有填的是**第 5 组**，而 `--offline` 跳过它。
-> 所以真机起飞前那一遍**必须不带 `--offline`**。
+> ⚠️ **`--offline` 的「全绿」到底承诺什么**（2026-09-15 重划的边界）。
+> 从前这里写的是「`--offline` 全绿 ≠ core 起得来 —— 拿 `config/aite.example.yaml` 原样跑
+> `--offline` 是 `FAIL 0`，而 `aite run` 退出码 2（`ModelConfig.base_url 是空的`），
+> 管这件事的是**第 5 组**而 `--offline` 跳过它」。**那个口子补掉了**：`base_url` / `model` /
+> 密钥环境变量三件一个字节的网络流量都不需要，是分组分错了地方，现在第 1 组先问一遍
+> （实测：原样复制的样例跑 `--offline` 是 `[1/7] FAIL`、退出码 1）。
+>
+> 现在的承诺是：**七组里凡是不联网就判得出来的，`--offline` 都判过了**。剩下的口子只有两种：
+>
+> 1. **真的要联网 / 要 docker 才知道的**：端点连不连得上（⑤）、飞书凭证对不对（③④）、
+>    两边 `contract_version` 一致不一致、沙箱起不起得来（⑥）。**其中只有
+>    `contract_version` 不一致会让 `aite run` 起不来**（退出码 2）—— 另外几种 core 照样
+>    起得来（实测：端点指着一个 connection refused 的地址、飞书三项全不设、edge 没起，
+>    `aite run` 一路走到 `serve()`），死的是群里第一个任务。
+> 2. **`config/aite.yaml` 压根不存在**，preflight 退到样例：这一档第 1 组给 **WARN**
+>    并在那一行里点名「`cp` 一份并填上 `model.base_url` / `model.model`」，而 `aite run`
+>    不退样例、当场退出码 2「配置文件不存在」。汇总那句「全部没红」说的是 **FAIL 数**，
+>    这一档下别把它读成「这份配置能飞」。
+>
+> 所以真机起飞前那一遍**仍然必须不带 `--offline`** —— 第 1 条那几样只有全跑才验得了。
 >
 > ⚠️ **同族的另一个口子（2026-09-12 当场咬过人，现已补上）**：那天 `--offline` 报
 > 「全部没红，可以起飞」，`aite run` 紧接着退出码 2 —— 配置里的 `worker.system_prompt_path`
@@ -185,9 +205,22 @@ Aite 起飞前自检
 > （开一次库 + 逼它读一次文件头，读完就关，一个字节不写）；**文件不在不算问题**，
 > 那是正常路径 —— 起飞时自己建一个空库。
 >
-> > **探不出来的那一半，先说在这儿**：文件是个好库、但它自己只读（或所在卷只读）时
-> > `aite run` 的建表照样会炸，而第 1 组只读、读得动就算过，第 ⑦ 组问的又是目录 ——
-> > 两组都看不见。真机上遇到「preflight 全绿而 `aite run` 报建表失败」，先查这个。
+> ⚠️ **第五、六、七个同族口子（2026-09-15 补上）**：
+>
+> * **`model` 段少填一样**：`model.base_url` 空 / `model.model` 空 /
+>   `AITE_MODEL_API_KEY` 没 export，三种各是一个口子。`--offline` 从前全绿退 0，
+>   `aite run` 退出码 2（`模型配置不完整：…`）。详见上面那条 ⚠️。
+> * **`storage.sqlite_path` 指着一个内容合法、但只读的库文件**（`chmod 444`，或所在卷
+>   是只读挂载）。`--offline` 与全跑**都全绿**，而 `aite run` 退出码 2 ——
+>   `aite 起不来：建表失败（…）：sqlite: attempt to write a readonly database`。
+>   **第 ⑦ 组同样接不住**：它问的是三个路径的最近已存在祖先**目录**写不写得进去
+>   （journal 要建在那儿，`chmod 500` 父目录那一种归它），这里问的是「那个**文件本身**
+>   我写不写得动」—— 父目录可写而文件 444 时只有第 ① 组看得见。判据仍然**零副作用**：
+>   向内核要一个写句柄，不写、不建、不截断，长度 / mtime / 内容一律不动。
+>
+>   两种死法都要知道：库**还没建表**时死在起飞的 `store.init()`（退出码 2）；库**已经
+>   建完表**时 `CREATE TABLE IF NOT EXISTS` 是空操作、**起飞会成功**，死在群里第一个任务
+>   落库那一下 —— 后一种更难查，所以判据挂在「文件写不写得动」而不是「`init()` 炸不炸」。
 
 #### 0.1.1 第 0 步：先把 §3.7(b) 的结论拿到手（排在 M1 之前，60 秒）
 
@@ -715,7 +748,7 @@ core 侧路由与文案**尚未落地**）。另外 `aite evidence show` 吃的�
 |---|---|---|
 | 恢复网络后没有 `feishu.reconnected` | 重连循环挂了 | 看 edge 那个窗有没有 `feishu.reconnecting` 在持续打；完全没有就是读循环已经死了 —— 记下日志末尾，这是 bug |
 | 断网期间那条 @ 完全没被处理 | 平台没重推 | 飞书的补推不保证；换成「断网 10 秒」再试一次。连续两次都不补推，就是平台行为，记进结论、不算代码问题 |
-| **同一条消息出了两个任务** | R2 去重没生效 | `aite evidence show` 看这两个任务的 `event_received` 那条，`event=` 是不是同一个 `event_id`。是 → `seen_event` 没落库（查 sqlite 路径可写、`storage.sqlite_path` 配得对不对，preflight 第 ⑦ 组）；不是 → 平台推了两个不同 event_id，属于平台行为 |
+| **同一条消息出了两个任务** | R2 去重没生效 | `aite evidence show` 看这两个任务的 `event_received` 那条，`event=` 是不是同一个 `event_id`。是 → `seen_event` 没落库（查 sqlite 路径可写、`storage.sqlite_path` 配得对不对：**目录**写不写得进去归 preflight 第 ⑦ 组，**那个库文件本身**写不写得动归第 ① 组 —— 2026-09-15 起两边各报各的，别只看一组）；不是 → 平台推了两个不同 event_id，属于平台行为 |
 | 进程直接退了 | 未捕获异常漏出去了 | §3.3 要求进程不退出。抓日志末尾的栈，这是 bug |
 | 断网期间 core 那个窗在刷 `edge.reconnecting` | 你把 core↔edge 的 socket 也一起搞断了 | 那是**进程间**的链路，不是飞书长连接。拔网线不该影响它 —— 如果它也在重连，先看 edge 进程是不是被你一起关了 |
 

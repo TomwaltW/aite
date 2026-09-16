@@ -65,6 +65,9 @@ const PATH_CHAT: &str = "/v1/chat/completions";
 const DEFAULT_SQLITE_PATH: &str = "data/aite.db";
 /// 造病用：内容明摆着不是 SQLite 的一个文件。
 const NOT_A_DATABASE: &[u8] = b"this is definitely not a sqlite database";
+/// 脚手架默认的 `model.model`。第 ① 组 2026-09-15 起要它非空，所以它得有个值 ——
+/// 只有那条 **model 段** 的用例会把它换成空串来造病。
+const DEFAULT_MODEL_NAME: &str = "fake-model";
 
 const ALL_TITLES: [&str; 7] = [
     "配置可加载",
@@ -283,10 +286,26 @@ fn write_config_with_sqlite(root: &Path, model_base_url: &str, sqlite_path: &str
     write_config_full_with_sqlite(
         root,
         model_base_url,
+        DEFAULT_MODEL_NAME,
         &prompt,
         "feishu",
         "openai_compat",
         sqlite_path,
+    )
+}
+
+/// 同上，但 `model.model` 由调用方说了算 —— 第 ① 组那条 **model 段填得齐** 的判据
+/// （2026-09-15 折进来的第四件）要拿它造病。
+fn write_config_with_model(root: &Path, model_base_url: &str, model_name: &str) -> String {
+    let prompt = write_prompt(root);
+    write_config_full_with_sqlite(
+        root,
+        model_base_url,
+        model_name,
+        &prompt,
+        "feishu",
+        "openai_compat",
+        DEFAULT_SQLITE_PATH,
     )
 }
 
@@ -300,6 +319,7 @@ fn write_config_full(
     write_config_full_with_sqlite(
         root,
         model_base_url,
+        DEFAULT_MODEL_NAME,
         prompt_path,
         platform,
         provider,
@@ -310,6 +330,7 @@ fn write_config_full(
 fn write_config_full_with_sqlite(
     root: &Path,
     model_base_url: &str,
+    model_name: &str,
     prompt_path: &str,
     platform: &str,
     provider: &str,
@@ -320,8 +341,8 @@ fn write_config_full_with_sqlite(
         "platform: {platform}\n\
          model:\n  \
            provider: {provider}\n  \
-           base_url: {model_base_url}\n  \
-           model: fake-model\n\
+           base_url: \"{model_base_url}\"\n  \
+           model: \"{model_name}\"\n\
          worker:\n  \
            system_prompt_path: {prompt_path}\n\
          storage:\n  \
@@ -801,6 +822,151 @@ async fn build_app_really_refuses_what_the_first_check_refuses() {
 }
 
 // ===========================================================================
+// 第 1 组的 model 段判据（BB6，2026-09-15）
+// ===========================================================================
+
+/// `model` 段少填一样 → 第 1 组 FAIL，**而且 `--offline` 下就拦得住**。
+///
+/// **病史（这条测试守的就是它）**：2026-09-15 实跑对拍出来的三个同族口子。三样各缺一个的
+/// 配置，`preflight --offline` 都是「汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4 /
+/// 全部没红，可以起飞。」退出码 0，紧接着 `aite run` 退出码 2：
+///
+/// | 缺什么 | `aite run` 说什么 |
+/// |---|---|
+/// | `model.base_url` | `模型配置不完整：ModelConfig.base_url 是空的` |
+/// | `model.model` | `模型配置不完整：ModelConfig.model 是空的` |
+/// | `AITE_MODEL_API_KEY` | `模型配置不完整：环境变量 AITE_MODEL_API_KEY 没设置或为空` |
+///
+/// 前两条 X1 / Y2 两轮都记过「归第 5 组，被 `--offline` 跳过」；第三条谁都没记过 ——
+/// 第 2 组在 `--offline` 下把缺变量降成 WARN，于是它连个红都没有。三条都不需要联网，
+/// 所以 2026-09-15 起归第 ① 组。**`--offline` 下照跑才是要紧的地方**：谁哪天把这条判据
+/// 挪回「非 offline 才跑」的那半边，只有这里会红。
+#[tokio::test]
+async fn a_blank_model_section_fails_the_first_row_even_offline() {
+    for (base_url, model_name, env, keyword) in [
+        ("", DEFAULT_MODEL_NAME, full_env(), "model.base_url"),
+        ("http://127.0.0.1:1/v1", "", full_env(), "model.model"),
+        (
+            "http://127.0.0.1:1/v1",
+            DEFAULT_MODEL_NAME,
+            HashMap::new(),
+            "AITE_MODEL_API_KEY",
+        ),
+    ] {
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = write_config_with_model(root.path(), base_url, model_name);
+        let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+        o.offline = true;
+
+        let (report, text, raw_json) = run(&o, &env).await;
+
+        assert_eq!(
+            status_of(&report, "config"),
+            Status::Fail,
+            "缺 {keyword} 却放行了：{text}"
+        );
+        let row = row_for(&text, "配置可加载");
+        assert!(row.contains(keyword), "第 ① 组没点名缺的是哪一样：{row}");
+        assert!(
+            !report.ok(),
+            "第 1 组红了整份自检就该红（退出码 1）：{text}"
+        );
+        assert!(
+            !text.contains("全部没红，可以起飞"),
+            "起不来还说可以起飞 —— 这正是本轨要治的那条：\n{text}"
+        );
+        // 第 5 组在 `--offline` 下照旧 SKIP —— 本轨没有把它搬到离线来，只是把它里头
+        // 「不联网也判得出来」的那半句借给了第 ① 组。
+        assert_eq!(status_of(&report, "model"), Status::Skip, "{text}");
+        // 一项失败不阻断后面的：七行齐。
+        assert_eq!(rows(&text).len(), 7, "{text}");
+        let v: Value = serde_json::from_str(&raw_json).expect("json");
+        assert_eq!(v["checks"][0]["extra"]["model_config_ok"], json!(false));
+    }
+}
+
+/// 全跑那一档：第 ① 组和第 5 组**同时红，说的是同一件事的两面** —— 这是刻意留的重叠。
+///
+/// 第 ① 组问「这份配置起不起得来」（`--offline` 下照跑），第 5 组问「端点通不通」
+/// （要联网）。更要紧的是第 5 组还是**兜底**：`config/aite.yaml` 不存在退到样例那一档，
+/// 第 ① 组按下不表（样例里这两个字段天生是空的），那时唯一还会报它的就是第 5 组。
+/// 谁哪天觉得「第 1 组已经报了、第 5 组降个级吧」，那一档就会静默放行 —— 这条守的是它。
+#[tokio::test]
+async fn the_fifth_row_still_reports_the_blank_model_section_on_a_full_run() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cfg = write_config_with_model(root.path(), "", DEFAULT_MODEL_NAME);
+    let o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+
+    let (report, text, _) = run(&o, &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert_eq!(status_of(&report, "model"), Status::Fail, "{text}");
+    for title in ["配置可加载", "模型端点通"] {
+        assert!(
+            row_for(&text, title).contains("model.base_url"),
+            "{title} 这一行没说缺的是什么：{text}"
+        );
+    }
+}
+
+/// **两边口径对拍**：第 1 组因为 model 段拒绝的那份配置，真 `build_app` 也必须拒绝。
+///
+/// 口径照 [`build_app_really_refuses_what_the_first_check_refuses`]（注入那条）。这一条炸在
+/// `build_app` 第 5 步（`build_model` → `OpenAiCompatModel::from_config`）—— 判据是
+/// `model_blanks`，照抄的正是 `from_config` 那三条。哪天 `from_config` 改了口径而
+/// `preflight.rs` 没跟上，这条会红。
+#[tokio::test]
+async fn build_app_really_refuses_a_blank_model_section() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let prompt = root.path().join("prompts/platform.md");
+    std::fs::create_dir_all(prompt.parent().expect("有父目录")).expect("建 prompts 目录");
+    std::fs::write(&prompt, "# 假 system prompt\n").expect("写 prompt");
+    let cfg_path = root.path().join("aite.yaml");
+    // `build_app` 那一侧的 `storage.*` 是**裸相对路径**（相对进程 cwd），所以这一档全写绝对
+    // 路径 —— 口径照 `write_config_absolute` 那段注释，别把 `data/` 建到 `core/crates/app/` 去。
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "platform: feishu\nmodel:\n  provider: openai_compat\n  base_url: \"\"\n  \
+             model: fake-model\nworker:\n  system_prompt_path: {}\nstorage:\n  \
+             sqlite_path: {}\n  evidence_dir: {}\n  artifacts_dir: {}\nedge:\n  \
+             edge_socket: run/nowhere-aite-edge.sock\n",
+            prompt.display(),
+            root.path().join("data/aite.db").display(),
+            root.path().join("data/evidence").display(),
+            root.path().join("data/artifacts").display(),
+        ),
+    )
+    .expect("写 config");
+
+    // preflight 这一侧：第 1 组 FAIL。
+    let mut o = opts(
+        root.path(),
+        cfg_path.display().to_string(),
+        "http://127.0.0.1:1".to_string(),
+    );
+    o.offline = true;
+    let (report, text, _) = run(&o, &full_env()).await;
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+
+    // build_app 那一侧：同一份配置，必须拒绝起飞。
+    let config = aite_app::load_config(&cfg_path).expect("配置本身是好的");
+    let err = match aite_app::build_app(
+        config,
+        aite_app::Injections {
+            repo_root: Some(root.path().to_path_buf()),
+            ..aite_app::Injections::default()
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("preflight 说这份 model 段起不来，build_app 却放行了"),
+        Err(e) => e,
+    };
+    assert!(err.0.contains("base_url"), "两边说的不是同一件事：{err}");
+}
+
+// ===========================================================================
 // 第 1 组的库判据（`storage.sqlite_path` 上那个文件当不当得了库）
 // ===========================================================================
 
@@ -984,6 +1150,99 @@ async fn store_init_really_fails_on_what_the_first_check_refuses() {
     );
 }
 
+/// **好库但只读** → 第 1 组 FAIL，第 7 组照样 OK，`store.init()` 那一侧真的也炸。
+///
+/// **病史（这条测试守的就是它）**：Z1 补完「不是个库」那一半之后，`sqlite_fault` 的文档
+/// 注释里明写着「探不出来的那一半」：文件是个好库、但它自己只读时 `CREATE TABLE` 照样炸。
+/// Z1 / Z3 / AA4 记了三轮没治，理由是「要覆盖它得真往库里写一次，把第 ① 组从纯读变成有
+/// 副作用，不划算」。**那个前提不成立**：不用写 —— 要一个写句柄就够了，一个字节不落。
+///
+/// 2026-09-15 实测的改前现场（`chmod 444` 的合法库）：
+///
+/// | | 结果 |
+/// |---|---|
+/// | `preflight --offline` | 全绿，「全部没红，可以起飞。」退出码 0 |
+/// | `preflight` 全跑 | 第 1 组 OK、**第 7 组 OK**（红的那几组是本机没凭证 / 没起 edge，与它无关）|
+/// | `aite run` | 退出码 2：`aite 起不来：建表失败（…）：sqlite: attempt to write a readonly database` |
+///
+/// 下面那句 `status_of(&report, "storage") == Ok` 和库那条一样不是顺手写的 —— 第 7 组问的是
+/// 「三个路径的最近已存在祖先**目录**写得进去」（`CREATE TABLE` 还要在父目录里建 journal，
+/// 归它管），这里问的是「这个**文件本身**我写不写得动」。父目录可写而文件 444 时只有第 ① 组看得见。
+///
+/// **以 root 跑这一条会红** —— 那不是 bug，root 下 `CREATE TABLE` 本来也写得进去。
+///
+/// **判据为什么挂在「文件写不写得动」而不是「`init()` 会不会炸」**：库**已经建完表**时，
+/// `init()` 的 `CREATE TABLE IF NOT EXISTS` 在只读库上是个**空操作、会成功**
+/// （实测：`sqlite3 ro.db "CREATE TABLE IF NOT EXISTS t(x)"` 退出 0，
+/// 同一个库上 `INSERT` 报 `attempt to write a readonly database`）。
+/// 也就是说只读库有两种死法：还没建表 → 起飞时死在 `init()`（下面对拍的就是这一种）；
+/// 已经建完表 → 起飞成功，**死在群里第一个任务落库那一下**，比前一种更难查。
+/// 两种都是死，所以 preflight 拦的是文件本身 —— 拿 `init()` 当判据只能拦住一半。
+#[tokio::test]
+async fn a_readonly_database_fails_the_first_row_and_still_leaves_the_seventh_green() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("tempdir");
+    let db = root.path().join(DEFAULT_SQLITE_PATH);
+    std::fs::create_dir_all(db.parent().expect("有父目录")).expect("建 data 目录");
+    // 0 字节的文件在 SQLite 眼里是一个**合法的空库**（`src/preflight.rs` 的
+    // `the_db_probe_never_writes_anything` 钉着这条），也正是 `build_app` 第 6 步
+    // `SqliteSessionStore::open` 给还不存在的库留下的那个形状。所以内容那一半是好的 ——
+    // 红的只可能是权限，否则这条就变成 Z1 那条判据的复读。
+    std::fs::write(&db, b"").expect("建空库");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).expect("改只读");
+    let cfg = write_config_with_sqlite(root.path(), "http://127.0.0.1:1/v1", DEFAULT_SQLITE_PATH);
+    let mut o = opts(root.path(), cfg, "http://127.0.0.1:1".to_string());
+    o.offline = true;
+
+    let (report, text, raw_json) = run(&o, &full_env()).await;
+
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    let row = row_for(&text, "配置可加载");
+    assert!(row.contains("storage.sqlite_path"), "{row}");
+    assert!(
+        row.contains("写不进去"),
+        "报错报成「当不了库」了 —— 内容是好的，卡的是权限：{row}"
+    );
+    assert!(!report.ok(), "{text}");
+    // 第 7 组照旧绿 —— 两件事，别混。
+    assert_eq!(
+        status_of(&report, "storage"),
+        Status::Ok,
+        "第 7 组不该管这一条，它问的是目录写不写得进去：{text}"
+    );
+    // 「怎么补」三件齐：当前值 / 怎么改 / 不补的后果（`store.init()` 的原话）。
+    let fix = report
+        .checks
+        .iter()
+        .find(|c| c.name == "config")
+        .expect("第 1 组")
+        .fix
+        .clone();
+    assert!(fix.contains(&db.display().to_string()), "少了当前值：{fix}");
+    assert!(fix.contains("chmod u+w"), "少了「怎么改」：{fix}");
+    assert!(
+        fix.contains("attempt to write a readonly database"),
+        "少了不补的后果：{fix}"
+    );
+    assert_eq!(rows(&text).len(), 7, "{text}");
+    let v: Value = serde_json::from_str(&raw_json).expect("json");
+    assert_eq!(v["checks"][0]["extra"]["sqlite_ok"], json!(false));
+
+    // **两边口径对拍**：`open` 照样是 Ok（SQLite 到这一步还不写），`init()` 才炸。
+    let store = SqliteSessionStore::open(&db).expect("open 这一步 SQLite 还不写，必过");
+    let err = store
+        .init()
+        .await
+        .expect_err("preflight 说这个库写不进去，store.init() 却建表成功了");
+    assert!(
+        err.to_string().contains("readonly"),
+        "两边说的不是同一件事：{err}"
+    );
+
+    // 收尾：把写权限加回去，免得 tempdir 清理在别的平台上卡住。
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).expect("改回可写");
+}
+
 /// 对拍 Python 的 `test_every_check_still_runs_when_feishu_is_unreachable`：
 /// 第 3 组红了，后面几组一个都不能少跑。
 #[tokio::test]
@@ -1048,7 +1307,20 @@ async fn offline_touches_neither_network_nor_docker() {
 }
 
 /// 对拍 Python 的 `test_offline_with_no_credentials_still_exits_zero`：
-/// CI 和没凭证的机器上要能跑 —— 缺变量降成 WARN（不拦起飞），但一个名字都不少报。
+/// 没飞书凭证的机器上 `--offline` 要能跑 —— 缺变量降成 WARN（不拦起飞），但一个名字都不少报。
+///
+/// **2026-09-15（BB6）把「没凭证」拆成了两半，因为它们对起飞的后果根本不同**：
+///
+/// * **飞书那三个变量是 edge（Go）读的**，`build_app` 从头到尾不碰它们 —— 缺了照样起得来
+///   （实测：三个全不设，`aite run` 一路走到 `serve()`）。所以第 2 组那条 offline 降级
+///   对它们是对的，这条测试的前半段原样守着。
+/// * **`model.api_key_env` 点到的那个是 core 自己读的**：`build_app` 第 5 步
+///   `build_model` → `from_config` → `resolve_api_key`，缺了当场退出码 2
+///   （`模型配置不完整：环境变量 AITE_MODEL_API_KEY 没设置或为空`）。它在第 2 组里
+///   **只是 WARN**，于是 2026-09-15 之前 `--offline` 在这种机器上报「全部没红，可以起飞」
+///   而 `aite run` 退出码 2 —— 与 X1 / Y2 / Z1 那三条同族，实测在案。现在归第 ① 组。
+///
+/// 所以「没凭证还能跑」这句话现在的准确说法是：**没飞书凭证能跑，没模型密钥不能**。
 #[tokio::test]
 async fn offline_without_credentials_still_passes() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -1057,14 +1329,36 @@ async fn offline_without_credentials_still_passes() {
     let mut o = opts(root.path(), cfg, stub.base.clone());
     o.offline = true;
 
-    let (report, text, _) = run(&o, &HashMap::new()).await;
+    // 1) 飞书三项全缺、模型密钥在：照旧全绿，第 2 组 WARN 且四个名字一个不少。
+    let only_model_key =
+        HashMap::from([("AITE_MODEL_API_KEY".to_string(), FAKE_MODEL_KEY.to_string())]);
+    let (report, text, _) = run(&o, &only_model_key).await;
 
-    assert!(report.ok(), "{text}");
+    assert!(report.ok(), "没飞书凭证不该拦住起飞：{text}");
     assert_eq!(status_of(&report, "env"), Status::Warn, "{text}");
     let env_row = row_for(&text, "环境变量齐");
     for name in full_env().keys() {
         assert!(env_row.contains(name.as_str()), "少报了 {name}：{env_row}");
     }
+
+    // 2) 连模型密钥也没有：第 ① 组 FAIL —— 这一发 `aite run` 起不来，`--offline` 不许说
+    //    「可以起飞」。第 2 组那条降级**不许跟着变**，它管的是另一件事。
+    let (report, text, _) = run(&o, &HashMap::new()).await;
+
+    assert!(
+        !report.ok(),
+        "没有模型密钥 aite run 会退出码 2，--offline 不该全绿：{text}"
+    );
+    assert_eq!(status_of(&report, "config"), Status::Fail, "{text}");
+    assert!(
+        row_for(&text, "配置可加载").contains("AITE_MODEL_API_KEY"),
+        "第 ① 组要点名缺的是哪一个：{text}"
+    );
+    assert_eq!(
+        status_of(&report, "env"),
+        Status::Warn,
+        "第 2 组那条 offline 降级是给飞书三项的，不该被这一轨改掉：{text}"
+    );
 }
 
 // ===========================================================================
@@ -1200,11 +1494,13 @@ async fn a_custom_env_var_name_is_still_redacted() {
     let path = root.path().join("aite.yaml");
     // 这条用例关心的是脱敏，不是第 1 组；prompt 得真写一份，否则第 1 组会因为
     // `worker.system_prompt_path` 指不到而 FAIL，把下面那条前置断言打红。
+    // `base_url` / `model` 同理（2026-09-15 起第 1 组也验这两个）—— 契约默认值是空串。
     let prompt = write_prompt(root.path());
     std::fs::write(
         &path,
         format!(
-            "model:\n  api_key_env: {custom}\nworker:\n  system_prompt_path: {prompt}\n\
+            "model:\n  api_key_env: {custom}\n  base_url: http://127.0.0.1:1/v1\n  \
+             model: fake-model\nworker:\n  system_prompt_path: {prompt}\n\
              storage:\n  sqlite_path: data/aite.db\n  \
              evidence_dir: data/evidence\n  artifacts_dir: data/artifacts\n"
         ),
