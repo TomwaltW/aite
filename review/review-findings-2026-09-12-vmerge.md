@@ -3478,3 +3478,457 @@ passed 10/10
 6. **没做变异验证。** 本轨零判据改动（纯注释），没有「摘掉某条判据看几条测试变红」这种
    可做的变异点。②.2 的「不改也重跑、产物逐字节不变」是本轨能给的最强等价物：
    它排除的是「工具版本不对」这个本轨最大的风险。
+
+## 十八、BB1 回执 —— 2026-09-15
+
+`!status` 看得见、`!stop` 停不着；丢掉的事件一声不吭。
+
+**一句话**：①②③ 全交，④ **判断「不做」**（缓冲那一版），改成把它从「悄悄丢」变成
+「日志里点名丢」，并把三个问题的答案留在下面，下一轮有依据再定。
+
+---
+
+### 基线与开场自检
+
+| 项 | 期望 | 实跑 |
+|---|---|---|
+| `git log --oneline -1` | `7019c48` | `7019c48 docs(acceptance): W1 那张表的表头归属分成两批` ✅ |
+| `git status --short` | 空 | 空 ✅ |
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` ✅ |
+| C1 契约测试 | `contracts passed=25 failed=0` | `contracts passed=25 failed=0` ✅ |
+| B 全量 cargo test | `cargo passed=864 failed=0` | `cargo passed=864 failed=0` ✅ |
+| B go test（-race） | 六个包全 `ok` | aiteerr / config / feishu / ingress / sandbox / server 全 `ok` ✅ |
+| B8 评测 | `passed 10/10` | `passed 10/10` ✅ |
+| 收尾 | 「全部通过」，退出码 0 | 「全部通过」，`exit 0` ✅ |
+
+**守卫拦截那一条**（Read `.claude/hooks/guard_bash.py` 本身），逐字原话：
+
+```
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+hook 真的挂上了。
+
+> 顺带一条现场记录：本轨中途撞上**守卫对 heredoc 正文的两次误拦**
+> （`blocked: 该操作触碰受保护面 <命令无法解析: No closing quotation>（解析失败）`），
+> 两次都是 `cat > x.rs <<'EOF'` 里的 Rust 源码含引号导致守卫那边的命令行解析失败。
+> 绕法是改用写文件工具落盘，没有绕守卫本身。与台账里「守卫会扫 heredoc 正文」同源。
+
+---
+
+### ① `!stop` 找不着目标时的三格
+
+**改法**：`StopTarget` 从三格变五格，`NoneActive` / `Ambiguous(Vec<Task>)` 从 `NotFound`
+里分出来（`plane.rs`）。**「查哪些任务」一个字没动** —— 仍是 `status_tasks`，
+`ACTIVE_TASK_STATUSES` 没碰、卡片那条路（`resolve_task`）没碰。
+
+新文案一条（`wording.rs` 逐字钉住，导出在 `lib.rs`）：
+
+```rust
+pub fn stop_needs_task_no_text(task_nos: &[String]) -> String
+// -> "本群有 2 个活跃任务，要停哪个请带上任务号：#A17、#A18。"
+```
+
+#### 三格对照（每格都是真跑出来的）
+
+| 情形 | 改前 | 改后 |
+|---|---|---|
+| 本群一个活跃任务都没有，`!stop` | `没有这个任务` | `本群没有活跃任务` |
+| 省略任务号 + 本群有多个 | `没有这个任务` | `本群有 2 个活跃任务，要停哪个请带上任务号：#A1、#A2。` |
+| 带了任务号但对不上 | `没有这个任务` | `没有这个任务`（**不动**） |
+
+前两格的「改前 / 改后」是同一次跑出来的 —— 变异 B 把两格退回 `NotFound`（= 改前行为），
+`left` 是改前、`right` 是改后（改后那一侧是当前代码真跑绿的断言值）：
+
+```
+thread 'stop_with_nothing_to_stop_says_exactly_what_status_says' panicked at crates/control/tests/commands.rs:294:5:
+  left: "没有这个任务"
+ right: "本群没有活跃任务"
+thread 'stop_without_a_task_no_lists_the_candidates_instead_of_denying_them' panicked at crates/control/tests/commands.rs:332:5:
+  left: "没有这个任务"
+ right: "本群有 2 个活跃任务，要停哪个请带上任务号：#A1、#A2。"
+test result: FAILED. 21 passed; 3 failed
+```
+
+第三格由原有的 `stop_unknown_task` 钉着，改动前后都绿、输出逐字未变。
+
+#### 一处**派单没写死、我自己定的**边界（请复核）
+
+`!stop #A99` 而本群**一个活跃任务都没有**时，同时落在派单表的第 1 行（「一个都没有 →
+两条命令该一致」）和第 3 行（「带了任务号但对不上 → 保持」）。我选了**第 3 行优先**：
+
+- 规矩一句话：**带了任务号就按任务号回答，没带才按群回答。** 用户指着一个号问，
+  答的该是这个号的下落；
+- 这条选择让 `stop_unknown_task` 逐字不变（它本来就是这个形状），不用改既有判据；
+- 反过来选的话，`!stop #A99` 会回「本群没有活跃任务」—— 用户问 A99，答的是别的事。
+
+`stop_unknown_task` 的注释里写明了这条分界，换选择的话那条测试会红。
+
+#### `!stop` 的空列表那句**没有**带 `dropped_note` 的尾巴
+
+`cmd_status` 会在正文后面拼 `dropped_note()`，`cmd_stop` 的 `NoneActive` 没拼。
+理由：`!status` 是「问现状」的命令，那句进程级警告属于它；`!stop` 是动作命令，
+给它也挂一条等于把 `dropped_note` 的出口面扩大，而那是产品决定（见 ③ 的建议）。
+`stop_with_nothing_to_stop_says_exactly_what_status_says` 里两条命令的回话在
+「没丢过事件」的前提下逐字相等 —— 丢过事件时两句会差一个尾巴，这是**刻意的**。
+
+---
+
+### ② 丢弃留痕
+
+#### a. 「日志由 Ingress 打第二遍」那句话 —— **核实结果：是真的，注释留着并补了指路**
+
+`grep ingress.handle_failed`（全仓，去掉 target / review / docs）命中四处代码：
+
+| 位置 | 级别 | 字段 |
+|---|---|---|
+| `core/crates/control/src/ingress.rs:57` | **ERROR** | `event` `kind` `error` |
+| `core/crates/edge-client/src/ingress.rs:152` | WARN | `event_id` `error`（**没有 `kind`**） |
+| `edge/internal/ingress/client.go:190` | ERROR | `event` `kind` `err` |
+| `edge/internal/ingress/client.go:204` | ERROR | `event` `kind` `err` |
+
+产品路径走的是第一条：`run.rs` 把 `app.ingress.handler()` 交给 `platform.start()`，
+它打的 ERROR 带 `event` / `kind` / `error`，**比 `handle_event` 在那儿能凑出来的还全**
+（§7 那张表上 core 那条 `ingress.handle_failed` 写的就是它）。所以**没有补第二条日志**，
+按派单说的改成在注释里写清「要查被丢的事件去看哪个 target」：`aite.ingress` 上的
+`ingress.handle_failed`。这和 `dropped_note()` 给用户的那句指路是同一个地方，两处不再各说各的。
+
+**顺带核出一条不在本轨口径里的事**（已记账）：`edge-client` 那条同名 WARN
+**在当前接线下永远到不了** —— `control::Ingress::handler()` 无条件返回 `Ok(())`，
+gRPC 那一层的 `Err` 分支不可达，于是「`IngressError` → INTERNAL → 平台重推」这条
+设计（`ingress.rs` 模块头与 `errors.rs:92` 都写着）**在真机上是死的**。
+`reconnect_replay.rs:777` 那句断言的注释早就说破了同一件事
+（「有事件在路由里炸了 —— 它既没变成任务也不会被重推第二次，等于丢了」）。
+
+#### b. 「两件不同的事共用一个计数器」—— **判断：不对，拆了**
+
+`cancel_task` 落库失败那一笔原来也 `bump("events.dropped")`。两件事差得远：
+
+| | `events.dropped` | 落库失败那一笔 |
+|---|---|---|
+| 说的是 | 事件在路由里炸了，可能压根没被处理 | 事件处理得好好的、命令也认了，只有写库没成 |
+| 现场在 | `aite.ingress` 的 `ingress.handle_failed` | `aite.control` 的 `control.cancel_save_failed` |
+| M4 要它回答 | 「投递了被丢」 | 跟投递没关系 |
+
+混在一个名字上，M4 要分的那件事就分不出来了；而且 `dropped_note()` 给的指路
+（去 grep `ingress.handle_failed`）对这一笔**是错的**，人照着找会扑空。
+所以拆出 `control.cancel_save_failed`（计数器名与日志名同名，最好 grep）。
+
+**但那句进程级警告不许因此哑掉**：这一支是直接 `return` 的，`!stop` 连「没停成」
+都不回一个字（测试里把这个沉默本身也钉住了）。所以 `dropped_note()` 改成数**两者之和** ——
+用户要的是「有没有事情没办成」，排障的人要的才是「是哪一类」。**文案一个字没改**。
+
+#### c. R1/R2/R8 的 INFO 日志
+
+> **派单前提更正一条**：派单说这三条「现在连计数器都没有」。实际上计数器早就有
+> （`events.nonhuman` / `events.duplicate` / `events.ignored`，§7 末那份清单里列着），
+> **缺的只是日志** —— 这一点 `acceptance-M.md` §8 第 3 条的原文写得是对的
+> （「只加内存计数器，INFO 级别没有日志」）。所以本轨只补日志，没动计数器。
+
+一条规则一个名字，都在 `aite.control` 上，级别 INFO。真跑出来的原样：
+
+```
+INFO aite.control: control.drop_nonhuman R1 丢弃：不是真人发的，永远不触发任务 event=ev-bot-1 kind=message sender_kind=bot sender=ou_user
+INFO aite.control: control.drop_duplicate R2 丢弃：这条已经处理过了（平台重推） event=ev-dup-1 kind=message
+INFO aite.control: control.drop_ignored R8 丢弃：既没 @ 机器人，也不在已有话题里 event=ev-chat-1 kind=message chat_type=group mentioned=false thread=
+INFO aite.control: control.drop_ignored R8 丢弃：既没 @ 机器人，也不在已有话题里 event=ev-follow-1 kind=message chat_type=group mentioned=false thread=om_root
+```
+
+最后两行是同一条规则的两种形状，**一眼分得开**：群里的普通闲聊 `thread=` 是空的，
+乱序重推的话题追问 `thread=om_root`。这正是 ④ 那条边界在日志里的样子。
+
+为什么是 INFO 不是 WARN：三条都不是故障（R1/R2 是规则正常生效，R8 是群里的日常闲聊），
+真机上 R8 会很吵，放 WARN 会把真正的 WARN 淹掉；放 DEBUG 等于没有（§0.3 四个观察窗
+默认就是 INFO）。
+
+---
+
+### ③ core 侧 counters 的出口
+
+`run.rs` 的收尾段加一行 `aite.counters`，排在 `aite.down` **前面** —— 退出四连成了
+`aite.signal` / `aite.stopping` / `aite.counters` / `aite.down`，和 edge 对齐。
+
+**真二进制实测**（真 `aite run` + `/bin/kill -TERM`，没接到任何事件的一次退出）：
+
+```
+2026-09-15T15:09:17.957242Z  WARN aite.app: aite.signal 收到，开始优雅退出（再来一次立即硬退） signal="SIGTERM"
+2026-09-15T15:09:17.957351Z  INFO aite.app: aite.stopping grace=20.0 pending=0
+2026-09-15T15:09:17.957904Z  INFO aite.app: aite.counters 本进程启动以来的计数器 plane=[] ingress=[]
+2026-09-15T15:09:17.957924Z  INFO aite.app: aite.down
+```
+
+**有数的形状**（`counters_exit.rs` 那条用例里真跑出来的）：
+
+```
+aite.counters 本进程启动以来的计数器 plane=[commands!status=1 events.ignored=1] ingress=[events.handled=2]
+```
+
+两处设计选择，都写进了 `render_counters` 的注释：
+
+1. **方括号不是装饰**。tracing 对 `%`（Display）字段不加引号，里面又有空格，不界定的话
+   整行长这样 —— `plane=commands!status=1 events.ignored=1 ingress=events.handled=2` ——
+   `plane` 看起来成了一个值是 `commands!status=1` 的计数器。加了括号，归属一眼分得开，
+   而**计数器名一个字没改**（`grep events.ignored=` 照样命中）。
+   （这一版是改出来的：第一版没括号，实跑一看就是上面那个形状。）
+2. **plane / ingress 分两个字段**，不拍平。两套计数器各自独立（`events.handled` 只有
+   ingress 有、`events.ignored` 只有 plane 有），拍平之后哪天撞名，合并会静默吃掉一个。
+
+#### `!status` 要不要多说几个数 —— **建议，没擅自扩**
+
+现状：`!status` 尾巴只漏 `events.dropped`（现在是它与 `control.cancel_save_failed` 的和）。
+派单说这是产品决定，我给建议不动手：
+
+- **不建议直接扩那句尾巴。** `wording.rs` 把 `!status` 的两种正文逐字钉着，
+  多说一个数就要改 `plane.rs` + `wording.rs` 两处逐字断言，而且群里每次 `!status`
+  都多几行噪音 —— 而真正需要看计数器的是**排障的人**，不是发命令的用户。
+- **建议另开一个只读入口**，两条路可选，都不碰冻结面：
+  1. 一个新命令（如 `!health`），文案是新的、不动 `!status` 那两条逐字断言；
+  2. 或 CLI 侧一个 `aite status --counters` 之类的子命令（`aite evidence show` 已经是
+     这个形状的先例），走本地 socket 问一次跑着的进程。
+  第 2 条更对路：计数器是给排障的人看的，本来就不该占群里的版面。
+- 这两条都**超出本轨可写面**（新命令要动 `commands.rs` 的命令表 + 一批文案测试；
+  CLI 子命令在 `cli.rs`，不是本轨的面），所以只留建议。
+
+---
+
+### ④ 乱序重推（R8）—— **判断：不做缓冲**，只补留痕
+
+#### 1. 复现记录（真跑的，不是读代码推的）
+
+控制面层，`Harness` + 手工造事件（探针已删，形状原样留在
+`control/tests/drop_logs.rs::an_out_of_order_thread_followup_is_dropped_but_no_longer_in_silence`）：
+
+```
+--- 追问先到（root 还没到）---
+events.ignored   = 1
+events.steer     = 0
+回帖条数         = 0
+reaction 条数    = 0
+库里会话数       = 0
+库里活跃任务     = 0
+--- root 随后到达 ---
+库里活跃任务     = 1
+任务标题         = Some("画个趋势图")
+events.steer     = 0
+pending steer    = []
+最终回帖条数     = 0
+```
+
+确认了两件事，第二件比 README 写的更狠：
+
+1. 追问确实落到 R8，用户侧**零回复、零表情**；
+2. **那句话的内容彻底消失** —— root 随后到达时建的任务，标题和 transcript 里都只有
+   root 那句「画个趋势图」，用户中途说的「那个图改成柱状的」一个字都没进去，
+   也没有任何地方留下它来过。
+
+进程层已有一条现成的边界用例（**不是本轨写的，本轨也没动它**）：
+`app/tests/reconnect_replay.rs::a_followup_replayed_before_its_root_is_dropped`，
+它的注释里那句「丢得**安静**，这也是它难被发现的原因」正是本轨 ② 要收的那半句。
+
+#### 2. 三个问题的答案
+
+| 问题 | 答案 |
+|---|---|
+| **缓冲多久？** | **答不上来。** 需要的是「飞书重推乱序时，追问比 root 早到多少」的真机分布，而这个数**现在一条都没有** —— 在本轨那行 `control.drop_ignored` 之前，乱序丢弃在日志里不留任何痕迹，连「发生过几次」都问不出来。拍一个值（5s？30s？）等于拿用户的消息赌一个没人量过的常数。 |
+| **缓冲多少条？** | 只要 root 一直不来就无上界，所以**必须有上界**，而上界该多大同样取决于上一条的分布。更麻烦的是**上界满了之后丢谁**：丢最旧的，那正是等得最久、最可能马上等到 root 的那条；丢最新的，那用户刚说的话直接没了。两种都是新的坏行为。 |
+| **root 一直不来怎么办？** | 这是真会发生的（root 那条本身可能命中 R1 非真人、或被 R2 判重、或平台压根没推）。到期之后只有三条路，**没有一条是免费的**：① 丢掉 —— 回到今天的行为，只是晚了 N 秒；② 按 R7 给它新建一个任务 —— 那等于让一条**没有 @ 机器人**的群消息触发任务，与 R5/R6/R7 的投递条件直接冲突（派单也点名禁止动这条）；③ 回一句「没找到你在回复的那条」—— 群里凭空多出噪音，而 80% 的情况下这条消息压根不是说给 Aite 听的。 |
+
+#### 3. 判断与理由
+
+**不做。** 三个问题里前两个的答案都是「取决于一份现在还不存在的数据」，第三个的三条出路
+各自都是新病。在这种状态下写缓冲，等于用一个有状态、有上界策略、有过期语义的新机制，
+去换一个**飞书通常不会触发**的边界 —— 净增的风险面比它收掉的大。
+
+**做了的是前提**：② 那行 `control.drop_ignored` 让这条边界第一次在真机上**可数、可查**。
+拿着开放平台的 event_id 一 grep，命中就是「到过 core、被 R8 丢了」，
+`thread=om_xxx` 还直接说出它想接进哪个话题。攒够几周日志之后，上面三个问题才有答案，
+那时再决定做不做缓冲、缓冲多久 —— 这才是有依据的顺序。
+
+**没碰的**：R5 的投递条件（「已 @ 机器人」或「已在话题内」）一个字没动。
+
+---
+
+### 回归（新增 5 条，每条都做了变异验证）
+
+| # | 测试 | 钉的是什么 |
+|---|---|---|
+| 1 | `commands.rs::stop_with_nothing_to_stop_says_exactly_what_status_says` | 第一格：空列表时 `!stop` 与 `!status` 逐字同一句（反向直接拿 `!status` 的回话来比） |
+| 2 | `commands.rs::stop_without_a_task_no_lists_the_candidates_instead_of_denying_them` | 第二格：点名要任务号 + 列出候选 + **一个任务都不许停** |
+| 3 | `commands.rs::the_candidates_offered_by_stop_are_the_ones_status_listed` | 候选与 `!status` 同源同数（三个任务的形状） |
+| 4 | `commands.rs::a_failed_cancel_save_counts_on_its_own_but_still_warns_in_status` | ②b：新计数器 +1、`events.dropped` 不动、`!status` 那句警告照旧、`!stop` 的沉默本身 |
+| 5 | `wording.rs::stop_needs_task_no_text_is_byte_exact` | 新文案逐字（两个 / 三个两种形状） |
+| 6 | `drop_logs.rs::each_dropping_rule_names_the_event_and_itself` | ②c：三条规则各一行 INFO、各带 event_id、**三个名字互不相同** |
+| 7 | `drop_logs.rs::an_out_of_order_thread_followup_is_dropped_but_no_longer_in_silence` | ④ 的复现 + 留痕（`thread` / `mentioned` 两个字段） |
+| 8 | `drop_logs.rs::a_followup_that_arrives_after_its_root_is_not_logged_as_dropped` | 反向：顺序正常时**不许**有这行日志 |
+| 9 | `counters_exit.rs::shutdown_prints_the_core_counters_before_it_says_down` | ③：有这一行、数是真的、排在 `aite.down` 前面 |
+
+（表里 9 行对应 9 个测试函数，分布在 2 个改过的文件 + 2 个新文件里。）
+
+#### 变异验证（十次，每次都恢复并复跑绿）
+
+**变异 A —— 文案改一个词**（`要停哪个请带上任务号` → `请给出任务号`）：
+
+```
+test stop_needs_task_no_text_is_byte_exact ... FAILED
+  left: "本群有 2 个活跃任务，要停哪个请给出任务号：#A17、#A18。"
+ right: "本群有 2 个活跃任务，要停哪个请带上任务号：#A17、#A18。"
+test result: FAILED. 12 passed; 1 failed
+```
+
+**变异 B —— 两格退回 `NotFound`（= 改前行为）**：三条全红，红点正是改前那句话。
+
+```
+test stop_with_nothing_to_stop_says_exactly_what_status_says ... FAILED
+test stop_without_a_task_no_lists_the_candidates_instead_of_denying_them ... FAILED
+test the_candidates_offered_by_stop_are_the_ones_status_listed ... FAILED
+thread 'stop_with_nothing_to_stop_says_exactly_what_status_says' panicked at crates/control/tests/commands.rs:294:5:
+  left: "没有这个任务"
+ right: "本群没有活跃任务"
+thread 'stop_without_a_task_no_lists_the_candidates_instead_of_denying_them' panicked at crates/control/tests/commands.rs:332:5:
+  left: "没有这个任务"
+ right: "本群有 2 个活跃任务，要停哪个请带上任务号：#A1、#A2。"
+test result: FAILED. 21 passed; 3 failed
+```
+
+**变异 C —— 文案照旧，但替用户挑一个停了**（「省略任务号就停最近那个」这种坏改法）：
+第 2 条的**第三个断言**红了，证明它不是摆设 —— 只断文案的话这个变异能全绿过去。
+
+```
+thread 'stop_without_a_task_no_lists_the_candidates_instead_of_denying_them' panicked at crates/control/tests/commands.rs:343:9:
+assertion `left == right` failed: 指不到唯一一个的时候，一个都不许停 —— 不许替用户挑（任务 #A1）
+  left: Cancelled
+ right: Created
+thread 'the_candidates_offered_by_stop_are_the_ones_status_listed' panicked at crates/control/tests/commands.rs:382:5:
+  left: 2
+ right: 3
+test result: FAILED. 22 passed; 2 failed
+```
+
+**变异 D —— 摘掉 R8 那行日志**：
+
+```
+test an_out_of_order_thread_followup_is_dropped_but_no_longer_in_silence ... FAILED
+test each_dropping_rule_names_the_event_and_itself ... FAILED
+thread 'an_out_of_order_thread_followup_is_dropped_but_no_longer_in_silence' panicked at crates/control/tests/drop_logs.rs:249:5:
+assertion `left == right` failed: 被丢的追问该在日志里留下名字。全部日志：["INFO aite.control control.drop_nonhuman R1 丢弃：不是真人发的，永远不触发任务 event=ev-r1-bot kind=message sender_kind=bot sender=ou_user"]
+test result: FAILED. 2 passed; 2 failed
+```
+
+**变异 E —— 三条规则合并成一个名字**（R1/R2 都改叫 `control.drop_ignored`）：
+
+```
+test each_dropping_rule_names_the_event_and_itself ... FAILED
+thread 'each_dropping_rule_names_the_event_and_itself' panicked at crates/control/tests/drop_logs.rs:170:9:
+test result: FAILED. 3 passed; 1 failed
+```
+
+**变异 F —— 把 `drop_log::ignored` 挪到 `route` 开头无条件打**（「每条事件都报一次丢弃」
+那种噪音版）：反向那条红了，正向两条也跟着红（它们断的是「有且只有一行」）。
+
+```
+test a_followup_that_arrives_after_its_root_is_not_logged_as_dropped ... FAILED
+thread '...' panicked at crates/control/tests/drop_logs.rs:304:5:
+顺序正常的追问被记成了「丢弃」—— 这行日志得只在真丢的时候出现。全部日志：[… "INFO aite.control control.drop_ignored R8 丢弃：既没 @ 机器人，也不在已有话题里 event=ev-followup-b kind=message chat_type=group mentioned=false thread=om_root_b" …]
+test result: FAILED. 1 passed; 3 failed
+```
+
+**变异 G —— 计数器换回 `events.dropped`（= 改前的共用）**：
+
+```
+test a_failed_cancel_save_counts_on_its_own_but_still_warns_in_status ... FAILED
+thread '...' panicked at crates/control/tests/commands.rs:422:5:
+assertion `left == right` failed: 落库失败该记在自己名下
+  left: 0
+ right: 1
+test result: FAILED. 23 passed; 1 failed
+```
+
+**变异 H —— 拆了名字但不把和加回 `dropped_note`**（= 用户彻底失去信号那一版）：
+
+```
+test a_failed_cancel_save_counts_on_its_own_but_still_warns_in_status ... FAILED
+thread '...' panicked at crates/control/tests/commands.rs:443:5:
+拆了名字不许让这句警告哑掉 —— 用户要的是「有没有事情没办成」：本群活跃任务：
+test result: FAILED. 23 passed; 1 failed
+```
+
+**变异 I —— 摘掉收尾那一行 `aite.counters`**：
+
+```
+test shutdown_prints_the_core_counters_before_it_says_down ... FAILED
+thread '...' panicked at crates/app/tests/counters_exit.rs:155:5:
+assertion `left == right` failed: 收尾该打**一行** aite.counters。全部日志：["aite.up …", "control.drop_ignored R8 丢弃：… event=ev-chat …", "aite.stopping grace=20 pending=0", "aite.down "]
+  left: 0
+ right: 1
+test result: FAILED. 0 passed; 1 failed
+```
+
+**变异 J —— 把它挪到 `aite.down` 之后**：
+
+```
+test shutdown_prints_the_core_counters_before_it_says_down ... FAILED
+thread '...' panicked at crates/app/tests/counters_exit.rs:185:5:
+aite.counters 要排在 aite.down 前面（对齐 edge 的退出四连）：counters 在第 4 行、down 在第 3 行
+test result: FAILED. 0 passed; 1 failed
+```
+
+十次变异后都恢复了正确版本并复跑绿（恢复走 `cp` 到目标路径，不是 `copy2`，
+mtime 是新的，cargo 不会跳过重编）。
+
+---
+
+### 测试数差额
+
+`864 → 874`（**+10**），逐条解释：
+
+| 文件 | 变化 | 多在哪 |
+|---|---|---|
+| `control/tests/commands.rs` | 19 → 23 | 回归表的第 1–4 条 |
+| `control/tests/wording.rs` | 11 → 12 | 第 5 条（新文案逐字） |
+| `control/tests/drop_logs.rs`（新） | 0 → 4 | 第 6–8 条，**外加 `support` 自带的那 1 条**（`parking_counts_even_when_nobody_is_waiting_yet` 在每个 `mod support` 的测试二进制里各算一次） |
+| `app/tests/counters_exit.rs`（新） | 0 → 1 | 第 9 条 |
+
+`contracts passed=25 failed=0` 与 `OK 25 files` **逐字未变**，`passed 10/10` 没掉，
+`cargo clippy --workspace --all-targets -- -D warnings` 干净。
+
+**假红复核**：这一轮没撞上 `passed=863 failed=1`。仍按派单把
+`cargo test -p aite --test reconnect_replay` **单独连跑了五遍**，`11 passed; 0 failed` ×5。
+
+**落盘无残留**：临时探针（`control/tests/bb1_probe.rs`）与两个 `.bak` 已删，
+真二进制跑出来的东西全在 `mktemp -d` 的临时目录里，一个字节没进仓库。
+`git status --short` 只剩本轨该改的 7 个文件（5 改 2 新）+ 本回执与两处文档。
+
+---
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/control/src/ingress.rs` 的 `handler()` | 无条件返回 `Ok(())`，于是 gRPC 那一层（`edge-client/src/ingress.rs:152`）的 `Err` 分支**永远不进**，「`IngressError` → INTERNAL → 平台重推」这条设计在真机上是**死的** —— 而 `ingress.rs` 模块头与 `errors.rs:92` 都还写着它成立。`reconnect_replay.rs:777` 的断言注释早就说破了同一件事。要改就得同时想清楚「重推回来会不会被 R2 当重复吃掉」，不是小改 | 下一轮（**行为面，影响重推语义**） |
+| `docs/acceptance-M.md` §7 末「计数器：core 侧基本没有出口」整节 + 上半张表 | 本轨之后与代码不符了：那节写着「**没有对外查看入口** —— `counters()` 全仓没有任何非测试调用方」，现在有了（`run.rs` 的 `log_counters`）；表里也缺 `control.drop_nonhuman` / `control.drop_duplicate` / `control.drop_ignored` / `aite.counters` 四条新日志名。§8 第 3 条我按派单改了，§7 **不在本轨文档可写面**，没碰 | 下一轮 / 总管（**§8 已更新，§7 落在后面**） |
+| `core/crates/app/tests/reconnect_replay.rs:869` 附近 | 那条边界用例的注释写着追问「丢得**安静**，这也是它难被发现的原因」—— 本轨 ② 之后这半句只剩一半成立（照丢，但日志里点名了）。纯注释，但文件不在本轨可写面 | 下一轮（纯注释即可收） |
+| `core/crates/control/src/plane.rs` 的 `on_card_action`，`card_action` 为空那一支 | `events.bad_card_action` 同样是**一条被静默丢掉的事件**，本轨补 R1/R2/R8 时没顺手带上它（派单点名的是那三条）。同一类账，同一种补法 | 下一轮（小改，一行日志） |
+| `core/crates/control/src/plane.rs` 的 `cancel_task`，`running == true` 那一支 | AA2 转出来的那条**仍然挂着**：注释写着「证据、收卡片、还沙箱都交给它下一步开头做」，而 `Answering` 没有下一步。本轨只碰了同函数里落库失败那一支的计数器，没碰它 | 下一轮（AA2 已记，此处确认还没销） |
+
+### 没做的 / 拿不准的
+
+1. **④ 的缓冲没做**，理由和三个问题的答案写在 ④ 里。这是派单允许的两种结局之一，
+   但要说清：**边界本身一个字没变**，用户在乱序那一刻仍然零回复、那句话仍然彻底消失。
+   变的只是这件事从此在日志里数得出来。
+2. **`!status` 没扩**（③ 的建议里那两条路都超出可写面）。所以「**跑着的时候**查不到
+   计数器」这一半缺口**还在** —— 要停一次进程才看得到 `aite.counters`，
+   和 edge 侧是同一个形状。§8 第 3 条里如实写着这一半没销。
+3. **`aite.counters` 没有进程层测试**（真二进制 + SIGTERM 那种）。本轨用真二进制**手跑**过
+   一次并把原样贴在 ③ 里，但常驻回归是进程内那条（`counters_exit.rs`，走 `run_app`）。
+   `signals.rs` 有现成的进程层脚手架，可它是别人的文件，照抄一份到我的新文件里
+   要连带复制 ~60 行配置拼装 —— 收益（多验一层 tracing 订阅者的真实装配）
+   小于那份重复的维护成本。如实记下，总管认为值就补。
+4. **`!stop #A99` + 空列表该归哪一格是我自己定的**（详见 ① 末），派单表的第 1 行和
+   第 3 行在这个形状上重叠。选择写进了 `stop_unknown_task` 的注释，换选择那条会红。
+5. **`dropped_note()` 现在数的是两个计数器的和** —— 这是本轨对「共用一个计数器」那条
+   判断的落实，但它让那句话的口径从「一个计数器」变成「一类事情」。如果总管认为
+   那句警告只该说路由丢的事件，把和拆回去即可（变异 H 演示了后果：用户彻底失去信号）。
+6. **我觉得该做、但越界了的一件**：`edge-client/src/ingress.rs:152` 那条 WARN 缺 `kind`
+   字段，而 §7 那张表把 `ingress.handle_failed` 的字段写成 `event=… kind=… err=…`。
+   它今天不可达（见记账第一条），可一旦第一条被修好，它就是产品路径上的日志。
+   `edge-client/**` 不在本轨可写面，没碰。

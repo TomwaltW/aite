@@ -31,7 +31,7 @@ pub use ingress::{Ingress, SLOW_CALLBACK_SEC};
 pub use plane::{
     ControlDeps, InProcessControlPlane, NO_ACTIVE_TASK_TEXT, NO_SUCH_TASK_TEXT, PlaneState,
     REAPER_INTERVAL_SEC, RESTART_EMPTY_TEXT, ROUTE_NEW_TASK, ROUTE_STEER, SleepFn, WallClock,
-    restart_while_delivering_text, stop_while_delivering_text,
+    restart_while_delivering_text, stop_needs_task_no_text, stop_while_delivering_text,
 };
 
 /// 取锁，中毒也不 panic（§7.7：`unwrap/expect` 不落在运行期可失败的路径上）。

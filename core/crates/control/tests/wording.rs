@@ -379,6 +379,29 @@ fn stop_while_delivering_text_is_byte_exact() {
     );
 }
 
+/// `!stop` 省略任务号、而本群有多个活跃任务时那句话，逐字钉住（BB1 新加）。
+///
+/// 它收的是 W2 记过、AA2 确认还没销的那条账：用户刚在 `!status` 里看见三个任务，
+/// 敲一句 `!stop` 被告知「没有这个任务」。缺的是「指哪一个」，不是「有没有」，
+/// 所以这句话有两件事要做 —— 说清要带任务号，并把可选的**原样列出来**。
+#[test]
+fn stop_needs_task_no_text_is_byte_exact() {
+    assert_eq!(
+        aite_control::stop_needs_task_no_text(&["#A17".to_string(), "#A18".to_string()]),
+        "本群有 2 个活跃任务，要停哪个请带上任务号：#A17、#A18。"
+    );
+    // 多个时同样用顿号并成**一句**（口径与 `restart_while_delivering_text` 一致），
+    // 条数照实说 —— 用户据此知道自己看全了没有。
+    assert_eq!(
+        aite_control::stop_needs_task_no_text(&[
+            "#A17".to_string(),
+            "#A18".to_string(),
+            "#A19".to_string()
+        ]),
+        "本群有 3 个活跃任务，要停哪个请带上任务号：#A17、#A18、#A19。"
+    );
+}
+
 /// `!restart` 撞上交付中的任务时那句话，逐字钉住（AA2 新加）。
 ///
 /// 和上一句是同一件事的两种说法 —— 那句是「你指着它要停」，这句是
