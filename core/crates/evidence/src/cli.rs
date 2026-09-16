@@ -561,6 +561,37 @@ impl Detailer {
                 keep,
             );
         }
+        // 卡片的发送与更新（BB2 ②）。它们复用 checklist_op 而不是新开两个 kind ——
+        // 理由写在 `worker/src/card.rs` 的 `write_evidence` 上。
+        // `push` 是真调出去的第几次 `update_card`，`merged` 是这一次把多少次待发变更
+        // 折叠了进来：M3 数「卡片更新次数」数的是 push，两者的差是 W4 省下的调用。
+        if op == "card_sent" || op == "card_updated" {
+            for k in ["card_id", "chat_id", "status", "items", "push", "merged"] {
+                if let Some(v) = p.get(k) {
+                    keep.insert(k.to_string(), v.clone());
+                }
+            }
+            let items = field_or(p, "items", "?");
+            let detail = if op == "card_sent" {
+                format!(
+                    "card_sent card={} chat={} {} 项 status={}",
+                    field_or(p, "card_id", "?"),
+                    field_or(p, "chat_id", "?"),
+                    items,
+                    field_or(p, "status", "?"),
+                )
+            } else {
+                format!(
+                    "card_updated 第 {} 次 card={} {} 项 status={}（合并了 {} 次变更）",
+                    field_or(p, "push", "?"),
+                    field_or(p, "card_id", "?"),
+                    items,
+                    field_or(p, "status", "?"),
+                    field_or(p, "merged", "?"),
+                )
+            };
+            return (detail, keep);
+        }
         (format!("{op} {}", clip(&dumps_sorted(p), 70)), keep)
     }
 
@@ -744,10 +775,19 @@ pub fn load_timeline(task_dir: &Path, price_in: f64, price_out: f64) -> Timeline
     let mut prev = GENESIS.to_string();
     let mut first_at: Option<DateTime<Utc>> = None;
     let mut first_task_id: Option<String> = None;
-    let mut index: u64 = 0; // 期望的 seq，跳过空行后连续
+    // 期望的 seq。**空行也占一个号**，这是跟 `FileEvidenceWriter::verify` 对齐的口径：
+    // 那边直接拿 `lines().enumerate()` 的下标当期望 seq，空行 `continue` 掉、下标却已经
+    // 消耗掉了 ——「events.jsonl 不许有空行」就是那么钉住的（`writer.rs` 里那句注释）。
+    // 这里原本写的是「跳过空行后连续」，于是中间插一个空行，`verify()` 判 false 而
+    // `evidence show` 一句话都不说：同一份文件，两个工具两个答案。
+    // （BB2 实测出来的口径漂移，现在由 `tests/verify_agreement.rs` 整条矩阵钉着。）
+    let mut index: u64 = 0;
+    let mut blanks: usize = 0;
 
     for (line_no, line) in raw.lines().enumerate().map(|(i, l)| (i + 1, l)) {
         if line.trim().is_empty() {
+            index += 1;
+            blanks += 1;
             continue;
         }
         let ev: EvidenceEvent = match serde_json::from_str(line) {
@@ -788,8 +828,15 @@ pub fn load_timeline(task_dir: &Path, price_in: f64, price_out: f64) -> Timeline
         }
 
         if ev.seq != index {
+            // 空行是「seq 对不上」最常见的成因，单说「seq 不连续」会让人去查上一条事件，
+            // 而问题其实在两条事件之间的那一行什么都没有的地方。
+            let problem = if blanks > 0 {
+                format!("seq 不连续（前面有 {blanks} 个空行，events.jsonl 不许有空行）")
+            } else {
+                "seq 不连续".to_string()
+            };
             tl.issues.push(
-                ChainIssue::new(line_no, Some(ev.seq), "seq 不连续")
+                ChainIssue::new(line_no, Some(ev.seq), problem)
                     .with(index.to_string(), ev.seq.to_string()),
             );
             broken = true;

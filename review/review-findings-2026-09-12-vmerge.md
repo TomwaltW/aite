@@ -3932,3 +3932,603 @@ mtime 是新的，cargo 不会跳过重编）。
    字段，而 §7 那张表把 `ingress.handle_failed` 的字段写成 `event=… kind=… err=…`。
    它今天不可达（见记账第一条），可一旦第一条被修好，它就是产品路径上的日志。
    `edge-client/**` 不在本轨可写面，没碰。
+
+## 十九、BB2 回执 —— 2026-09-15
+
+`docs/acceptance-M.md` §8 七条观测缺口里证据面的五条。**本轨的活分成两半，交付形态不一样**：
+
+| | 内容 | 落在哪 |
+|---|---|---|
+| ② ③ + 「两处 verify 口径一致」那条测试 | 卡片进证据、三处「记了等于没记」、口径漂移的钉子 | **已经在 `task-bb2` 这棵树上**，check.sh 全绿 |
+| ① `created_at` 进 hash 链 | 改的是证据链的定义 | **一行都不在树上**，全部走 `review/bb2-created-at-chain-patch.py`，由人跑 |
+
+① 之所以整条走补丁脚本：它横跨两片本轨写不了的面，而且**任何**改动落盘 hash 的方案都会
+把 `core/crates/app/tests/{evidence_on_disk,cold_start_to_delivery}.rs` 各一行断言打红
+（那两行逐字钉着旧口径的式子），那两个文件是派单纪律的只读面。详见 ①.2。
+
+### 基线与开场自检
+
+HEAD `7019c48`（与派单抬头一致），`git status --short` 空。`scripts/check.sh` 一次跑过，
+**五行关键值与派单期望逐字相同**：
+
+| 行 | 实测 |
+|---|---|
+| A3/C2 契约锁 | `OK 25 files` |
+| C1 契约测试 | `contracts passed=25 failed=0` |
+| B 全量 cargo test | `cargo passed=864 failed=0` |
+| B 全量 go test（-race） | 六个包全 `ok`（aiteerr 2.179s / config 3.330s / feishu 10.694s / ingress 6.180s / sandbox 8.537s / server 6.745s） |
+| B8 评测 | `passed 10/10` |
+
+末行「全部通过」，退出码 0。**没撞上那三个抖动 target。**
+
+守卫拦截那一条**真跑了**，Read `.claude/hooks/guard_bash.py` 被拦下，逐字：
+
+```
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+**收尾复跑**（改完之后，本轨这棵树）：
+
+| 行 | 实测 | 对基线 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | **逐字不变** ✔ |
+| C1 契约测试 | `contracts passed=25 failed=0` | **逐字不变** ✔ |
+| B 全量 cargo test | `cargo passed=870 failed=0` | +6，逐条见下 |
+| B 全量 go test（-race） | 六个包全 `ok` | 不变 |
+| B8 评测 | `passed 10/10` | 不变 |
+
+`+6` 全是本轨新建的测试文件，**一条既有测试都没删**：
+
+| 文件 | 条数 | 干什么 |
+|---|---|---|
+| `core/crates/evidence/tests/verify_agreement.rs` | +2 | 两处 verify 口径一致（16 格损坏矩阵 + 目录不在那一格） |
+| `core/crates/worker/tests/test_card_evidence.rs` | +3 | ② 的卡片证据（条数对得上平台调用、merged 语义、没卡片就没证据） |
+| `core/crates/app/tests/evidence_created_at_repro.rs` | +1 | ① 的现场生成器（跑完在 `core/target/bb2-evidence/` 留一份真证据目录） |
+
+`core/crates/worker/tests/test_final.rs` 里有两条**改了断言但没加减条数**（worker/tests 在可写面）：
+`evidence_chain_covers_the_run` 改成按 `op` 数而不是按 kind 数；
+`gateway_tool_result_is_recorded_as_hash` 的键集合加上 `content_summary` / `sandbox_id`。
+
+---
+
+### ① `created_at` 进 hash 链
+
+#### ①.1 先把病复现出来（改代码之前跑的）
+
+现场是**真跑出来的**：新建的 `core/crates/app/tests/evidence_created_at_repro.rs` 走
+`build_app` → 真 worker → 真 control plane → 真 `FileEvidenceWriter`，
+payload 是实际时序里一条条追加的，17 条事件，落在 `core/target/bb2-evidence/`（`.gitignore` 里）。
+
+**改前 · 原样**（`aite evidence show --dir <现场> --tail 3` 的汇总段，逐字）：
+
+```
+── 汇总 ──────────────────────────────────────────────────────────────────────────────────────────────────
+事件      17 条，跨度 0.02s，终态 delivered
+模型调用  4 次 · token in=0 out=0 合计=0 · 花费 ¥0.0000
+工具调用  4 次（失败 0 次）
+产出文件  1 个
+hash 链   OK · 17 条全部闭合，root_hash 与 manifest 一致
+          root 79329969924016d7eb46e1126811d078d2551be63644016c5f0756c9d8f0f692
+-> exit 0
+```
+
+**只改一条 `created_at`**（seq=8 往后挪 37 分钟，别的字节一个没动）：
+
+```
+seq=8: 2026-09-15T14:58:14.165295Z -> 2026-09-15T15:35:14.165295Z
+```
+
+**改后**（同一条命令，逐字）：
+
+```
+── 汇总 ──────────────────────────────────────────────────────────────────────────────────────────────────
+事件      17 条，跨度 0.02s，终态 delivered
+模型调用  4 次 · token in=0 out=0 合计=0 · 花费 ¥0.0000
+工具调用  4 次（失败 0 次）
+产出文件  1 个
+hash 链   OK · 17 条全部闭合，root_hash 与 manifest 一致
+          root 79329969924016d7eb46e1126811d078d2551be63644016c5f0756c9d8f0f692
+-> exit 0
+```
+
+**逐字相同，连 root_hash 都一个字符没变。** 而这时候的时间戳已经是这样：
+
+```
+7 tool_call    2026-09-15T14:58:14.149402Z
+8 tool_result  2026-09-15T15:35:14.165295Z     ← 比后面那条晚 37 分钟
+9 model_call   2026-09-15T14:58:14.166769Z
+```
+
+链自己都非单调了，`verify` 照样说 OK。**这就是「一条证明不了自己时序的证据链」的样子。**
+
+> 顺带一条与派单不符的小事：**没有 `aite evidence verify` 这个子命令**，
+> `aite evidence` 只有 `show`（`cli.rs` 的 `enum Cmd`），校验是 `show` 顺带做的、
+> 靠退出码 0/1 表达。上面用的就是它。
+
+#### ①.2 三个兼容问题的答案
+
+**（1）已经落盘的旧证据怎么办？会不会全判红？**
+
+**会，全红。** 补丁落地之后，`FileEvidenceWriter::verify` 对任何 RΩ 之前落的目录都返回
+false，`aite evidence show` 退出码 1。但**不是一堆看不懂的 hash 对不上** —— `load_timeline`
+会先拿旧口径重算一遍，认出来之后只报一条人话（实跑，拿打了补丁的二进制去看①.1 那份旧目录）：
+
+```
+hash 链   断了 ✗ · 查了 17 条，发现 1 处问题
+          第 1 行（seq=0）：这一条起是旧口径（created_at 不进链，RΩ 之前落盘的证据）—— 不是被改过；后面同样的不再逐条列
+            期望 ce25336bfbe57b9bc3d8a05e66e1133ce4119369cbd6a50ddefdb01dd1ff9ed4
+            实际 72b066bbaf425377e600114adf05da2a4ccf1a181deea2a8e88282d272db1efa
+          → 这份证据不可信，别拿它当验收依据；先确认目录有没有被人手改过。
+```
+
+（收敛成一条是刻意的：不收敛的话 17 条事件就刷 17 块一模一样的话，
+几百条事件的真机目录会把**真正被改过的那一条**埋掉。）
+
+内容仍然逐条可读 —— 渲染不依赖链，时间线、token、花费、终态照常出。
+
+**给总管的动作**：重锁之前先把 `data/evidence/` 整个挪到 `data/evidence-p0.1-legacy/`，
+M1–M6 重跑。（`data/` 不入库，本轨碰不到，只能提醒。）
+
+**（2）兼容策略选哪条？→ 一刀切。**
+
+三条路摆在一起，**前两条是被事实排掉的，不是权衡掉的**：
+
+| 选项 | 为什么不行 / 行 |
+|---|---|
+| 只对新事件生效（同一份文件混两种口径） | **直接出局。** 等于给改证据的人一个开关：把某一条退回旧口径，就能随便改它的时间戳而链不断。这条路把新口径的全部意义抵消掉了。 |
+| 链里加版本位 | **技术上走不通。** 版本位必须自己也被 hash 盖住才有用 → 得往 `EvidenceEvent` 加字段；而它在 `core/crates/testing/src/fake_store.rs:496` 与 `core/crates/control/tests/support/mod.rs:754` 有**字面量构造点**（两处都在本轨只读面），加字段 = 那两个 crate 直接 E0063 编不过。退而求其次放 manifest 里也不行：manifest 不进链、可以单独改，而且它的 8 键形状被 `app/tests/evidence_on_disk.rs` 钉着。 |
+| **一刀切**（选它） | 代价只有一条：旧目录判红。而旧目录**本来就证明不了自己的时序**，判红说的正是实话。加上上面那句人话诊断，「链真被改过」和「这只是旧口径」分得开。 |
+
+**还有一条只有一刀切才拿得到的好处**：它顺手把「整份降级」这条路也堵死了。
+假如走版本位，改证据的人可以把整份文件的版本位抹掉、退回旧口径，`verify` 照样绿；
+一刀切之下旧口径整份不认，他只能按新口径重算，那就必须同时改 `manifest.root_hash`
+和库里的 `Task.evidence_root_hash` —— 从「sed 一下时间戳」变成「改三个地方还得对上」。
+
+**（3）`writer.rs:76` 那段精度注释在新口径下还成不成立？**
+
+**成立，但它的性质变了 —— 从「好看」变成了校验的前提，所以注释必须跟着改**（补丁第 8 条）。
+
+先说核实到的事实，有两条与那段注释的字面表述不符：
+
+1. **Rust 落盘的小数位不是「一律 6 位」。** chrono 0.4.45 给 `DateTime<Utc>` 的
+   `Serialize` 走的是 `write_rfc3339(..., SecondsFormat::AutoSi, true)`
+   （`chrono-0.4.45/src/datetime/serde.rs:32-50`），**按值挑 0/3/6/9 位**。
+   `now_micros()` 截到微秒只保证 ≤6 位，不保证 =6 位：整毫秒的值落盘就是 3 位，
+   整秒的值落盘一位小数都没有。①.1 那份现场里也能看到 `2026-09-15T14:58:14.145414Z`
+   这种 6 位的，换个时刻就会是 3 位。Python 的 `datetime.isoformat()` 则是
+   「microsecond 非 0 打 6 位，为 0 一位不打」，**从不打 3 位** —— 同一个瞬间，
+   两边的字符串可以不一样。
+2. **`canonical_json` 从来没见过 `created_at`。** 它只吃
+   `payload: &Map<String, Value>`（`contracts/src/evidence.rs:52`），
+   而 `created_at` 是信封字段，不进 `payload_hash`。所以「`canonical_json` 现在怎么处理
+   时间戳」这个问题的答案是：**不处理，它根本拿不到**。新口径得自己发明一个规范形。
+
+由此定下的做法：**进 hash 的不是落盘那串字节，而是从 `DateTime<Utc>` 的值重新格式化出来的
+规范形 `%Y-%m-%dT%H:%M:%S%.9fZ`（固定 9 位小数）。**
+
+- 为什么不拿落盘字符串：`verify` 读回来的是解析后的 `DateTime`，原串已经没了；
+  重新序列化又会被 AutoSi 改写（`.5Z` 解析回来再序列化是 `.500Z`），拿它算就会把
+  合法文件判红。
+- 为什么 9 位不是 6 位：9 位是 `DateTime<Utc>` 存得下的全部精度，规范化**不丢信息**
+  （同一个值 ⇔ 同一个串）。截到微秒的话，差半微秒的两个瞬间会撞出同一个 hash，
+  等于在链上留一条改时间戳不留痕的窄缝。
+- `now_micros()` 那一刀**留着**，而且现在更要紧了：它让规范形的末三位恒为 `000`，
+  Python 侧（只有微秒）补三个 0 就能算出同一个串。**这条从「两边落盘形状一致」升级成了
+  「两边算得出同一条链」**，补丁把这层意思写进了注释。
+
+新口径的冻结向量（补丁把它们同时写进 `contracts/src/evidence.rs` 的向量表和
+`contracts/tests/evidence_vectors.rs` 的断言里）：
+
+```
+created_at "2026-09-11T00:00:00Z"        规范形 2026-09-11T00:00:00.000000000Z
+chain_hash_at(GENESIS, {"a": 1} 的 payload_hash, ·)
+                      9908ad2d6e03c3367df5bfeeca4c53461e8e4c6301998b38ade99a290c4762fb
+created_at "2026-09-11T00:00:01.123456Z" 规范形 2026-09-11T00:00:01.123456000Z
+chain_hash_at(上一条 hash, {"b": "文"} 的 payload_hash, ·)
+                      21246f40581fa141268ed7a25c30b922fbeabc6807487cf075a4d185ad07c64b
+```
+
+§3.1 那两个旧 hash 向量**没删**，只是钉的位置变了：从「落盘 hash 等于它」变成
+「`chain_hash` 这个函数还是那个式子」—— 读旧证据目录要靠它认口径。
+
+#### ①.3 改后：同一个攻击，红
+
+在打了补丁的副本里跑同一份现场生成器（22 条事件，比①.1 多 5 条卡片证据），
+再改同一个 seq=8 的 `created_at`：
+
+```
+########## 改后 · 改前（原样） ##########
+exit=0
+hash 链   OK · 22 条全部闭合，root_hash 与 manifest 一致
+          root 98159532598b72a7a98ed793f8d046d796e8a522336bec1a74d13f8cfa11f410
+
+########## 改后 · 改掉 seq=8 的 created_at ##########
+seq=8: 2026-09-16T01:51:43.464155Z -> 2026-09-16T02:28:43.464155Z
+exit=1
+hash 链   断了 ✗ · 查了 22 条，发现 1 处问题
+          第 9 行（seq=8）：hash != chain_hash_at(prev_hash, payload_hash, created_at)
+            期望 2c3dc68391ce9733b785702980d129fc94059b8c82548c6de19d87700910bc47
+            实际 c499a4c9b55057be396d75d137c592f7f69b051cc56da9b93d0636e0e5cbbe05
+          → 这份证据不可信，别拿它当验收依据；先确认目录有没有被人手改过。
+```
+
+**改前 exit 0 / 改后 exit 1，问题直接点到第 9 行 seq=8。**
+
+---
+
+### 「两处 verify 口径一致」那条测试 —— 以及它当场抓到的一处真漂移
+
+`core/crates/evidence/tests/verify_agreement.rs`。16 格损坏矩阵（改 payload / payload_hash /
+prev_hash / hash / seq / task_id / **created_at** / 删行 / 插空行 / 插非 JSON 行 / 残行 /
+外置 payload 缺失 / 清空 / 非法 UTF-8 / 干净 / 目录不在），每格都断言
+`writer.verify() == timeline.issues.is_empty()`。
+
+**它故意不判「谁对」，只判「两边一样」** —— 所以口径本身改了（比如 `created_at` 进链），
+这个文件一个字都不用动，照样在钉。打了补丁的副本里它照旧 2 passed，这一点是验过的。
+
+> 比的是**链上的判定**，不是 `Timeline::ok()`：后者还含 `manifest_problems`，
+> 而 `verify()` 按设计根本不读 manifest。拿 `ok()` 去比是在拿两个不同范围的东西较劲。
+
+**这条测试第一次跑就红了 —— 抓到一处真漂移**（逐字）：
+
+```
+两处 verify 口径漂了 1 格：
+  「中间插一个空行」：writer.verify=false，cli 的链上问题=0（无）
+```
+
+根因：`writer.rs::verify_sync` 拿 `lines().enumerate()` 的下标当期望 seq，空行 `continue`
+掉但**下标已经消耗掉了** ——「events.jsonl 不许有空行」就是这么钉住的（那里的注释写着）。
+而 `cli.rs::load_timeline` 另起了一个「跳过空行后连续」的 `index`。于是中间插一个空行，
+`verify()` 判 false、`evidence show` 一句话都不说。**同一份文件，两个工具两个答案。**
+
+修的是 cli 那边（`writer.rs` 的口径是对的，`app/tests/evidence_on_disk.rs` 也断言
+「events.jsonl 不许有空行」）：空行也占一个号，并在 `seq 不连续` 那条 issue 上补一句
+「前面有 N 个空行」，免得人拿着「seq 不连续」去查上一条事件 —— 问题其实在两条事件之间
+那一行什么都没有的地方。**这一处改在本轨树上**（`cli.rs` 在可写面）。
+
+#### 变异验证（双向各一次，都红了）
+
+还原源码用 `cat` 重写而不是 `cp -p`：保留旧 mtime 会让 cargo 跳过重编，验出假绿。
+
+| # | 变异点 | 期望 | 实测 |
+|---|---|---|---|
+| 0 | 不动 | 2 passed | `test result: ok. 2 passed` |
+| 1 | **writer 侧** `verify_sync` 的 `payload_hash` 校验短路 | 红 | `「改 payload 的内容」：writer.verify=true，cli 的链上问题=1（行2 payload 与 payload_hash 对不上（内容被改过））` → `FAILED. 1 passed; 1 failed` |
+| 2 | **cli 侧** `load_timeline` 的 `payload_hash` 校验短路 | 红 | `「改 payload 的内容」：writer.verify=false，cli 的链上问题=0（无）` → `FAILED. 1 passed; 1 failed` |
+| 3 | 还原 | 2 passed | `test result: ok. 2 passed` |
+
+**第一次的变异 2 选错了点，如实记下来**：原本短路的是 cli 的 `prev_hash` 校验，
+结果测试**没红**。原因是 cli 里 `prev_hash` 的检查与紧随其后的 `hash` 检查在这个矩阵下
+是冗余的 —— 改了 `prev_hash` 而不重算 `hash`，`hash` 那条一样会响。
+换成对称的 `payload_hash` 才真正把 cli 那一侧钉住。
+**结论：cli 的 `prev_hash` 检查这条测试独立钉不住**，见「没做的」第 4 条。
+
+---
+
+### ② 卡片进证据
+
+#### 事件发在哪一层：`CardCoalescer` 真调平台的那两行后面
+
+`send_card` 只在 `CardCoalescer::ensure_card` 里调一次、`update_card` 只在
+`CardCoalescer::flush` 里调。而 `agent.rs` 那边有**三个**入口会触发推送
+（`maybe_flush` / `refresh_card` 里的 `update` / `close_card` 里的 `force_flush`）。
+
+在那三处各写一遍证据有两个毛病：**数的是「worker 想更新几次」而不是「真发出去几次」**
+（W4 的合并把前者压小成后者，而 M3 要数的是后者），而且三处迟早会漏一处。
+所以证据贴在 `ensure_card` 与 `flush` 两处真调用的后面 —— 数不错，也漏不掉。
+`CardCoalescer` 因此多拿一个 `Arc<dyn EvidenceWriter>` 和 `task_id`，
+方法的错误类型从 `PlatformError` 换成 `RunError`（它 `#[from]` 了 Platform 与 Evidence 两种，
+三个调用点原来就是 `?` 进 `RunError`，一行没改）。
+
+证据写在**平台调用成功之后**：平台报错那一次卡片并没有变，记上就是多算一次。
+
+`card_updated` 带两个数：`push`（真调出去的第几次，从 1 起连续，断号就是漏记）与
+`merged`（这一次折叠了多少次待发变更）。两者的差就是 W4 省下来的调用。
+
+顺带补了两条日志（§8 说「也没有日志」）：`worker.card_sent` / `worker.card_updated`。
+
+#### 一处必须跟着改的次序
+
+卡片证据一加，链的最后一条就从 `delivered` 变成了 `checklist_op`
+（三条终态路径原来都是「先写终态证据、再收卡片」）。这会让 `aite evidence show`
+的「终态」读不出来（`cli.rs::is_terminal_kind` 认的是最后一行的 kind），
+而且 `app/tests/{evidence_on_disk,cold_start_to_delivery}.rs` 都断言最后一条是 `delivered`。
+
+所以 `deliver` / `fail` / `cancel` 三处的 `close_card` 都挪到了终态证据**之前**。
+先收卡片、再落终态，链的收口顺序才和「任务真的结束了」对得上。
+`test_card_evidence.rs` 里有一条专门钉这个次序。
+
+#### 新枚举 vs 复用 `checklist_op`：**选了复用**
+
+派单说「如果你判断复用更好，那是更优解」。判断是：**复用更好**，三条理由：
+
+1. **验收硬要求。** 新开 `EvidenceKind::CardSent/CardUpdated` 要动 `EvidenceKind`，
+   它在 `core/crates/contracts/**` —— 契约锁那 25 个文件之一。一动
+   `OK 25 files` 与 `contracts passed=25 failed=0` 就变，而派单写着这两行必须逐字不变。
+   （`contracts/tests/frozen_values.rs` 还钉着 `EvidenceKind::ALL.len() == 10`。）
+2. **能闭环。** 不动契约就意味着 ② 可以整条落在本轨可写面里，真测真跑；
+   走枚举的话它会和 ① 一起变成「等人跑补丁」的状态，本轨交不出可验证的东西。
+3. **语义上不勉强。** 卡片就是 checklist 的呈现面，`checklist_op` 的 `op` 本来就是
+   `add/check/fail/note` 的开放集合，多两个值不改任何既有语义。
+   `aite evidence show` 认得它们（`Detailer::checklist_op` 里加了一支渲染）。
+
+**M3 现在这么数**（实跑过，输出 4，与那份 22 条现场里的 `update_card` 次数一致）：
+
+```bash
+aite evidence show <task_id> --only checklist_op --json \
+  | python3 -c "import json,sys; rows=json.load(sys.stdin)['events']; \
+    print(sum(1 for r in rows if r['fields'].get('op')=='card_updated'))"
+```
+
+一条 `card_updated` 在 `--json` 里长这样：
+
+```json
+{
+  "seq": 7, "kind": "checklist_op",
+  "detail": "card_updated 第 1 次 card=card-1 3 项 status=working（合并了 1 次变更）",
+  "fields": {"card_id": "card-1", "items": 3, "merged": 1, "op": "card_updated", "push": 1, "status": "working"}
+}
+```
+
+---
+
+### ③ 三处「记了等于没记」：**三条都做了**
+
+| # | 做了没 | 怎么做的 / 为什么 |
+|---|---|---|
+| 沙箱 id | **做了** | 走 Gateway 的 `tool_result` 多一个 `sandbox_id`。在**调用之后**问 `gateway.sandbox_id_of()` —— 容器是这次调用里按需 acquire 的，调用前问只会拿到 `None`。不碰沙箱的工具这里是 `null`：「没有沙箱」和「漏记了」因此分得开（键一定在，值可能为 null，`test_final.rs` 的键集合断言钉着）。派单说「优先做这条」，确实最顺手。 |
+| `tool_result` 摘要 | **做了** | 多一个 `content_summary`，`clip(content, 200)`（折叠空白 → 一行）。200 与 `Task.result_summary` 同一个数，排障时两处好对照；够装下一条 traceback 的最后一行，正是 §8 说「排 M3 的沙箱问题时最疼」的那一行。**不进 `content_hash`** —— 那个 hash 照旧对全文算，摘要进去就变成「改摘要即改哈希」。`test_final.rs` 里那条 `content_hash` 断言一个字符没动，就是这条的证据。 |
+| `checklist_op` 带文本 | **做了** | check/fail 的 payload 多一个 `text`。**派单/§8 给的代价前提不成立**：担心的是「checklist 项的文本不短」，而 `checklist_add` 那边早就 `clip(·, MAX_ITEM_CHARS=20)` 过了 —— 一份副本最多 20 个字符，一条事件多 ~30 字节。代价既然是这个量级，就没有理由让每个消费方各自回放一遍。`evidence show` 的回放**没删**，所以旧证据目录照旧读得懂。 |
+
+**脱敏这件事要说清楚**（派单点名问了 `Redactor` 认不认识摘要）：**不认识，而且不该指望它**。
+`Redactor` 在 `core/crates/app/src/preflight.rs`，只在起飞自检那条路上、只认配置里的环境变量名，
+根本不在证据这条路上；`evidence show` 里的 `redact()` 是**渲染时**按键名打码的，
+只作用在 `tool_call` 的 `arguments` 上。所以摘要是原文入盘的。
+**这不是新开的口子**：`tool_call` 证据早就把 `arguments` **全文**原样存进去了
+（`agent.rs` 的两处 `"arguments": args`），摘要存的是同一趟调用的输出侧，风险面没有变大。
+真要收紧，该收的是整个证据面的写入侧脱敏 —— 那是单独一件事，见「记账转出去的」。
+
+---
+
+### ④ 补丁脚本
+
+`review/bb2-created-at-chain-patch.py`，骨架照 `review/aa4-proto-patch.py`：
+锚点字面量精确替换、**要求恰好命中 1 次**、一条对不上整份拒写、落盘后读回复验、
+`--check` 干跑、`--root` 自验、没有 `AITE_RELOCK=1` 且没有 `--root` 就当场拒绝执行。
+
+**23 处改动、8 个文件**：
+
+```
+core/crates/contracts/src/evidence.rs             3 处   新增 canonical_created_at / chain_hash_at；字段注释；向量表
+core/crates/contracts/src/lib.rs                  1 处   导出两个新函数
+core/crates/contracts/tests/evidence_vectors.rs   2 处   新口径冻结向量 + 「动时间戳就换链」
+core/crates/evidence/src/writer.rs                6 处   落盘 + 两处 verify 之一 + 精度注释
+core/crates/evidence/src/cli.rs                   3 处   两处 verify 之二 + 「旧口径」诊断
+core/crates/evidence/tests/chain.rs               3 处   B7 向量改重算 + 两条 created_at 新用例
+core/crates/app/tests/evidence_on_disk.rs         2 处   逐行重算链那一行（派单只读面，理由见开头）
+core/crates/app/tests/cold_start_to_delivery.rs   2 处   同上
+```
+
+AA4 那份的合法性闸是 gofmt / protoc；这份是 **rustfmt**：把改完的整份源码喂给
+`rustfmt --edition 2024 --emit stdout`，要求输出与输入**逐字节相同** —— 既验可解析、
+又验已经是 rustfmt 形态（A4b `cargo fmt --check` 是硬判据）。
+**这道闸真拦住过两次**：一次是 `chain_hash_at` 的签名被我手写成了多行（rustfmt 要一行），
+一次是 `tl.issues.push(...)` 的换行位置。两次都是「一个字节都没写」就退了。
+
+#### ④.1 自验矩阵（六格）
+
+全部对着 `/tmp` 下的副本跑。**每格跑完都量一次真仓库那 8 个文件的 sha256，全程未变** ——
+这句话是量出来的，不是脚本自己说的（`scratchpad/sha8.py`）。
+
+| # | 情形 | 期望 | 实测 |
+|---|---|---|---|
+| 1 | `--root <干净副本> --check` | 23 处各命中 1、rustfmt 八个文件全过、不写盘、退 0 | ✅ 退 0，`命中 1 条` 恰好 23 行 |
+| 2 | `--root <副本>`（真写） | 写 8 个文件 + 读回复验、退 0 | ✅ 退 0，`[读回 OK] 23 处新内容全部在盘上` |
+| 3 | 对**已打过**的树再跑 | 整份拒写、报人话 | ✅ 退 1，19 处命中 0 并报「看起来这一处已经打过了」（另 4 处见下注） |
+| 4 | **无 `AITE_RELOCK`、无 `--root`**（指向真仓库） | 当场拒绝、一个字节不碰 | ✅ 退 1，8 个文件 sha 未变 |
+| 5 | 副本里某一处锚点被人**改过一个字**（`writer.rs` 那行末尾加个注释） | **整份**拒写 —— 另外 22 处虽然命中 1 也不许落 | ✅ 退 1，`core/crates/evidence/src/writer.rs 第 9 条：锚点命中 0 条（要求恰好 1 条）`；**被动过的那棵树 8 个文件 sha 也全都没变** |
+| 6 | 把某处新内容的缩进弄错 | rustfmt 闸拦住，一个字节不写 | ✅ 退 1，`evidence.rs 改完之后不是 rustfmt 形态（多半是某行超了 100 列、或者缩进对不上）。A4b cargo fmt --check 会红。` |
+
+> **第 3 格那 4 处如实记一笔**：第 3、6、11、15 条是「在锚点后面追加」型的改动，
+> 替换文本里**包含**锚点自己，所以在已打过的树上它们照样命中 1。
+> **重复打补丁仍然不可能发生** —— 另外 19 处命中 0，一条对不上就整份拒写。
+> 第 1 条本来也是这种（`chain_hash` 那三行留着没删），已经把前面的 `sha256_hex`
+> 一起圈进锚点修掉了；剩下这 4 处圈不掉（它们本来就是纯追加）。
+
+#### ④.2 与 AA4 补丁的先后关系：**没有先后，怎么验的**
+
+选的是派单说的第一条路 —— **锚点避开 AA4 碰过的那几行**。理由：AA4 改的是
+`proto/aite/v1/edge.proto` 与 `edge/cmd/aite-edge/main.go` 的注释，
+本补丁那 8 个文件里一个都不是它们，两边的锚点文本也互不包含。
+显式拒绝执行反而会平白给总管加一道假门槛。
+
+**验法（两棵真树，不是推理）**：
+
+```
+树 A：git archive HEAD 出一份副本，不动          （AA4 未打）
+树 B：同样一份副本，先跑 AA4 那份补丁（退 0，两行「写了 …」+ 两行「[读回 OK]」） （AA4 已打）
+两棵树上各跑一次 python3 review/bb2-created-at-chain-patch.py --root <树> --check
+```
+
+结果：**两次都退 0，两次的输出 `diff` 无差异**（23 行 `命中 1 条` 逐字相同）。
+外加一条机器判据 —— 把两份脚本的文件集合直接取交集：
+
+```
+BB2 动的文件: core/crates/app/tests/cold_start_to_delivery.rs
+              core/crates/app/tests/evidence_on_disk.rs
+              core/crates/contracts/src/{evidence.rs,lib.rs}
+              core/crates/contracts/tests/evidence_vectors.rs
+              core/crates/evidence/src/{cli.rs,writer.rs}
+              core/crates/evidence/tests/chain.rs
+AA4 动的文件: edge/cmd/aite-edge/main.go
+              proto/aite/v1/edge.proto
+交集: 空 —— 两份互不相干
+```
+
+**但有一条真的先后关系，是另一个方向的**：本补丁应当在 **BB2 本轨合入之后**再跑。
+不是因为锚点冲突（本补丁的 cli.rs 三处锚点用的全是**原始**文本，在没有 BB2 改动的
+纯 HEAD 树上也照样命中 1 —— 上面树 A 就是那种树），而是因为①②③本来就是一件事：
+先只打 ① 的话，②③ 的测试还没进来，`cargo passed=` 的期望值会对不上下面的命令链。
+
+#### ④.3 补丁落地后，副本里的 `scripts/check.sh`
+
+在「BB2 工作区现状 + 补丁」的完整副本里跑了**完整的 check.sh**（冷编译全量）。
+**十二格里十格全绿，两格红，而且两格是同一个根因：本轨故意没重锁。**
+
+（下表跑在 22 锚点那一版补丁的副本上；23 锚点最终版又单独复跑过 B 那一格，
+`cargo passed=873 failed=1`、唯一红点仍是 `cli_smoke`，逐字相同 —— 多出来的那一处锚点
+只加注释与一个计数器，不加减任何测试。）
+
+| 格 | 结果 |
+|---|---|
+| A1 `cargo build --workspace` | exit 0 |
+| A2 `go build ./...` | exit 0 |
+| **A3/C2 契约锁 `--check`** | **exit 1 ✗** —— `MISMATCH 3 file(s)`：`contracts/src/evidence.rs`、`contracts/src/lib.rs`、`contracts/tests/evidence_vectors.rs` |
+| A4a `cargo clippy -D warnings` | exit 0 |
+| A4b `cargo fmt --check` | exit 0 |
+| A4c `go vet` / A4d `gofmt` | exit 0 |
+| A5 `cargo test --no-run` | exit 0 |
+| C1 契约测试 | exit 0，`contracts passed=27 failed=0`（+2 = 本补丁加的两条契约测试） |
+| **B 全量 `cargo test`** | **exit 1 ✗** —— `cargo passed=873 failed=1`，唯一红点 `-p aite --test cli_smoke` |
+| B 全量 `go test -race` | exit 0，六个包全 `ok` |
+| B8 评测 | exit 0，`passed 10/10` |
+
+那条红测试是 `contracts_lock_check_is_ok_on_a_clean_tree`，panic 原文与 A3 同源：
+
+```
+thread 'contracts_lock_check_is_ok_on_a_clean_tree' panicked at crates/app/tests/cli_smoke.rs:630:5:
+stdout= stderr=MISMATCH 3 file(s):
+  changed  core/crates/contracts/src/evidence.rs
+  changed  core/crates/contracts/src/lib.rs
+  changed  core/crates/contracts/tests/evidence_vectors.rs
+```
+
+`cli_smoke` 其余 22 条全过。**所以这两格红是「锁还没刷」的两个症状，不是两个问题** ——
+总管重锁之后它们一起转绿。（口径与 AA4 那一轮完全相同，只是文件数从 1 变成 3。）
+
+> ⚠️ **别跟「要喊人」的那一格搞混。** 本轨在**第一次**跑副本 check.sh 时撞上过
+> `cargo passed=872 failed=2`，红点是 `cli_smoke` **加上 `guard`**。
+> 查清楚了：`guard` 红的是 `the_hook_command_recovers_outside_the_repo_instead_of_bricking_the_session`，
+> 而 `git archive` 出来的副本**根本不是一个 git 仓库**。在副本里 `git init` 之后
+> 重跑，`guard` 18/18 全绿。**与补丁无关，是副本的环境缺陷。**
+> 上表那一轮是在 `git init` 过的副本里跑的。
+> （同一轮还红过 A4b —— 那次是**我自己新加的两个测试文件没 rustfmt 过**，
+> 不是补丁。已在本轨树上修掉，收尾复跑 A4b exit 0。）
+
+#### ④.4 给总管的命令链（每步带期望输出）
+
+在仓库根跑，**前提：BB2 轨已合入 main**。
+
+```bash
+# ── 1. 干跑 ────────────────────────────────────────────────────────────────
+AITE_RELOCK=1 python3 review/bb2-created-at-chain-patch.py --check
+```
+期望（退出码 **0**）：23 行 `[NN/23 命中 1 条] …`，然后 8 行 `[  合法] <文件>: rustfmt 认，且已是 rustfmt 形态`，
+最后一段列出 8 个文件各几处。
+> 任何一行 `[命中 0 条]` / `[命中 2 条]` → **停**。脚本会自己报是哪种状态。
+
+```bash
+# ── 2. 真写 ────────────────────────────────────────────────────────────────
+AITE_RELOCK=1 python3 review/bb2-created-at-chain-patch.py
+```
+期望（退出码 **0**）：上面那些 + 8 行 `写了 …` + `[读回 OK] 23 处新内容全部在盘上`。
+
+```bash
+git status --short
+```
+期望**恰好 8 行**（全是 ` M`），与 ④ 开头那张表同一组文件。
+
+```bash
+# ── 3. 先验新口径本身 ──────────────────────────────────────────────────────
+cd core && cargo test -p aite-contracts -p aite-evidence
+```
+期望：全绿。契约那边 `chain_hash_at_vectors_byte_exact` 与 `moving_created_at_moves_the_hash`
+两条新测试要在；evidence 那边 `chain.rs` 从 11 条变 13 条
+（多 `tampering_created_at_fails_verify` 与 `rewriting_created_at_to_an_equal_instant_keeps_verify_green`）。
+
+```bash
+# ── 4. 全量 ────────────────────────────────────────────────────────────────
+cd core && cargo test --workspace --no-fail-fast
+```
+期望：`cargo passed=873 failed=1`，**唯一红点必须是 `-p aite --test cli_smoke`**
+（即 `contracts_lock_check_is_ok_on_a_clean_tree`，锁还没刷）。
+> 红点里出现别的名字 → **停下来喊人**。特别是 `--test guard`：那是守卫的事，根因完全不同
+> （两者的计数形状会很像，只能靠测试名区分）。
+
+```bash
+# ── 5. 旧证据目录搬走（在重锁之前做，别等 M1 跑起来才发现全红）────────────
+mv data/evidence data/evidence-p0.1-legacy
+```
+期望：`data/evidence/` 不在了（下次起飞 `prepare_storage` 会自己建）。
+搬走的那份仍然可读：`aite evidence show --dir data/evidence-p0.1-legacy/<task_id>`
+会退 1 并报一条「这一条起是旧口径（created_at 不进链，RΩ 之前落盘的证据）—— 不是被改过」。
+
+```bash
+# ── 6. 重锁（这一步之后的事本轨没验过，见「没做的」第 1 条）────────────────
+core/target/debug/aite contracts lock --check     # 期望 MISMATCH 3 file(s)，逐字见 ④.3
+AITE_RELOCK=1 core/target/debug/aite contracts lock --write
+core/target/debug/aite contracts lock --check     # 期望 OK 25 files
+```
+
+```bash
+# ── 7. 收尾复跑 ────────────────────────────────────────────────────────────
+scripts/check.sh
+```
+期望：末行「全部通过」，退出码 0；`OK 25 files`、`contracts passed=27 failed=0`、
+`cargo passed=874 failed=0`、`passed 10/10`。
+
+---
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/control/src/plane.rs:1423` | 取消一个**没在跑**的任务时，控制面直接 `platform.update_card(...)` 推一次卡片，**不走 `CardCoalescer`** —— 这一次推送在证据里没有痕迹。M3 只数 worker 那条路的话不受影响，但「卡片一共被更新过几次」这个数在取消场景下会少一。 | **BB1**（control 面，本轨只读） |
+| 证据面整体 | **写入侧没有任何脱敏。** `tool_call` 证据存 `arguments` 全文，本轨又加了 `tool_result.content_summary`。`preflight` 的 `Redactor` 不在这条路上，`evidence show` 的 `redact()` 只在渲染时按键名打码。要收紧得在 `EvidenceWriter::append` 那一层做，会动契约。 | 新轨（不属于 §8 七条里任何一条） |
+| `writer.rs::verify_sync` | events.jsonl **是空文件**时返回 `true`（`text.lines()` 一条都没有，循环不进）。`load_timeline` 同样判无问题，所以两处口径一致、`verify_agreement.rs` 的矩阵是绿的 —— 但「零条事件的链是可信的」这个结论本身值得商榷。本轨没动它：改它属于改口径，不在 §8 七条里。 | 待定（先记着） |
+| `docs/acceptance-M.md` §8 第 3 / 4 条 | 「被丢弃的事件不留痕」「卡片上一个按钮都没有」—— 本轨没碰，两条都不在证据面。 | 原样留着 |
+
+---
+
+### 没做的 / 拿不准的
+
+1. **「补丁落地 + 重锁之后 check.sh 全绿」这句话，本轨只验到重锁之前。**
+   重锁（`AITE_RELOCK=1 … lock --write`）守卫**故意**拦 agent 自我授权
+   （`tests/guard.rs::relock_and_self_authorization_are_blocked` 钉着），本轨**没有绕**——
+   连在 `/tmp` 副本里也没绕（那需要把 `export AITE_RELOCK=1` 藏进脚本文件来躲开守卫的
+   文本扫描，那是钻空子，不做）。所以 ④.4 第 6、7 步的期望值里，
+   `OK 25 files` 与 `cargo passed=874 failed=0` **是从 ④.3 的实测推出来的**
+   （873 passed + 那 1 条锁测试转绿 = 874），不是跑出来的。
+   ④.3 的两个红点正是这个选择的代价。
+2. **`cargo passed=874` 这个推算有一个前提没法验**：重锁只改 `.contracts.lock`
+   的内容，不改任何测试的条数。这个前提是从 `lock.rs` 的源码读出来的，
+   `.contracts.lock` 本身读写都被守卫拦，本轨没看过它一眼。
+3. **一刀切之后，「整份降级」这条路堵死了，但有一个更贵的攻击仍在**：
+   把整条链按新口径全部重算，同时改掉 `manifest.root_hash` 和库里的
+   `Task.evidence_root_hash`。`verify` 这一层挡不住它 —— 它挡的从来是「改一处不留痕」，
+   不是「有权限重写全部三个地方的人」。**这一条在旧口径下也一样存在，本轨没让它变坏，
+   也没让它变好。** 真要堵得把 root_hash 送到进程外面去（外部时间戳 / 另一台机器），
+   那是另一个量级的事。
+4. **cli 侧 `prev_hash` 那条校验，`verify_agreement.rs` 独立钉不住。**
+   变异验证时实测：短路掉它，测试**不红**，因为紧随其后的 `hash` 检查在同一格里会响。
+   要独立钉住它，得构造「`prev_hash` 改了且 `hash` 按新 prev 重算」的文件 ——
+   而那就要求测试自己知道当前的 hash 口径，这个文件**故意不知道**（它的价值就在于
+   口径变了它也不用改）。两者不可兼得，选了后者。**如实记在这里。**
+5. **`aite evidence show` 对旧口径目录的收尾那句话没改**：
+   「→ 这份证据不可信，别拿它当验收依据；先确认目录有没有被人手改过。」
+   对旧口径目录来说后半句是误导（它没被人手改过）。逐条那一行已经说清楚了，
+   收尾这句在 `render_chain` 里、不在本补丁的锚点范围内，没动 —— 多一处锚点多一分风险，
+   而信息已经不缺。**算一处没做干净的地方。**
+6. **临时副本都留着**（给总管复核，不用的话直接删）：
+   - `<scratchpad>/bb2-v2/` —— **BB2 工作区现状 + 补丁（23 锚点最终版）**，已 `git init`，
+     可直接 `git diff` 看补丁改了什么；`core/target/debug/aite` 是打过补丁的二进制，
+     ①.3 与「旧口径诊断」两段输出就是它打的。
+   - `<scratchpad>/bb2-final/` —— 同上但补丁是 22 锚点的上一版，④.3 那张 check.sh 表来自它。
+   - `<scratchpad>/aa4-no/`、`<scratchpad>/aa4-yes/` —— ④.2 的两棵对照树。
+   - `<scratchpad>/pristine/` —— ①.1 那份**未被篡改**的真证据目录（events.jsonl + manifest.json）。
+   - `<scratchpad>` 完整路径：
+     `/private/tmp/claude-501/-Users-shensikai-Documents-Aite--worktrees-task-bb2/72c494ec-d6a2-4f70-9001-881ffddb49c3/scratchpad`
+   - 本轨 worktree 里 `core/target/bb2-evidence/` 也留着一份现场（在 `.gitignore` 的
+     `/core/target/` 里，`git status` 看不见它）。
+7. **worktree 干净**：`git status --short` 只有本轨的 9 个条目（5 改 4 新），
+   `data/` 一个字节都没动（①.1 的现场落在 `core/target/` 下，评测跑的是 scratchpad 里的配置）。
