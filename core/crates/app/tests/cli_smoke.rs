@@ -280,6 +280,153 @@ fn preflight_exits_one_when_the_database_file_is_not_a_database() {
     );
 }
 
+/// **进程级**那条（model 段判据）：`model.base_url` 是空的时候，`aite preflight --offline`
+/// 的退出码必须是 1。
+///
+/// 2026-09-15 实跑出来的现场：`preflight --offline` 报「汇总：OK 2 · WARN 1 · FAIL 0 ·
+/// SKIP 4 / 全部没红，可以起飞。」退出 0，紧接着 `aite run` 退出码 2
+/// （`模型配置不完整：ModelConfig.base_url 是空的`）。`model.model` 空、
+/// `AITE_MODEL_API_KEY` 没 export 是同一族的另外两条。归第 5 组而第 5 组被 `--offline`
+/// 整个跳过 —— 分组分错了地方，不是离线判不了。
+///
+/// 判据面（三样各一条、`--offline` 下照跑、第 5 组全跑时仍然自己报一遍、与真 `build_app`
+/// 的对拍）钉在 `tests/preflight_e2e.rs`；**这一条只钉真二进制的退出码和它打给人看的那两行** ——
+/// 脚本判的是退出码。
+///
+/// `--offline` 是刻意的：这一档从前**就是**全绿退 0 的那一档，也是 CI 的门禁跑的那一档。
+#[test]
+fn preflight_exits_one_when_the_model_section_is_blank() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = tmp.path().join("blankmodel.yaml");
+    // prompt 指到仓库里真有的那份、platform/provider 都用真取值、库路径落在临时目录：
+    // 要红的是 model 段这一条，别让别的三件抢答。
+    std::fs::write(
+        &cfg,
+        format!(
+            "platform: feishu\nmodel:\n  provider: openai_compat\n  base_url: \"\"\n  \
+             model: fake-model\n\
+             worker:\n  system_prompt_path: core/crates/worker/prompts/platform.md\n\
+             storage:\n  sqlite_path: {d}/aite.db\n  evidence_dir: {d}/evidence\n  \
+             artifacts_dir: {d}/artifacts\n",
+            d = tmp.path().display()
+        ),
+    )
+    .expect("写 config");
+
+    let out = aite()
+        .args(["preflight", "--offline", "--config"])
+        .arg(&cfg)
+        .current_dir(repo_root())
+        .env("AITE_MODEL_API_KEY", "sk-cli-smoke-not-a-real-key")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "退出码必须是 1：\n{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("[1/7]"))
+        .unwrap_or_else(|| panic!("没有第 1 组那一行：\n{stdout}"));
+    assert!(row.contains("FAIL"), "第 1 组没红：{row}");
+    assert!(row.contains("model.base_url"), "{row}");
+    assert!(
+        !stdout.contains("全部没红，可以起飞"),
+        "起不来还说可以起飞 —— 这正是本轨要治的那条：\n{stdout}"
+    );
+    // 第 5 组照旧 SKIP：本轨没把它搬到离线来，只借了它「不联网也判得出来」的那半句。
+    let fifth = stdout
+        .lines()
+        .find(|l| l.starts_with("[5/7]"))
+        .unwrap_or_else(|| panic!("没有第 5 组那一行：\n{stdout}"));
+    assert!(
+        fifth.contains("SKIP"),
+        "第 5 组不该在 --offline 下跑：{fifth}"
+    );
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with('[')).count(),
+        7,
+        "{stdout}"
+    );
+}
+
+/// **进程级**那条（只读库判据）：`storage.sqlite_path` 指着一个**内容合法但只读**的库文件时，
+/// 退出码必须是 1。
+///
+/// 2026-09-15 实跑出来的现场：`preflight --offline` 全绿退 0、全跑那一档第 1 组和第 7 组
+/// 也都是 OK，紧接着 `aite run` 退出码 2 —— `aite 起不来：建表失败（…）：sqlite: attempt to
+/// write a readonly database`。这条口子 Z1 / Z3 / AA4 记了三轮，理由是「要覆盖它得真往库里
+/// 写一次」；实际上只要向内核**要一个写句柄**就够了，一个字节不落。
+///
+/// 判据面（第 7 组照样绿、与 `store.init()` 的对拍、探针零副作用）钉在
+/// `tests/preflight_e2e.rs`；**这一条只钉真二进制的退出码和它打给人看的那两行**。
+#[test]
+fn preflight_exits_one_when_the_database_file_is_readonly() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db = tmp.path().join("aite.db");
+    // 0 字节 = SQLite 眼里一个合法的空库，也是起飞时自己建出来的那个形状。
+    // 内容这一半必须是好的，否则红的是 Z1 那条判据，这条等于没测。
+    std::fs::write(&db, b"").expect("建空库");
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).expect("改只读");
+    let cfg = tmp.path().join("rodb.yaml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "platform: feishu\nmodel:\n  provider: openai_compat\n  \
+             base_url: http://127.0.0.1:1/v1\n  model: fake-model\n\
+             worker:\n  system_prompt_path: core/crates/worker/prompts/platform.md\n\
+             storage:\n  sqlite_path: {d}/aite.db\n  evidence_dir: {d}/evidence\n  \
+             artifacts_dir: {d}/artifacts\n",
+            d = tmp.path().display()
+        ),
+    )
+    .expect("写 config");
+
+    let out = aite()
+        .args(["preflight", "--offline", "--config"])
+        .arg(&cfg)
+        .current_dir(repo_root())
+        .env("AITE_MODEL_API_KEY", "sk-cli-smoke-not-a-real-key")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "退出码必须是 1：\n{stdout}");
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("[1/7]"))
+        .unwrap_or_else(|| panic!("没有第 1 组那一行：\n{stdout}"));
+    assert!(row.contains("FAIL"), "第 1 组没红：{row}");
+    assert!(row.contains("写不进去"), "{row}");
+    assert!(
+        !stdout.contains("全部没红，可以起飞"),
+        "起不来还说可以起飞：\n{stdout}"
+    );
+    // 第 7 组照旧绿：它问的是目录写不写得进去，不是这个文件我写不写得动。
+    let storage = stdout
+        .lines()
+        .find(|l| l.starts_with("[7/7]"))
+        .unwrap_or_else(|| panic!("没有第 7 组那一行：\n{stdout}"));
+    assert!(storage.contains("OK "), "第 7 组不该管这一条：{storage}");
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with('[')).count(),
+        7,
+        "{stdout}"
+    );
+    // 那个文件一个字节都没被动过，权限位也没变（第 1 组两条探针都是只读的）。
+    assert_eq!(std::fs::metadata(&db).expect("空库还在").len(), 0);
+    assert_eq!(
+        std::fs::metadata(&db)
+            .expect("空库还在")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o444,
+        "preflight 把权限位改了"
+    );
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).expect("改回可写");
+}
+
 /// R7 的评测面：场景清单读得出来，且恰好是 §3.8 的十个。
 #[test]
 fn evals_lists_the_ten_p0_scenarios() {

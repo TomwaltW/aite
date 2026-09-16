@@ -3478,3 +3478,460 @@ passed 10/10
 6. **没做变异验证。** 本轨零判据改动（纯注释），没有「摘掉某条判据看几条测试变红」这种
    可做的变异点。②.2 的「不改也重跑、产物逐字节不变」是本轨能给的最强等价物：
    它排除的是「工具版本不对」这个本轨最大的风险。
+
+## 二十三、BB6 回执 —— 2026-09-15
+
+派单问的不是「再补一格」，而是「**`--offline` 的「全绿」到底承诺什么**」。答案落在两句话上：
+
+* **第 5 组里「不联网也判得出来」的那三件（`model.base_url` / `model.model` / 密钥环境变量）
+  择出来了**，进第 ① 组。它们从前被 `--offline` 跳过，**不是因为离线判不了，是分组分错了地方**。
+* **Z1 / Z3 / AA4 挂了三轮的「库是好的但文件只读」治掉了。** 当年的结论「要覆盖它得真往库里
+  写一次，把第 ① 组从纯读变成有副作用，不划算」——**前提不成立**：向内核要一个写句柄就够了，
+  不写、不建、不截断，长度 / mtime / 内容一律不动。
+
+七组的数量和名字**一个字没动**，`--offline` 的语义（不碰网络、不碰 docker）也没动。
+第 ① 组从管四件事变成管**五件**。
+
+### 基线与开场自检
+
+HEAD `7019c48`（= 派单写的基线），`git status --short` 空。
+
+| 行 | 期望 | 实测 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` ✅ |
+| C1 契约测试 | `contracts passed=25 failed=0` | 同 ✅ |
+| B 全量 cargo test | `cargo passed=864 failed=0` | 同 ✅ |
+| B 全量 go test（-race） | 六个包全 `ok` | **见下，一次假红** |
+| B8 评测 | `passed 10/10` | 同 ✅ |
+
+**开场那一遍 check.sh 最后一行不是「全部通过」**：`B 全量 go test（-race）` 那格 `exit 1`，
+而打出来的六个包**全是 `ok`**，末尾孤零零一个 `FAIL`（没有包名）。单独复跑
+`cd edge && go test -race ./... -count=1` → **退出码 0、七个包全 `ok`**，多出来的那个正是
+check.sh 那一遍里没出现的 `aite/edge/cmd/aite-edge`。当时本机同时有 BB1–BB5 五个兄弟轨在跑
+各自的 check.sh，是并行负载下的假红，不是回归。**收尾那一遍（下面）七格全绿、「全部通过」。**
+
+守卫实测有效，Read `.claude/hooks/guard_bash.py` **被拦下**，逐字原话：
+
+```
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+中途撞到一次守卫误拦：一段 `python3 - <<'PY' … PY` 的 heredoc，正文里有 `"…"` 引号，
+被判「命令无法解析: No closing quotation」。**是已知的四种 heredoc 误拦之一**，
+改用 Edit 工具逐条改绕开，没碰守卫本身。
+
+### ① 重跑 Y2 那张表 —— 三格全复现，外加一格 Y2 没记的
+
+每种坏配置各跑三次（`preflight --offline` / `preflight` 全跑 / `aite run`），
+**全部在改代码之前**、在仓库根、用 `7019c48` 编出来的二进制。
+
+| 坏配置 | Y2 表里写的 | 本轨实测 | 对不对得上 |
+|---|---|---|---|
+| `model.base_url` 空 | offline 全绿退 0 / 全跑 FAIL（第 5 组）/ run 退 2 | **逐格相同** | ✅ |
+| `model.model` 空 | 同上 | **逐格相同** | ✅ |
+| 两边 `contract_version` 不一致 | offline 查不了 / 全跑第 6 组会红（要 edge）/ run 退 2；**Y2 没实证** | 本轨也**没实证**，理由见下 | — |
+
+`aite run` 那一侧的原话（改前，逐字）：
+
+```
+aite 起不来：模型配置不完整：ModelConfig.base_url 是空的：填百炼 / 智谱的 OpenAI 兼容端点
+aite 起不来：模型配置不完整：ModelConfig.model 是空的：填要用的模型名
+```
+
+**新挖出来一格，Y2 / X1 / Z1 都没记过 —— `AITE_MODEL_API_KEY` 没 export**：
+
+| | 改前实测 |
+|---|---|
+| `preflight --offline` | `[1/7] OK` · `[2/7] WARN 环境变量齐 4/4 个未设置：…AITE_MODEL_API_KEY —— --offline 下不作判据` · `汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4` · **「全部没红，可以起飞。」退出码 0** |
+| `preflight` 全跑 | `[5/7] FAIL 模型端点通 配置不全，缺：环境变量 AITE_MODEL_API_KEY`，退出 1 |
+| `aite run` | 退出码 2：`aite 起不来：模型配置不完整：环境变量 AITE_MODEL_API_KEY 没设置或为空。密钥只从环境变量读，不要写进 config/aite.yaml（§3.1 ModelConfig）` |
+
+它为什么一直没被记：**第 2 组在 `--offline` 下把缺变量降成 WARN**（「CI 和没凭证的机器上要能跑」），
+于是这一条连个红都没有 —— 前两格至少还能在全跑那一档看见第 5 组红，它在 offline 这一档
+**一点痕迹都没有**。
+
+> **第 2 组那条降级对飞书三项是对的**：`FEISHU_APP_ID` / `_SECRET` / `_BOT_OPEN_ID` 是
+> **edge（Go）读的**，`build_app` 从头到尾不碰它们 —— 三个全不设，`aite run` 一路走到
+> `serve()`（实测，下面 ④ 的 `allgood` 那一行）。**`model.api_key_env` 那个不一样**，
+> 它是 core 自己读的（`build_app` 第 5 步 → `resolve_api_key`），缺了当场退出码 2。
+> 所以「没凭证还能跑」这句话准确的说法是：**没飞书凭证能跑，没模型密钥不能**。
+
+**另外点名一处「台账里的话不是圣旨」**：Y2 表里 `base_url` 空那一格写「全跑 FAIL（第 5 组）」，
+本机实测全跑是 `FAIL 5`（2/3/4 因为没飞书凭证、6 因为没起 edge 一起红）。**那一格本身没写错**
+（说的是「哪一组管它」），但读的人容易当成「全跑只有第 5 组红」。本轨的表里把这一栏写全。
+
+**`contract_version` 不一致这一格，本轨判断是不补实证**，三条理由：
+
+1. 造现场要一个 `ContractVersion` 不同的 `aite-edge`，而那个常量在
+   `edge/internal/server/server.go:18`，`edge/**` 是本轨**只读面**；它是 `const` 不是 `var`，
+   `-ldflags -X` 也顶不掉。绕不过去就只能越界改。
+2. **分类本身不在争议里**：这一条要 edge 真在跑才问得出来，`--offline` 判不了是定义使然，
+   不是分错组 —— 它留在第 6 组是对的，本轨的主线（择出「离线也判得了的那部分」）根本够不着它。
+3. 判据分支**已经被单元测试钉着**：`edge_status_verdict_catches_a_contract_version_skew`
+   （`preflight.rs` 的 `mod tests`，拿假 `EdgeStatus` 造的现场，不需要真 edge）。
+   实证能补的只是「真 edge 上也一样」，而那一步已经有 `app.rs` 的 `check_contract_version`
+   走同一条判据。
+
+本机 docker 是起着的（`29.6.1`），真要补实证的成本主要在「造一个版本不同的 edge」这一步。
+**如实记在「没做的」里。**
+
+### ② 择出来了哪几项 —— 逐项问过第 5 / 6 组
+
+| 组 | 项 | 真的需要联网吗 | 判断 |
+|---|---|---|---|
+| 5 | `provider != openai_compat` → WARN「没有真端点可探」 | 不需要 | **本来就归第 ① 组了**（Y2 补的注入判据）。第 5 组这句 WARN 保留，各说各的本分 |
+| 5 | `model.base_url` 空 | **不需要**（yaml 里的字段） | **择出来**，进第 ① 组 |
+| 5 | `model.model` 空 | **不需要**（yaml 里的字段） | **择出来**，进第 ① 组 |
+| 5 | `api_key_env` 点到的变量没设 | **不需要**（环境变量在不在） | **择出来**，进第 ① 组 |
+| 5 | 一次最小 chat 通不通 | **需要** | 留在第 5 组 |
+| 6 | `EdgeClient::connect`（socket 路径拼不拼得成合法地址） | 不需要 | **没择** —— 见下，造不出病 |
+| 6 | `edge.status()` 应不应答 | **需要** | 留在第 6 组 |
+| 6 | 两边 `contract_version` 一致 | **需要**（要 edge 答话） | 留在第 6 组 |
+| 6 | `EdgeStatus.sandbox_ok`（docker daemon 可达） | **需要** | 留在第 6 组 |
+| 6 | 起容器 → 四个 import → 收掉 | **需要** | 留在第 6 组 |
+
+> **第 6 组那条唯一的「离线候选」实测证伪了。** `EdgeClient::connect` 是懒连接
+> （`link.rs:45` 的 `Link::open` 只做一次 `Endpoint::from_shared("unix://…")`），
+> 文档注释说它「只会因为 socket 路径拼不成合法地址失败」。造了一份
+> `edge_socket: "run/aite edge.sock"`（路径带空格）去撞它 —— **`aite run` 照常起飞了**
+> （30s 没退出，被 SIGTERM 掐掉），`preflight` 全跑第 6 组给的是「edge 不应答」而不是
+> 「连不上 edge」。也就是说这条失败分支在 `http::Uri` 那一层根本拿不到，**第 6 组没有
+> 离线判得了的项**。如实记，没有为了凑数硬加一条。
+
+**第 ① 组现在管五件事**（模块头那张表和「为什么不只验解析」那一段都改了，「七组」原样）：
+
+1. yaml 解析得出来
+2. `worker.system_prompt_path` 指到的文件真的在（X1 补的）
+3. `platform` / `model.provider` 的取值不需要注入（Y2 补的）
+4. **`model` 段填得齐**（本轨补的）
+5. `storage.sqlite_path` 上已有的那个文件真能当库打开**、而且写得进**（Z1 补前半，本轨补后半）
+
+**排的顺序照 `build_app` 真正走的那条路**（prompt=第 2 步 → 注入=第 3 步 → 模型=第 5 步 →
+SQLite=第 6 步/`store.init()`）。一行里并列几条毛病时，读者从左到右看到的就是起飞会依次
+撞上的顺序 —— Y2 隔离病灶时被「第 5 步在第 6 步前面」绊过一次，这回写进注释了。
+
+**第 ① 组那一行的结论文案**（实测原样，三种缺法）：
+
+```
+[1/7] FAIL 配置可加载       … · 但 model 段填不全，缺：model.base_url —— aite run 装模型那一步会被拒（退出码 2）
+[1/7] FAIL 配置可加载       … · 但 model 段填不全，缺：model.model —— aite run 装模型那一步会被拒（退出码 2）
+[1/7] FAIL 配置可加载       … · 但 model 段填不全，缺：环境变量 AITE_MODEL_API_KEY —— aite run 装模型那一步会被拒（退出码 2）
+           └ 怎么补：model.base_url 填百炼 / 智谱的 OpenAI 兼容端点；这几件第 5 组也查，但 --offline 把整个第 5 组跳过了 —— 它们不联网也判得出来，所以第 1 组先问一遍
+```
+
+**五条口径逐条对齐**（照 X1 / Y2 / Z1 立的那套）：
+
+1. **一次报齐**：第四件进 `faults` / `fixes` 收集队列，不早退。三件全缺时一行报齐
+   （`缺：model.base_url / model.model / 环境变量 AITE_MODEL_API_KEY`）。
+2. **不早退**：`check_config_reports_the_model_section_alongside_the_others` 钉着
+   prompt + model 段 + sqlite 三件同时命中。
+3. **FAIL 也把 cfg 交出去**：原路径未动，后面六组照常跑完（七行齐，实测每一格都是 7）。
+4. **「怎么补」三件齐**：缺什么、该填什么、不补的后果（退出码 2）。
+5. **红线照旧**：`model_blanks` **只报变量名不报取值**，detail / fix 都是 `CheckResult`
+   的字段、渲染前统一过 `Redactor`，没有新的直写路径。实测复核：本机环境里有真的
+   `AITE_MODEL_API_KEY`，`preflight --offline` 的全部输出里 `grep -c "$AITE_MODEL_API_KEY"` = **0**。
+
+#### 两个刻意的取舍，都写在代码注释里
+
+**(a) `model` 段那件事只在 `provider == openai_compat` 那一档问。** 照抄 `build_model` 的
+短路顺序：provider 不对时它在更早一步就拒绝了（那一条归第 3 件），根本走不到 `from_config`，
+此时 `base_url` 填没填**确实不影响起飞**。代价是 `provider: scripted` + base_url 空的配置要
+分两轮才报齐 —— 与 `platform: fake` 下第 2 组整组 SKIP 同一种取舍（Y2 记过），
+推迟一轮、不会静默放行。反向断言钉在 `model_config_fault_only_asks_when_the_provider_is_openai_compat`
+和 `check_config_reports_all_four_faults_in_one_go` 里（变异 M3 两条都红）。
+
+**(b) `fell_back`（`config/aite.yaml` 不存在、退到样例）那一档按下不表。** 三条理由：
+
+* 样例里 `base_url` / `model` **天生是空的** —— 那是模板不是毛病；
+* 这一档 preflight 看的**根本不是你要起飞的那份配置**：`aite run` 不退样例，
+  `load_config` 当场报「配置文件不存在」退出码 2；
+* 那一行 WARN 自己就把这两个字段点名说清了（`起飞前 cp … 并填上 model.base_url / model.model`），
+  不是静默放过。
+
+这也是 **CI 那条 `docker compose run --rm core preflight --offline` 门禁跑的那一档**
+（`ci.yml` 第 139 行，`config/aite.yaml` 不入库）。不按下不表的话 CI 当场红 ——
+变异 M2 抓到的正是这个（`cli_smoke::preflight_offline_reports_seven_lines_…` 变红）。
+**显式 `--config config/aite.example.yaml` 指过去（`fell_back=false`）照常 FAIL**，
+按下不表只对退样例那一档成立，不是把判据整个关掉。
+
+**(c) 第 5 组 `check_model` 一个字没动，判据没降级。** 全跑那一档第 ① 组和第 5 组会
+**同时红，说的是同一件事的两面**（第 ① 组：起不起得来；第 5 组：端点通不通）。
+这个重叠是刻意留的 —— 第 5 组还是 (b) 那一档的**兜底**：退到样例时第 ① 组按下不表，
+那时唯一还会报这三件的就是它。「第 1 组已经报了、第 5 组降个级吧」这个念头由变异 M4
+和 `the_fifth_row_still_reports_the_blank_model_section_on_a_full_run` 守着。
+判据本体抽进了共用的 `model_blanks`，两边措辞不会分家
+（`the_first_row_and_the_fifth_speak_with_one_mouth`）。
+
+### ③ 「库是好的但文件只读」—— 改前 / 改后，同一个文件
+
+攻击现场：`sqlite3 <db> "CREATE TABLE probe(x);"` 造一个**内容完全合法**的库，
+再 `chmod 444`。**改前改后用的是同一个文件**，跑完复核 `md5 = c960ccf3532a343013afa71d6c870bcf`、
+`8192` 字节、`-r--r--r--`，三样一个都没变。父目录是可写的（`drwxr-xr-x`）—— 这一点要紧，
+它保证红的不可能是第 7 组。
+
+**改前**（`7019c48`）：
+
+```
+[1/7] OK   配置可加载       platform=feishu · model.provider=openai_compat · sandbox.image=aite-sandbox:p0
+[7/7] OK   落盘目录可写     3 个路径都落得下去（<D>/rodb/data/evidence <D>/rodb/data/artifacts 待建，起飞时自动 mkdir）：<D>/rodb/data/aite.db · <D>/rodb/data/evidence · <D>/rodb/data/artifacts
+
+------------------------------------------------------------------------
+汇总：OK 2 · WARN 1 · FAIL 0 · SKIP 4（共 7 项，过了 7 项）
+全部没红，可以起飞。（--offline 只验了 1/2/7，真机起飞前请全跑一遍）
+EXIT=0
+```
+
+全跑那一档同样是 `[1/7] OK` + `[7/7] OK`（红的是 2/3/4/5/6 —— 本机没飞书凭证、
+端点是 `127.0.0.1:1`、没起 edge，与库无关）。紧接着 `aite run`：
+
+```
+EXIT=2
+aite 起不来：建表失败（<D>/rodb/data/aite.db）：sqlite: attempt to write a readonly database
+```
+
+**改后**（同一个文件、同一条命令）：
+
+```
+[1/7] FAIL 配置可加载       platform=feishu · model.provider=openai_compat · sandbox.image=aite-sandbox:p0 · 但 storage.sqlite_path 指着的库文件写不进去：<D>/rodb/data/aite.db → <D>/rodb/data/aite.db（Permission denied (os error 13)）
+           └ 怎么补：给 <D>/rodb/data/aite.db 加写权限（`chmod u+w`；所在卷是只读挂载的话得换个位置），或者把配置里的 storage.sqlite_path 指到一个写得动的库（config/aite.example.yaml 里是 data/aite.db）；当前那个文件是个好库、读得动，但 `aite run` 建表时要往里写 —— 退出码 2、`aite 起不来：建表失败（…）：sqlite: attempt to write a readonly database`。第 7 组查的是目录写不写得进去，接不住这一条
+[7/7] OK   落盘目录可写     3 个路径都落得下去：<D>/rodb/data/aite.db · <D>/rodb/data/evidence · <D>/rodb/data/artifacts
+
+------------------------------------------------------------------------
+汇总：OK 1 · WARN 1 · FAIL 1 · SKIP 4（共 7 项，过了 6 项）
+FAIL：配置可加载 —— 起飞前把上面的「怎么补」做掉再跑一次。
+EXIT=1
+```
+
+**第 7 组仍然是 `OK`** —— 两件事没混，这一行本身就是那个判断。
+
+#### 选的是哪条路，以及 Z1 那个「不划算」错在哪
+
+派单给的三个方向里选了**第二个的一半**：`OpenOptions::new().write(true).open(abs)`。
+
+* 派单第一条（问 SQLite 自己「这个连接是不是只读」）：`PRAGMA query_only` 问的是**连接的
+  设置**不是文件的权限，答不了这件事；真正对的是 `sqlite3_db_readonly()`，而 store 交出来的
+  只有 `pragma_int`，要用它得改 `core/crates/store/**` —— 那是本轨**只读面**。
+* 派单第二条的另一半（查权限位）：**不用自己查**。`OpenOptions::write(true)` 就是把这件事
+  交给内核问一遍，权限位 / ACL / 只读挂载 / immutable 一次答齐，比自己解析 mode 位诚实得多
+  —— 口径与第 7 组 `writable_dir` 那段「`access(2)` 判不准，真试一次才是唯一诚实的问法」同源。
+* **Z1 那句「要覆盖它得真往库里写一次」是前提错了**：不用写。没有 `O_CREAT`、没有 `O_TRUNC`，
+  只是要一个写句柄，拿到就 `drop`。实测复核：长度、mtime、内容三样跑前跑后逐字节相同
+  （上面那个 md5）。**零副作用这条硬要求一点没让**。
+
+**判据为什么挂在「文件写不写得动」而不是「`init()` 会不会炸」** —— 这是本轨额外挖出来的一件事：
+
+```
+$ sqlite3 ro.db "CREATE TABLE IF NOT EXISTS t(x);"   # 表已经在、库 chmod 444
+exit=0                                                ← 空操作，成功
+$ sqlite3 ro.db "INSERT INTO t VALUES(1);"
+Error: stepping, attempt to write a readonly database (8)
+```
+
+也就是说只读库有**两种死法**：库还没建表 → 起飞时死在 `store.init()`（退出码 2，上面那份实证）；
+库已经建完表 → **起飞会成功**，死在群里第一个任务落库那一下。后一种更难查。
+拿 `init()` 当判据只拦得住一半，拦文件本身两种都拦得住。写进了 e2e 那条的文档注释。
+
+### ④ 改完之后那张表 —— 全部实跑
+
+十种配置，每种三跑（`preflight --offline` / `preflight` 全跑 / `aite run`），
+落盘全在临时目录，仓库 `data/` 一个字节没碰。
+
+| 配置 | `preflight --offline` | `preflight` 全跑 | `aite run` | 谁管的 |
+|---|---|---|---|---|
+| `model.base_url` 空 | **FAIL，退 1** | 第 ①+⑤ 组同时 FAIL，退 1 | 退 2 | 第 ① 组（**本轨补的**）+ ⑤ 兜底 |
+| `model.model` 空 | **FAIL，退 1** | 同上 | 退 2 | 同上 |
+| `AITE_MODEL_API_KEY` 没 export | **FAIL，退 1** | 同上 | 退 2 | 同上（**本轨新挖的**） |
+| `system_prompt_path` 指着已删的 Python 树 | FAIL，退 1 | FAIL，退 1 | 退 2 | 第 ① 组（X1） |
+| `platform: fake` | FAIL，退 1 | FAIL，退 1（2/3/4 SKIP） | 退 2 | 第 ① 组（Y2） |
+| `model.provider: scripted` | FAIL，退 1 | FAIL，退 1（⑤ 给 WARN） | 退 2 | 第 ① 组（Y2） |
+| `sqlite_path` 指着非 SQLite 文件 | FAIL，退 1（⑦ 组 OK） | 同上 | 退 2 | 第 ① 组（Z1） |
+| **`sqlite_path` 指着只读的合法库** | **FAIL，退 1（⑦ 组 OK）** | 同上 | 退 2 | 第 ① 组（**本轨补的**） |
+| `sqlite_path` 的父**目录**只读（`chmod 500`） | ⑦ 组 FAIL，退 1（**① 组 OK**） | 同上 | 退 2（`打不开 SQLite …unable to open database file`） | **第 ⑦ 组** —— 和上一行是两件事，实跑摆在一起就是那个分界 |
+| 全都填对 | **全绿，退 0** | ⑤⑥ 红（本机端点/edge 不在），退 1 | **起飞了**（30s 没退出，SIGTERM 掐掉） | — |
+
+`aite run` 那一侧的原话（逐字，改后仍然是这几句 —— 本轨没动 `app.rs` / `run.rs`）：
+
+```
+aite 起不来：模型配置不完整：ModelConfig.base_url 是空的：填百炼 / 智谱的 OpenAI 兼容端点
+aite 起不来：模型配置不完整：ModelConfig.model 是空的：填要用的模型名
+aite 起不来：模型配置不完整：环境变量 AITE_MODEL_API_KEY 没设置或为空。密钥只从环境变量读，不要写进 config/aite.yaml（§3.1 ModelConfig）
+aite 起不来：建表失败（…）：sqlite: file is not a database
+aite 起不来：建表失败（…）：sqlite: attempt to write a readonly database
+aite 起不来：打不开 SQLite（…）：sqlite: unable to open database file: …
+```
+
+#### 剩下的口子 —— 明写，没有「基本都覆盖了」
+
+**`--offline` 报「全部没红」而 `aite run` 退出码 2 的，现在只剩两种：**
+
+1. **`config/aite.yaml` 不存在，preflight 退到样例**（`fell_back`）。实测：
+
+   ```
+   [1/7] WARN 配置可加载       config/aite.yaml 不存在，退到样例 config/aite.example.yaml · platform=feishu · …
+              └ 怎么补：起飞前 `cp config/aite.example.yaml config/aite.yaml` 并填上 model.base_url / model.model
+   汇总：OK 1 · WARN 2 · FAIL 0 · SKIP 4（共 7 项，过了 7 项）
+   全部没红，可以起飞。                                    ← 退出码 0
+   ```
+   ```
+   aite 起不来：配置文件不存在：config/aite.yaml（可从 config/aite.example.yaml 复制）   ← 退出码 2
+   ```
+
+   **这是刻意留的**（上面 ②(b)：CI 门禁跑的就是这一档），但它确实是一个口子：
+   那一行 WARN 说清了，而**汇总那句「全部没红」说的是 FAIL 数**，读的人容易把它读成
+   「这份配置能飞」。**没治**，理由：治法要么把 `fell_back` 判成 FAIL（CI 当场红，
+   而 `ci.yml` 是本轨只读面），要么改汇总那句话的措辞（`--offline` 的语义外加一个
+   WARN 感知的汇总，超出派单划的边界）。**记账转出去，见下。**
+
+2. **两边 `contract_version` 不一致。** 要 edge 在跑才问得出来，`--offline` 判不了是
+   定义使然。留在第 6 组。**本轨没实证**（理由见 ①）。
+
+**`--offline` 全绿而「飞不动」（不是「起不来」）的，还有四种** —— 它们不该算在上面那类里，
+但排障时容易混，所以也列出来：
+
+| 情形 | `aite run` | 谁管 |
+|---|---|---|
+| 模型端点连不上 | **照常起飞**（实测），死在群里第一个任务 | 第 5 组，要联网 |
+| 飞书凭证不对 / 没设 | **照常起飞**（实测，三个变量全不设） | 第 3/4 组，要联网 |
+| docker 没起 / 沙箱镜像不在 | **照常起飞** | 第 6 组，要 docker |
+| edge 没起 | **照常起飞**（`aite.edge_unreachable` 一行 WARN，§2.1 明文允许） | 第 6 组 |
+
+**还有一种，preflight 七组一个都不管，但它不是「起不来」**：库**已经建完表**而文件只读时，
+`init()` 是空操作、起飞成功，死在第一个任务落库那一下 —— 不过本轨的判据在起飞前就把它
+拦下了（判据挂在文件上，见 ③），所以它现在有人管。
+
+### ⑤ 变异验证 —— 六组代码变异 + 一组断言变异
+
+每组都是「摘掉药 → 跑三档测试 → 还原」。还原一律 `cp`（**不带 `-p`**）+ `touch`，
+每轮跑完复核 `md5`，免得旧 mtime 让 cargo 拿坏产物跑出假绿。
+
+| 变异 | 改坏什么 | 谁红了 |
+|---|---|---|
+| **M1** | 整段 model 段判据摘掉（`model_config_fault` 恒 `None`） | lib 4 + e2e 4 + cli 1 = **9 条** |
+| **M2** | 退样例那道闸拿掉（`fell_back` 也照查 model 段） | lib 1 + cli 1 = **2 条** |
+| **M3** | provider 那道闸拿掉（`scripted` 也照查 model 段） | lib 2 = **2 条** |
+| **M4** | 第 5 组那条降成 WARN（「第 1 组已经报了、这里降个级吧」） | lib 2 + e2e 1 = **3 条** |
+| **M5** | 只读判据摘掉（`readonly_fault` 恒 `None`，退回 Z1 那天的纯读） | lib 2 + e2e 1 + cli 1 = **4 条** |
+| **M6** | 「一次报齐」退回早退（model 段撞上就清掉前面的） | lib 1 = **1 条** |
+| **A1a** | 判据还在，但把诊断说错（只读报成「当不了 SQLite 库」） | lib 1 + e2e 1 + cli 1 = **3 条** |
+| **A1b** | A1a + 把三处措辞断言退回裸子串 `storage.sqlite_path` | **全绿 —— 104 条一条不红** |
+
+**M3 第一遍只抓到 1 条**（只有 `model_config_fault_only_asks_when_the_provider_is_openai_compat`），
+网太薄：`check_config_reports_all_four_faults_in_one_go` 那份 `provider: scripted` 的配置
+`base_url` / `model` 本来就是空的，多报一条不成立的毛病，那条测试的 `contains` 断言照样过。
+**补了一条反向断言**（`assert!(!r.detail.contains("model 段填不全"))` + `model_config_ok == true`）
+之后才是表里那个数。
+
+**A1b 是本轨最该看的一条。** 它复刻 Y2 的 `feishuu` 子串陷阱和 Z1 的 `data/aite.db.bak` 陷阱：
+把「说的是**写不进去**」那三处断言退回只断字段名 `storage.sqlite_path`，再叠上 A1a
+（判据还在、但诊断说反了：好库+只读报成「当不了 SQLite 库」）——**104 条测试全绿**。
+也就是说：一个**把病因说错、会把排障的人指到完全错误方向**的 preflight，能大摇大摆过掉
+整套测试。**承重墙是那句措辞断言**，不是「FAIL 了没有」。
+
+> 顺带一个中间结果：A1b 第一遍只让 cli 那条转绿，lib 和 e2e 还红着 —— 因为 lib 那条
+> `the_db_probe_also_asks_whether_it_can_write` **还配了一条反向断言**
+> （`assert!(!why.contains("当不了 SQLite 库"))`），而 e2e 那条我第一遍的 perl 没替换上。
+> 三处全退回去之后才全绿。**结论：正向 `contains` 一条不够，要么断到唯一的措辞，
+> 要么配一条反向断言** —— 本轨两样都留着。
+
+**双向断言（「不该 FAIL 的不 FAIL」）也都在：**
+
+* `model_config_fault_lets_a_filled_in_config_through`（填齐了不误伤）
+* `model_config_fault_only_asks_when_the_provider_is_openai_compat`（provider 不对时一个字不报）
+* `check_config_reports_all_four_faults_in_one_go` 新加的那两条反向断言
+* `the_readonly_probe_never_writes_anything` 的第 1 段（写得动的文件放行）
+* `a_healthy_or_absent_database_does_not_trip_the_first_row`（Z1 留的，好库 / 库还不在都不误伤）
+* `check_config_keeps_quiet_about_the_model_section_when_it_fell_back_to_the_example`（退样例那一档不报）
+
+### 测试数
+
+864 → **878**（+14）：
+
+* `src/preflight.rs` 的 `mod tests` **+8**（41 → 49）：`model_config_fault` 三条
+  （填齐了不误伤 / 三件一次报齐 / 只在 openai_compat 那一档问）、第 ① 组和第 5 组同一张嘴、
+  退样例那一档按下不表（含显式 `--config` 照常 FAIL 的后半段）、
+  第四件事进收集队列不早退、只读探针零副作用、两条探针的先后顺序。
+* `tests/preflight_e2e.rs` **+4**（26 → 30）：model 段三种缺法 `--offline` 下都 FAIL（含
+  「第 5 组仍然 SKIP」）、全跑时 ①⑤ 同时红、与真 `build_app` 对拍、只读库 FAIL 而第 7 组仍绿
+  （含与真 `store.init()` 的对拍 + 收尾改回可写）。
+* `tests/cli_smoke.rs` **+2**（23 → 25）：进程级，真二进制，model 段空 → 退出码 1；
+  只读库 → 退出码 1（并复核文件长度和权限位一个字节没动）。
+
+**改了两条既有测试的脚手架**（不是判据）：
+
+* `a_custom_env_var_name_is_still_redacted`：配置补上 `base_url` / `model`。
+  它测的是脱敏，`base_url` 空会让第 1 组 FAIL 把前置断言打红 —— 与 X1 那天给
+  `write_prompt` 立的理由同一条。
+* `offline_without_credentials_still_passes`：**拆成两半**，因为「没凭证」这四个字下面
+  盖着两件后果完全不同的事（见 ① 那段引文）。前半段（飞书三项全缺、模型密钥在 → 照旧全绿、
+  第 2 组 WARN 且四个名字一个不少）**原样守着**；后半段是新的（连模型密钥也没有 → 第 ① 组
+  FAIL，而**第 2 组那条 offline 降级不许跟着变**）。
+
+`write_config_full_with_sqlite` 多收一个 `model_name` 参数（原来 `model: fake-model` 是写死的），
+两个既有调用点跟着传 `DEFAULT_MODEL_NAME`；`base_url` / `model` 在 yaml 里加了引号 ——
+不加的话空串被 yaml 解析成 null，报「invalid type: unit value」而不是本轨要测的那件事。
+
+### 涟漪清单
+
+| 文件 | 改了什么 | 「七组」动了没 |
+|---|---|---|
+| `core/crates/app/src/preflight.rs` 模块头 | 表格第 1 行加「model 段填得齐」和「而且写得进」；「为什么不只验解析」从四条改五条；新增「`--offline` 的全绿到此承诺什么」一段 | **没动**（「七组」「不是新开第 8 / 9 / 10 组」原样） |
+| 同上，`sqlite_fault` 文档注释 | 「探不出来的那一半」改成「2026-09-15 补掉了」，写清 Z1 那个前提错在哪、与第 7 组的分工 | — |
+| 同上，`check_model` | **判据一个字没动**，blanks 那段抽进共用的 `model_blanks`；加了「为什么不降级」的注释 | — |
+| `core/crates/app/tests/{preflight_e2e,cli_smoke}.rs` | +6 条新测试、2 条脚手架修正、1 个 helper 加参数 | **没动**（`checks.len() == 7`、`[7/7]`、七行计数全部原样） |
+| `README.md`「命令面」 | 第 1 组那段从四件改五件；⚠️ 块重写成「`--offline` 的全绿现在承诺什么」+ 剩下两类口子；病史块从三条加到五条 | **没动**（`（七组）`、`的七组：` 两处本来就准确） |
+| `docs/acceptance-M.md` §0.1 | 那份逐行输出的前提加「**并填上了 base_url / model**」+ 一条 ⚠️；「七组分别是：①…」括注加第四、五件；`--offline` 那条 ⚠️ 重写；新增「第五、六、七个同族口子」整段 | **没动** |
+| 同上 §排障表（原 743 行） | 「sqlite 没落库」那条从「preflight 第 ⑦ 组」改成「目录归 ⑦、文件本身归 ①」 | **没动** |
+
+**`docs/acceptance-M.md` §0.1 那份逐行实测输出重跑了，结论是「一个字不用改」** ——
+`config/aite.yaml` 由样例复制**并填上 base_url / model**、环境里只设 `AITE_MODEL_API_KEY`，
+七行与文档里那份**逐字相同**（只有时间戳不同）。改的是它上面那句前提和下面那几条 ⚠️。
+跑完 `config/aite.yaml` 删掉、`data/` 清掉，`git status --short` 只有本轨这五个文件。
+
+### 收尾 check.sh
+
+```
+A3/C2 契约锁 ...... OK 25 files                  （与开场逐字相同）
+C1 契约测试 ....... contracts passed=25 failed=0 （与开场逐字相同）
+B 全量 cargo ...... 开场 864 failed=0 → 收尾 878 failed=0
+B go test（-race）. 六个包全 ok                   （开场那一遍是并行轨假红，见上）
+B8 评测 ........... passed 10/10                 （与开场逐字相同）
+全部通过                                          退出码 0
+```
+
+`cargo clippy --workspace --all-targets -- -D warnings` 干净；
+`cargo fmt --check` 过（改过的三个文件走的是 `rustfmt --edition 2024`，守卫拦 `cargo fmt --all`）。
+**`aite preflight` 的输出仍然是七组、七行**（每一格实跑都复核过 `grep -c '^\['` = 7）。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `render_text` 的汇总句「全部没红，可以起飞。」 | 它说的是 **FAIL 数**，而 `fell_back`（`config/aite.yaml` 不存在退到样例）那一档下第 ① 组是 WARN、退出码 0，`aite run` 却退出码 2「配置文件不存在」。那一行 WARN 说清了，汇总这句没有 —— 读的人容易把「全部没红」读成「这份配置能飞」。**治法有两条，都超出本轨边界**：把 `fell_back` 判成 FAIL（CI 的 `preflight --offline` 门禁当场红，而 `.github/workflows/ci.yml` 是本轨只读面），或给汇总句加一个 WARN 感知的措辞（动的是 `--offline` 对外的那句承诺，派单明写「`--offline` 的语义不许变」）。**本轨实证在案、明写在 ④ 的「剩下的口子」里，不自作主张** | 待定（总管） |
+| `docs/demo-3min.md:117` | 「**`--offline` 那一档不算过。** 它跳过第 5 组，而 `config/aite.example.yaml` 里 `model.base_url` / `model.model` 是空的 —— 实测 `--offline` 报 `FAIL 0`，`aite run` 照样退出码 2」——**这段话 2026-09-15 起不成立了**：那份样例原样跑 `--offline` 现在是 `[1/7] FAIL`、退出码 1。后半句「这里必须不带 `--offline`」仍然对（第 5 组的端点探测要联网），但理由变了。`demo-3min.md` 不在本轨可写面 | 下一轮（顺手带掉） |
+| `edge/internal/server/server.go:18` 的 `ContractVersion` | 不是病，是**记一条实证成本**：要造「两边契约版本不一致」的现场只能改这个 `const`（`-ldflags -X` 顶不掉 `const`），而 `edge/**` 对 preflight 这几轨都是只读面。这一格从 Y2 挂到现在没实证，**下次谁做 edge 侧那一轨顺手跑一遍最便宜** | 下一轮（做 edge 的那轨） |
+| `core/crates/app/src/app.rs:152` 的文档注释 | Z1 记过、Z3 / AA4 确认还挂着：「`SqliteSessionStore::open`：库文件不在就建一个空的」那段现在还多欠一句 —— **文件在、是好库、但只读**时 `open` 照样成功，炸在 `init()`；而库**已经建完表**时连 `init()` 都不炸，炸在第一个任务落库。`app/src/**` 是本轨只读面 | 待定（总管，Z1 已记，此处是第三次确认 + 补上新查清的后半句） |
+| `review/review-findings-2026-09-12-vmerge.md` 的 Z1 回执（第 1249 行）与 Z3 涟漪表（第 1787 行） | 两处都还写着「探不出来的那一半：库是好的但只读时两组都看不见」——**本轨补掉了**。台账是只追加的，本轨没改历史回执，在这儿点名 | 无需动（历史记录，以本节为准） |
+
+### 没做的 / 拿不准的
+
+1. **`contract_version` 不一致那一格仍然没实证**（Y2 挂到现在）。三条理由写在 ① 末尾：
+   要越界改 `edge/**`、分类本身不在争议里、判据分支已有单元测试钉着。
+   **记账转出去了**（上表第 3 行）。
+2. **`fell_back` 那一档是本轨自己留下的口子**，不是继承来的。上表第 1 行是完整的说明 +
+   两条治法 + 为什么两条都超出边界。**明写在 ④ 里，不许后来人把它当成「基本都覆盖了」**。
+3. **第 6 组一项都没择出来。** 唯一的候选（`EdgeClient::connect` 的「socket 路径不合法」）
+   实测造不出病 —— 路径带空格照样起飞。如实记，没为了凑数硬加。
+4. **`aite run` / `build_app` 一侧一个字没动**（`app.rs` / `run.rs` 都是只读面）。所以
+   「两边口径一致」是靠 preflight 追上 `build_app` 达成的：model 段那条是**照抄
+   `from_config` 的三条不等式**（不是复用同一个函数），只读那条是**照抄 `store.init()`
+   会撞上的那件事**。两条各配了一个行为对拍
+   （`build_app_really_refuses_a_blank_model_section`、
+   `a_readonly_database_…` 里那段真 `store.init()`）兜住。
+5. **以 root 跑的话只读那条判据会放行 444 的文件，两条相关测试会红。** 那不是 bug ——
+   root 下 `CREATE TABLE` 本来也写得进去，判据和起飞路径说的仍是同一件事。写进了
+   `readonly_fault` 和两条测试的文档注释。CI 的 core 容器是降权用户（compose 那边 V6 改的），
+   碰不到这一档。
+6. **临时文件全在会话 scratchpad 里**（`…/scratchpad/bb6/`），十份坏配置 + 变异用的三份
+   源码备份都留着，给总管做对照；只读的那两个库文件和那个只读目录**已经 `chmod` 回可写**，
+   删得掉。**仓库里零残留**：`config/aite.yaml` 删了、`data/` 清了，`git status --short`
+   只有本轨这五个文件。
