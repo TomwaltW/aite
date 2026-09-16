@@ -3478,3 +3478,293 @@ passed 10/10
 6. **没做变异验证。** 本轨零判据改动（纯注释），没有「摘掉某条判据看几条测试变红」这种
    可做的变异点。②.2 的「不改也重跑、产物逐字节不变」是本轨能给的最强等价物：
    它排除的是「工具版本不对」这个本轨最大的风险。
+
+## 二十二、BB5 回执 —— 2026-09-15
+
+结论一句话：**「看证据」这个缺口不在飞书 SDK 上。** 把按钮修好也交付不了它 ——
+core 侧从来没有任何生产者往卡片的 `actions` 里写 `EVIDENCE`。而唯一能交付它的那条路
+（新增 `!evidence <任务号>`）在解析「按任务号找一个终态任务」这一步撞上了契约冻结面，
+**所以本轨的主体是决策材料，不是代码**。落地的只有事实追平：三处写错/写得过于乐观的说法。
+
+### 基线与开场自检
+
+HEAD `7019c48`（与派单抬头一致），`git status --short` 空。
+`scripts/check.sh` 一次跑过，最后一行「全部通过」，退出码 0。**五行关键值与派单期望逐字相同**：
+
+| 行 | 期望 | 实际 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` |
+| C1 契约测试 | `contracts passed=25 failed=0` | `contracts passed=25 failed=0` |
+| B 全量 cargo test | `cargo passed=864 failed=0` | `cargo passed=864 failed=0` |
+| B 全量 go test（-race） | 六个包全 `ok` | 六个包全 `ok`（aiteerr / config / feishu / ingress / sandbox / server） |
+| B8 评测 | `passed 10/10` | `passed 10/10` |
+
+> ⚠️ 第一次跑我把 check.sh 的输出接到了 `| tail -60`，结果**退出码是 `tail` 的**、
+> 开头的 `OK 25 files` 也被截掉了。重跑了一次不带管道的（`> log 2>&1`，`CHECK_EXIT=0`），
+> 契约锁那行另外单独跑了一遍 `core/target/debug/aite contracts lock --check`。
+> 上表是第二次跑的原样。**别用 `| tail` 收 check.sh 的尾巴。**
+
+守卫在位。Read `.claude/hooks/guard_bash.py` 被拦，逐字原话：
+
+```
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+`edge/go.mod` 一次都没碰（读写都没试）。
+
+---
+
+### ① 一手事实：SDK 到底怎么对待卡片回传帧
+
+**先说读的是什么。** SDK 在 `/Users/shensikai/go/pkg/mod/github.com/larksuite/oapi-sdk-go/v3@v3.12.0`。
+下面每一条都是**我读到的源码**，不是转述 README。
+
+**这份副本是官方发布件，不是本机改过的东西** —— 这条我专门验了，因为整件事的结论都压在它上面：
+
+```
+本机 v3.12.0.ziphash   : h1:H8NP6YIgfEX0RBhKse25npdeZoiaDv8mrw9nCnCVFRc=
+sum.golang.org/lookup  : github.com/larksuite/oapi-sdk-go/v3 v3.12.0 h1:H8NP6YIgfEX0RBhKse25npdeZoiaDv8mrw9nCnCVFRc=
+```
+
+逐字相同。`v3.12.0.info` 里的 tag 时间是 `2026-09-10T03:23:43Z`，commit `99927aa13e271ea9fe03591204aad7bc6a2d869c`。
+
+#### 1. 丢弃的那几行（读到的）
+
+`ws/client_message.go`，在 `handleDataFrame` 里，第 79 行：
+
+```go
+	if MessageType(messageType) != MessageTypeEvent || c.eventHandler == nil {
+		return
+	}
+```
+
+**它丢弃的是什么帧、判据是哪个字段**：判据是**数据帧的 `type` 头**，
+上面第 67 行取出来的 `messageType := hs.GetString(HeaderType)`；而
+`HeaderType = "type"` 的注释（`ws/const.go:10`）写的就是 **「消息类型, Event/Card」**。
+所以凡 `type` 头不等于字符串 `"event"` 的数据帧，一律 return。
+
+**丢弃发生在什么位置很重要**：上面第 70–75 行已经把分片 payload 拼完整了、
+第 77–78 行已经打完 debug 日志，然后才 return。也就是说**帧是收到了、解开了、
+然后被扔掉的**，既不进 handler，也不 bump 任何计数器 —— 线上除了 debug 日志没有任何痕迹。
+
+#### 2. `WithCardHandler` 的真实状态（读到的）
+
+**是注释掉的，五行**，位置在 `ws/client.go:56-60`：
+
+```go
+//func WithCardHandler(handler *larkcard.CardActionHandler) ClientOption {
+//	return func(cli *Client) {
+//		cli.cardHandler = handler
+//	}
+//}
+```
+
+**但「注释掉」只是一半。** `cardHandler *larkcard.CardActionHandler` 这个字段在
+`ws/client.go:24` 是**活代码**，可是全模块 grep 下来它只出现三次：第 24 行的声明，
+和第 56/58 行那两行注释。**没人写，也没人读。**
+
+→ **所以「上游把钩子放开就好了」这句话是错的**：取消那五行注释之后，
+帧仍然会在 `:79` 被 type 闸门拦掉，`cardHandler` 仍然没有任何调用方。
+**上游要改的是两处，不是一处。** 这一条是本轨对 README / §8.4 / `cards.go` 的实质更正。
+
+#### 3. `MessageTypeCard`（读到的）
+
+`ws/const.go:27` 有 `MessageTypeCard MessageType = "card"`。
+全模块 grep `MessageTypeCard` **只有这一行** —— 定义了，无人引用。
+（对照：`MessageTypePing` / `MessageTypePong` 在 `model.go:78` 与 `client_session.go:184` 都有真消费方。）
+
+#### 4. 上游修没修（读到的，带版本号）
+
+- **没有可升的版本。** `https://proxy.golang.org/github.com/larksuite/oapi-sdk-go/v3/@v/list`
+  的完整列表止于 **v3.12.0** —— 我们钉的就是最新版，而它 5 天前（2026-09-10）才发。
+- **开发主干也没修。** `raw.githubusercontent.com/larksuite/oapi-sdk-go/v3_main/ws/client.go`
+  里那五行 `//func WithCardHandler(...)` **仍然是注释**，`cardHandler` 字段仍然是活的声明。
+- **上游对 Go 的官方答案是 HTTP。** `v3_main/sample/card/card.go` 里卡片回传走的是
+  `larkcard.NewCardActionHandler` + `httpserverext.NewCardActionHandlerFunc` +
+  `http.ListenAndServe(":7777")` —— 不是 `ws`。这与 `WithCardHandler` 被注释掉是一致的：
+  Go SDK 压根没打算在长连接上支持卡片回传。
+- **平台侧不是瓶颈。** 飞书 `card.action.trigger` 的文档把订阅方式标成 Webhook，
+  但明写「你也可以选择使用长连接接收回调」。所以是 SDK 挡着，不是平台不发。
+
+**依赖一行都没动**（§纪律 3）。上面全是查与读。
+
+#### 5. 仓库这一侧已经是接好的（读到的）
+
+`connection.go:147` 已经注册了 `d.OnP2CardActionTrigger(...)`，而
+`card_frames_test.go` 起的是**真 websocket 服务端**，实测钉着两件事：
+
+- `TestGoSDKDropsCardFramesOnTheWire`：喂 `type=card` 帧 → onRaw 收到 **0 条**；
+- `TestCardActionTriggerReachesTheHandlerOnAnEventFrame`：**同一份 payload** 换成
+  `type=event` 帧 → 一路走到 onRaw，`event_type` / `event_id` / `action.value.action`
+  / `open_message_id` 全对，信封不带 token。
+
+→ **注册链路本身是通的，缺的只有 SDK 那道 type 闸门。** 这条测试红了就是好消息。
+
+#### 6. 推的（不是读到的，分开写）
+
+| 推论 | 依据 | 怎么才能变成事实 |
+|---|---|---|
+| 卡片回传帧的 `type` 头是 `"card"`，所以一定被 `:79` 丢掉 | `HeaderType` 注释写着「Event/Card」；`MessageTypeCard` 常量专为它而设 | **要真机**。本机没有租户凭据，起不了真长连接对着真飞书点一次按钮 |
+| SDK 之上没有任何缝可以接 | 丢弃发生在任何 handler 被调用**之前**；`handleDataFrame` 私有；`c.eventHandler` 是具体类型 `*dispatcher.EventDispatcher`（不是接口），包不住也换不掉；client.go 里全部导出的 `ClientOption` 没有一个碰帧路由 | 已经是读完全部导出面之后的结论，但仍是「我没找到」而不是「不存在」 |
+
+---
+
+### ② 路径表
+
+| # | 路径 | 要动什么 | 谁点头 | 代价 / 为什么 | 能交付「看证据」吗 |
+|---|---|---|---|---|---|
+| A | 升级 lark-oapi-go | — | — | **不可行**：v3.12.0 已是最新，主干未修（①.4） | **否** |
+| B | 不升级，自己在 SDK 之上解帧 | 只动 `edge/internal/feishu/**` | 不用 | **做不到**：没有缝（①.6） | **否** |
+| B' | 用 `WithWebSocketDialer` 在 `NetDialTLSContext` 里包一层 `net.Conn`，自己解 RFC6455 帧、把 pbbp2 的 `type` 头从 `card` 改写成 `event` | `edge/internal/feishu/**` | 不用（在面内） | 技术上真能做（`ws.Frame` / `ws.Headers` 都是导出的），但这是**对自己的传输层做字节级 MITM**：要在 TLS 之下重写 websocket 解帧（分片、掩码），单元测试测不到真帧，只有真机能验 | 是（理论上） |
+| C | 卡片回调走 HTTP（开放平台「消息卡片请求网址」） | edge 加 HTTP server → **改 spec §2.1 进程模型**；另需公网可达 + 验签 | **总管** | 上游对 Go 的官方答案就是这条（①.4），但它动的是架构 | 是 |
+| D | **新增 `!evidence <任务号>` 命令** | core R5 路由 + 文案（BB1 面）；**外加一个契约端口方法**（见下） | **总管**（一处） | 最小 | **是** |
+| E | 保持现状 | — | — | 0 | 否 |
+
+**A / B' / C 有一个共同的致命点**：它们都只解决「按钮点得动」。
+而 **core 侧从来不往 `ChecklistCard.actions` 里写 `EVIDENCE`** ——
+`core/crates/worker/src/card.rs:83` 与 `core/crates/control/src/card.rs:83` 都硬编码
+`vec![CardActionKind::Stop]`（全仓 grep：`CardActionKind::Evidence` 在 core 里只出现在
+proto 转换与测试里）。所以哪条按钮路修好了，**「证据」按钮仍然一个都不会渲染出来**，
+还得另外改 core 的卡片生产者。**按钮那条路的代价严格更高，买到的东西一样。**
+
+#### 推荐：D。理由三条
+
+1. **这个能力的全部内容就是一行路径。** 契约里 `evidence` 动作的回帖是
+   `任务 {task_id} 的证据目录：{path}`（`plane.rs:485-491`）。一行字符串，
+   按钮买不到命令买不到的任何东西。
+2. **命令那条路已经被 `!stop` 证明走得通**，而且卡片恒为 `reply_in_thread=true`
+   发进任务话题，「在本话题里回复」的投递条件天然满足。
+3. **它不需要动依赖、不需要动进程模型、不需要真机才能验。**
+
+#### 但 D 也要点头一次 —— 这是本轨最要紧的一条
+
+`!evidence #A17` 要把任务号解析成 `task_id`。现有的两个端口方法都不够
+（`core/crates/contracts/src/ports.rs:149/151`）：`get_task` 要先有 `task_id`；
+`list_active_tasks` 只有 created / planning / working。而**证据要查的多半是已经结束的任务**。
+`Session` 里没有任何指向 task 的字段（`contracts/src/session.rs:88-106`），
+`EvidenceWriter` 四个方法全部以 task_id 为键、没有列举面（`ports.rs:162-179`）。
+
+→ 要加一个只读端口方法 `find_task_by_no(chat_id, task_no)`。
+**而 `contracts/src/ports.rs` 是守卫保护面 + 契约锁冻结面，所以 D 同样要总管点头。**
+细节、SQL 形状、要刷锁、以及帮助文案钉在 spec 里这件事，全写在
+**`review/spec-bb5-evidence-command.md`**。
+
+> 图省事复用 `status_tasks`（`!stop` 那条路）是个**陷阱**：它主动滤掉终态任务，
+> 于是 `!evidence #A17` 对刚交付的任务回「没有这个任务」—— 又造一个点了没反应的按钮。
+> 这正是这一整轨存在的理由，所以宁可停下来要那一次点头。
+
+---
+
+### ③ 做了什么 / 为什么只做这些
+
+**没有任何行为改动。改的全是注释与文档。** 三条不准的说法：
+
+1. **`cards.go:125` 的行号是错的** ——写的是 `ws/client.go:53-57`，实际是 `:56-60`。
+   （有意思的是更早的 `review/review-findings-2026-09-11.md:25` 写的是对的 `client.go:56`，
+   是抄进 `cards.go` 时抄歪的。）
+2. **「SDK 放开钩子后改回去即可」不成立** —— 要改两处，且 `cardHandler` 是死字段（①.2）。
+   这句话散在 `cards.go` / `README.md` / `acceptance-M.md §8.4` 三处。
+3. **「evidence 只是被 SDK 挡住了」是不对的** —— 它连生产者都没有（②）。
+   这条原来**一个字都没写**在任何地方，是本轨新增的事实。
+
+顺带修掉一条悬空指针：`connection.go:102` 说「第三处见**本文件末尾的说明**」，
+而 `connection.go` 末尾根本没有那段说明（历次重构里掉了），改成指向 `cards.go` 那段注释
+与 `card_frames_test.go`。
+
+**为什么只做这些：**
+
+- `!evidence` 的 **core 侧**（R5 路由 `plane.rs:528-532`、文案 `commands.rs:6`）在 BB1 的
+  可写面里，伸手就是合并冲突 → 出成规格转过去（派单 ③ 就是这么要求的）。
+- `!evidence` 的 **edge 侧是真的空的**：edge 没有任何命令清单（全仓 grep 确认
+  `edge/**` 非测试代码里零个 `"!stop"` 之类字面量），任何文本消息都同样归一化后转给 core。
+  **说 edge 这边有活要干就是编工作量。**
+- 卡片上那行提示**故意没加 `!evidence`**：core 还不认这条命令，提前加会让用户收到
+  `UNKNOWN_COMMAND_TEXT` —— 那就是个新的死按钮，正是这轨要消灭的东西。
+  加法（含「终态卡片也该有这行提示」这条真行为改动）写进规格 §3.7，与 core 侧一起落。
+- `buildActions` 一行没删、没启用（派单明令）。三条往返测试
+  （`cards_test.go:281/320/340`）**一个字没动**，因为本轨零行为改动 —— 它们照常全绿。
+
+### ④ 文档副本清单（先 grep 后改）
+
+grep 的关键词：`53-57`、`WithCardHandler`、`client_message.go:79`、`放开钩子`、`改回去`、
+`整条丢弃`、`只能走 CLI`、`点不动的按钮`、`buildActions`、`cards.go:`、`未知命令，可用`。
+
+**改了的（都在可写面内）：**
+
+| 位置 | 改了什么 |
+|---|---|
+| `edge/internal/feishu/cards.go:120-153` | 行号 `53-57`→`56-60`；补 `client.go:24` 死字段、`const.go:10` 判据、「没缝可接」的理由；把「放开钩子就改回来」换成两条前置条件（上游要改两处 + core 没有 EVIDENCE 生产者）；点名 `card_frames_test.go` 是这件事的哨兵 |
+| `edge/internal/feishu/connection.go:102-103` | 悬空指针改指 `cards.go` + `card_frames_test.go` |
+| `README.md` §已知边界第 1 条 | 「放开钩子后改回去即可」→ 要改两处 + 没有可升的版本（带 h1 校验这件事） |
+| `README.md` §已知边界（新增第 2 条） | 「看证据」够不着，**且不是 SDK 的错**：没有生产者；CLI 吃 `task_id` 而卡片只有 `#A17`；指向规格文件 |
+| `docs/acceptance-M.md` §0.4（表后**纯插入**一段） | 「证据」这一行不是等 SDK 修好就变回按钮；两个生产者的位置；指向规格；解释上面那行为什么要先 `--list` |
+| `docs/acceptance-M.md` §8 第 4 条 | 同 README 的两条更正，逐条落在「渲染那条路…」与「看证据只能走 CLI」这两句上 |
+| `docs/acceptance-M.md` 5 处 `cards.go:NNN` 行号 | 注释块长了 19 行 → `183-193`→`202-212`、`169`→`188`、`151-166`→`170-185`、`239-243`→`258-262`、`244-249`→`263-268`。**逐处 sed 回去核过指向的内容对不对** |
+
+> §0.4 是冲突高发区，所以那一段是**纯插入**，那张表的任何一行都没动。
+> 抬头变更日志一个字没碰。
+> 上表最后一行的 4 处（`239-243` / `244-249` 那两条在 §1.x，不在我的可写面）是**我自己的
+> 编辑撞歪的行号**，纯数字、零语义，一并修了 —— 留着是我制造的废话。
+
+**grep 到但**故意**没改的：**
+
+| 位置 | 为什么不改 |
+|---|---|
+| `docs/demo-3min.md:719` | 不在可写面。其中「非 event 帧整条丢弃」「按钮点了没反应」当前仍然成立，所以不是废话；但「第四幕的证据本来就是在终端里拿的」在 `!evidence` 落地后会过期 → 见记账表 |
+| `review/paste-ROMEGA.md:163`、`paste-V3.md:399-408`、`review-findings-2026-09-11.md:25/42`、`review-findings-…-vmerge.md:3414` | 历史派单与历史回执，是「当时怎么说的」的记录，不该回改 |
+| `edge/internal/feishu/cards_test.go:354-360` | 那段注释说的「唯一的 `WithCardHandler` 钩子…是注释掉的」**本身是对的**，没有「放开就完事」那半句，不用动 |
+| `docs/dev-spec-2026-09-09.md:742` | spec，不许改。而帮助文案的原文就钉在这 → 见记账表 |
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `core/crates/worker/src/card.rs:83`、`core/crates/control/src/card.rs:83` | 都硬编码 `actions: vec![Stop]` —— 契约 R3 的 `EVIDENCE` 动作**没有任何生产者**，按钮那条路修好也不会有「证据」按钮 | core 面（BB1/BB2/BB6 之一）/ 总管定 |
+| `core/crates/contracts/src/ports.rs:149-151` | `SessionStore` 没有「按任务号找任务、不限状态」的读方法，终态任务只能靠 `task_id` 取 | **总管**（守卫保护面 + 契约锁） |
+| `docs/dev-spec-2026-09-09.md:742` | 帮助文案 `未知命令，可用：…` 的原文钉在 spec 的规则表里；加命令就与 spec 不一致，而 spec 不许改 | **总管**（定口径） |
+| `review/inventory-core.md:48`、`:246` | 同一句帮助文案的两处抄录，`!evidence` 落地时要一起刷 | 落地 `!evidence` 那一轨 |
+| `docs/demo-3min.md:719` | 「第四幕的证据本来就是在终端里拿的 —— 现场别去卡片上找按钮」在 `!evidence` 落地后过期 | 落地 `!evidence` 那一轨 |
+| `edge/internal/feishu/cards.go:202-212`（`actionHint`） | 只认 `actions` 里的 `STOP`，所以**终态卡片一行提示都没有** —— 而那恰恰是最该看证据的时候 | 落地 `!evidence` 那一轨（规格 §3.7，是行为改动，要配测试） |
+
+### 验收
+
+```
+scripts/check.sh                                   → 全部通过，CHECK_EXIT=0
+cd edge && go test -race ./... -count=1            → 全 ok，exit 0（含 cmd/aite-edge）
+cd edge && go vet ./... && test -z "$(gofmt -l .)" → 干净
+```
+
+`OK 25 files` / `contracts passed=25 failed=0` / `cargo passed=864 failed=0` / `passed 10/10`
+**四项逐字不变**（本轨零 Rust 改动，cargo 那行本来就必须一个字不差）。
+
+**落盘无残留**：探测 SDK 全程只读 `$GOMODCACHE`（它是 `dr-xr-xr-x`，写不进去），
+没在仓库里建任何临时文件。两个补丁脚本与 check.sh 的日志在会话 scratchpad 里，不在仓库。
+`git status --short` 只有本轨这 5 个改动文件（cards.go / connection.go / README.md /
+docs/acceptance-M.md / 本台账）+ 1 个新增文件（`review/spec-bb5-evidence-command.md`）。
+
+### 没做的 / 拿不准的
+
+1. **「卡片回传帧的 type 头是 `card`」没有真机验证。** 这是①.6 表里第一条推论。
+   本机没有租户凭据。`card_frames_test.go` 证明的是「**如果**是 card 就被丢、
+   **如果**是 event 就全程通」，没证明飞书实际发哪个。万一实际发的是 `event`，
+   那**按钮今天就是能用的**，整个 RΩ 处置的前提就要重算 —— 这是本轨最大的一个「如果」。
+   代价很小的验法：真机点一次按钮，看 SDK 的 debug 日志里那行
+   `receive message, message_type: %s`（`client_message.go:77`）打的是什么。**建议做。**
+2. **B'（拨号器层重写帧）只做了可行性判断，没写一行代码。** 判断依据是导出面
+   （`WithWebSocketDialer` + `ws.Frame`/`ws.Headers` 导出）。没做是因为它是对自己的
+   传输层做字节级 MITM，而且单元测试测不到真帧 —— 但「做不到」和「不该做」是两回事，
+   这条是**不该做**，不是做不到。
+3. **`find_task_by_no` 的 SQL 只给了形状，没写、没跑。** 规格里写的是「与
+   `list_active_tasks` 同形、去掉 status 过滤、加 `AND task_no = ?`」；
+   真写的时候要确认 `tasks` 表到 `chat_id` 的 join 路径（`list_active_tasks`
+   在 `store/src/lib.rs:411`，我没逐行读它的 SQL）。
+4. **`!evidence` 的 core 侧一行都没落地**，edge 侧的卡片提示也故意没加（③ 里说了为什么）。
+   所以**今天这个缺口仍然存在**，本轨交付的是「为什么它不在 SDK 上」+ 一次点头要什么。
+5. **考虑过、判为不做**：把 `task_id` 印到卡片上（`card.GetTaskId()` 在 edge 手边，
+   零审批、能省掉 §0.4 里那步 `aite evidence show --list`）。没做是因为它把一个内部
+   uuid4 摆到群里，对够不着终端的人是纯噪音 —— **这是产品面的取舍，不是 bug，留给总管**。
+6. **摘要式回帖没做也没设计。** 规格 §5 把它作为「第二步」提出来了：
+   只回一行文件系统路径，群里的人照样读不到证据。要不要改成贴摘要、贴多长，
+   是 R3 owner 的口径，本轨不替它定。
+7. **没做变异验证。** 本轨零判据改动（注释 + 文档），没有可摘的判据。
+   能给的最强等价物是「五行关键值逐字不变」+ `-race` 全绿：它排除的是「改注释时手滑动了代码」。
