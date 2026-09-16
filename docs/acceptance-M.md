@@ -537,7 +537,15 @@ core/target/debug/aite evidence show <task_id>
 | 「停止」 | **在卡片所在的那条话题里回复** `!stop <任务号>`；或在群里发 `@我 !stop <任务号>` |
 | 「证据」 | 走 `aite evidence show --list` 找任务，再 `aite evidence show <task_id>` —— 开头那几行里的 `目录 <证据目录>` 就是原来那个按钮会回帖的路径 |
 
-**卡片上那行提示的原文**（`edge/internal/feishu/cards.go:183-193`，`#A17` 处是真任务号）：
+⚠️ **「证据」这一行不是「等 SDK 修好就能变回按钮」**（BB5 2026-09-15 查）：core 侧
+**没有任何生产者**往卡片的 `actions` 里写 `EVIDENCE` —— `worker/src/card.rs:83` 与
+`control/src/card.rs:83` 都硬编码 `vec![Stop]`。所以就算长连接哪天收得到卡片回传帧、
+`buildActions` 也接回来了，「证据」按钮仍然一个都不会渲染。要让群里的人够得着，
+只能新增一条命令（`!evidence <任务号>`，规格见 `review/spec-bb5-evidence-command.md`，
+core 侧路由与文案**尚未落地**）。另外 `aite evidence show` 吃的是 `task_id`，
+而卡片上只有 `#A17` 这种任务号 —— 这就是上面那一行要先 `--list` 的原因。
+
+**卡片上那行提示的原文**（`edge/internal/feishu/cards.go:202-212`，`#A17` 处是真任务号）：
 
 > 要停这个任务：在本话题里回复 !stop #A17，或在群里发「@我 !stop #A17」。（既不 @ 我、也不在本话题里的命令会被丢弃，不会有任何回应。）
 
@@ -547,7 +555,7 @@ core/target/debug/aite evidence show <task_id>
 ⚠️ 两个限定，别搞错：
 
 - **只有「进行中」的卡片有这行提示。** 它挂在 `actions` 里含 `STOP` 这个条件上
-  （`cards.go:169` 的注释 + `:183-193` 的循环），**终态卡片（delivered / failed / cancelled）
+  （`cards.go:188` 的注释 + `:202-212` 的循环），**终态卡片（delivered / failed / cancelled）
   没有这一行** —— 已经结束的任务没什么可停的。
 - **停止命令必须满足投递条件**：路由 R5 收 `!` 命令的条件是「这条消息 @ 了机器人」
   **或**「这条消息在一个已有会话的话题里」。两个都不满足（比如在群主输入框里干发一条
@@ -600,7 +608,7 @@ core/target/debug/aite evidence show <task_id>
   一张卡片：`SendText` 走 `DumpsCard(BuildMarkdownCard(text))`，`msg_type` 传的是
   `"interactive"`（`edge/internal/feishu/platform.go:379-390`）。
 
-这是**故意的、正确的实现**，理由写在 `edge/internal/feishu/cards.go:239-243`：
+这是**故意的、正确的实现**，理由写在 `edge/internal/feishu/cards.go:258-262`：
 `OutboundText.text` 的契约是 markdown，而飞书里唯一真能渲染 markdown 的载体就是
 卡片的 markdown 元素 —— `msg_type=text` 会把 `**粗体**`、列表、链接原样当字面量吐出来。
 错的是文档，**不是代码**。
@@ -608,7 +616,7 @@ core/target/debug/aite evidence show <task_id>
 所以本文一律这么写：**「没有 checklist 卡片」**，不写「不是卡片」。
 
 > **视觉层还差一眼真机核实。** `BuildMarkdownCard` 拼出来的是一张**只有一个 markdown
-> 元素、没有 header** 的卡片（`cards.go:244-249`）。它在飞书里到底长得像个普通文本气泡，
+> 元素、没有 header** 的卡片（`cards.go:263-268`）。它在飞书里到底长得像个普通文本气泡，
 > 还是明显带卡片边框，只能在真飞书里看一眼。**M1 跑到的时候顺手看一下**，
 > 结论决定 `demo-3min.md` §4.2 那句要对着镜头念的旁白用哪一版（那边留了两版文案）。
 
@@ -1182,8 +1190,15 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 4. **卡片上一个按钮都没有（RΩ 起）。** 契约 R3 的 `stop` / `evidence` 两个动作都还在，
    但 lark-oapi-go v3.12.0 收不到卡片回传帧，渲染出来的按钮点了一定没反应，
    所以现在一个都不渲染，改成卡片末尾一行文字提示（见 §0.4）。
-   渲染那条路（`buildActions`，`cards.go:151-166`）没删，SDK 放开钩子后改回去即可。
-   「停止」有等价的命令路径（`!stop`，注意投递条件）；「看证据」只能走 CLI。
+   渲染那条路（`buildActions`，`cards.go:170-185`）没删，但**「SDK 放开钩子后改回去即可」
+   这句不准**（BB5 2026-09-15 一手复核 v3.12.0 源码）：上游要改的是**两处** —— 只取消注释
+   `WithCardHandler`（`ws/client.go:56-60`）没用，`ws/client_message.go:79` 那道 `type` 闸门
+   也得放行（`cardHandler` 字段现在没人写也没人读）。而且 v3.12.0 已是 proxy.golang.org 上的
+   最新版、开发主干 `v3_main` 里那五行仍是注释，**没有可升的版本**。
+   「停止」有等价的命令路径（`!stop`，注意投递条件）；「看证据」当前只能走 CLI，
+   **而这一条不是 SDK 的错** —— core 没有任何生产者往 `actions` 里写 `EVIDENCE`
+   （`worker/src/card.rs:83` / `control/src/card.rs:83` 都是 `vec![Stop]`），
+   闸门放开也不会有「证据」按钮。补法见 `review/spec-bb5-evidence-command.md`。
    ⚠️ 但 `!stop` 与卡片 stop 按钮走的是**同一份**列表（`status_tasks`，W2 起）——
    两条路对交付中的短任务（Answering）给的是同一句「正在把答复发给你，停不了了」，见 §0.4。
 5. **`checklist_op` 的 check/fail 只记 `id` 和 `state`，不带那一项的文本。**

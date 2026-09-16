@@ -119,19 +119,38 @@ func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
 
 	// 按钮**当前不渲染**（RΩ 的处置，见 review-findings §二 G1）。
 	//
-	// 事实（本轨复核过 lark-oapi-go v3.12.0 的源码）：
+	// 事实（BB5 2026-09-15 在 lark-oapi-go v3.12.0 源码上一手复核。模块 zip 的
+	// h1 与 sum.golang.org 逐字一致，读的就是官方发布件，不是本机改过的副本）：
 	//   ws/client_message.go:79  `if MessageType(messageType) != MessageTypeEvent || c.eventHandler == nil { return }`
-	//                            —— 非 event 帧整条丢弃，`card.action.trigger` 到不了任何 handler；
-	//   ws/client.go:53-57       唯一的 `WithCardHandler` 钩子是**注释掉的**；
-	//   ws/const.go:27           `MessageTypeCard` 定义了，全 SDK 无人引用。
-	// Python 靠 monkeypatch 私有方法绕过（T16），Go 没有这条路。
+	//                            —— 判据是帧的 `type` 头（const.go:10 的注释写着「Event/Card」）。
+	//                            帧已经收全、拼好、打完 debug 日志，然后在这里 return：
+	//                            `card.action.trigger` 到不了任何 handler，也不留计数器；
+	//   ws/client.go:56-60       唯一的 `WithCardHandler` 钩子是**注释掉的**；
+	//   ws/client.go:24          `cardHandler` 字段还在，但全 SDK **没人写也没人读**；
+	//   ws/const.go:27           `MessageTypeCard` 定义了，全 SDK 仅此一处，无人引用。
+	// Python 靠 monkeypatch 私有方法绕过（T16），Go 没有这条路：丢弃发生在任何 handler
+	// 被调用**之前**，`handleDataFrame` 是私有的，`c.eventHandler` 又是具体类型
+	// （`*dispatcher.EventDispatcher`，不是接口），包不住也换不掉。
 	//
 	// 于是渲染出来的按钮点了**一定没反应**。渲染一个点不动的按钮比不渲染更糟：
 	// 用户会以为自己点了、以为任务在停。所以这里只留一行提示，告诉他怎么真的停下来。
 	// `!stop` / `!status` 走的是普通消息事件，完全不受这个缺陷影响。
 	//
-	// **渲染那条路没删**（`buildActions` 还在，往返也还被测着）：飞书 SDK 哪天把
-	// `WithCardHandler` 放开，这里改回 `append(elements, actionBlock(card))` 就行。
+	// **渲染那条路没删**（`buildActions` 还在，往返也还被测着）。但「SDK 哪天放开钩子
+	// 就改回来」这句话不够准，改回来之前有两件事要先算清楚：
+	//
+	//  1. 上游要改的是**两处**，不是一处。只把 `WithCardHandler` 取消注释没有用 ——
+	//     :79 那道 `type` 闸门也得放行，否则帧根本走不到 `cardHandler`（它现在是个
+	//     死字段）。2026-09-15 查：v3.12.0 已是 proxy.golang.org 上的最新版
+	//     （tag 于 2026-09-10），开发主干 v3_main 里那五行仍然是注释，上游自己的
+	//     card 例子走的是 HTTP webhook —— **当前没有可升的版本**。
+	//  2. core 侧**从来不往 `actions` 里写 EVIDENCE**：`worker/src/card.rs:83` 与
+	//     `control/src/card.rs:83` 都硬编码 `vec![Stop]`。所以就算闸门放开、这里也
+	//     接回来了，渲染出来的仍然只有「停止」一个按钮，「证据」一个都不会有。
+	//     **「看证据」的缺口不在 SDK 上**，见 README §已知边界。
+	//
+	// 闸门这件事有 `card_frames_test.go` 的真长连接实测钉着：那条测试红了就说明
+	// SDK 修好了（或平台改用 event 帧发卡片回传），那时才轮到重新算第 2 条。
 	if hint := actionHint(card); hint != "" {
 		elements = append(elements, map[string]any{
 			"tag":      "note",

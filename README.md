@@ -408,7 +408,20 @@ A4 lint → A5 测试可编译 → C1 契约测试 → B 全量测试 → B go t
   「请在群里发 `!stop`」等于又造了一个点了没反应的按钮。卡片本身是
   `reply_in_thread=true` 发进任务话题的，所以「在本话题里回复」这条路一定走得通。
   `!stop` / `!status` 走的是普通消息事件，不受 SDK 那个缺陷影响。
-  渲染那条路（`buildActions`）没删，SDK 放开钩子后改回去即可。
+  渲染那条路（`buildActions`）没删，但**「SDK 放开钩子后改回去即可」这句不准**
+  （BB5 2026-09-15 一手复核 v3.12.0 源码，模块 zip 的 h1 与 sum.golang.org 逐字一致）：
+  上游要改的是**两处** —— 只取消注释 `WithCardHandler`（`ws/client.go:56-60`）没用，
+  `ws/client_message.go:79` 那道 `type` 闸门也得放行（`cardHandler` 字段现在没人写也没人读）。
+  且 v3.12.0 已是 proxy.golang.org 上的最新版、开发主干 `v3_main` 里那五行仍是注释，
+  上游自己的 card 例子走的是 HTTP webhook —— **当前没有可升的版本**。
+- **「看证据」在群里够不着，而这一条不是 SDK 的错。** 契约 R3 的 `evidence` 动作 core 侧
+  实现着也测着（`plane.rs` 回一行「任务 <task_id> 的证据目录：<路径>」），但**没有任何
+  生产者往卡片的 `actions` 里写它** —— `worker/src/card.rs:83` 与 `control/src/card.rs:83`
+  都硬编码 `vec![Stop]`。所以就算 SDK 闸门放开、按钮接回来，「证据」也一个都不会渲染出来：
+  按钮那条路修好了也交付不了这个能力。群里唯一够得着的入口只能是命令，而当前只有 CLI
+  （`aite evidence show <task_id>` —— 它吃的是 `task_id`，卡片上只有 `#A17` 这种任务号，
+  所以要先 `--list` 对一遍）。补法（新增 `!evidence <任务号>`）的规格见
+  `review/spec-bb5-evidence-command.md`；core 侧的路由与文案尚未落地。
 - **乱序重推的话题追问会被丢弃**：追问被平台重推在它的 root 之前时，到达那一刻话题
   会话还不存在、它自己又没 @，于是命中路由 R8「其余丢弃」。飞书的重推通常保序，
   所以这是「乱序时才炸」而不是常态；要补得靠事件级的重排或缓冲，属于路由规则本身要改。

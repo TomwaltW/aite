@@ -99,7 +99,8 @@ var errConnectClosedBeforeReady = errors.New("feishu: 长连接在就绪前就�
 //
 // 与 Python 版的三处 SDK 私有面（对齐 event loop、轮询 _conn 判断断线、
 // route_card_frames_as_events）相比，Go SDK 有公开的 Start/Close 与 OnReady 回调，
-// 前两处自然消失；第三处见本文件末尾的说明与 card_frames_test.go 的实测。
+// 前两处自然消失；第三处见 cards.go 里 `cardElements` 那段注释与 card_frames_test.go
+// 的实测（注册链路本身是通的，缺的只是 SDK 那道 type 闸门）。
 type larkConnection struct {
 	appID     string
 	appSecret string
