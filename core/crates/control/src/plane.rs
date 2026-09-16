@@ -55,7 +55,35 @@ pub fn restart_while_delivering_text(task_nos: &[String]) -> String {
     )
 }
 
-/// `!stop` / 卡片 stop 按钮找目标的三种结局。
+/// `!stop` 省略了任务号、而本群有不止一个活跃任务时的那句话。
+///
+/// **不能回 `NO_SUCH_TASK_TEXT`**：用户一个任务号都没给，「没有这个任务」说的是哪一个？
+/// 他刚在 `!status` 里看见三个，这一句只会让他以为那份列表是假的。缺的是「指哪一个」，
+/// 那就把可选的列出来 —— 列的和 `!status` 是同一份 `status_tasks`、同一个序。
+///
+/// 为什么把任务号全列出来而不是只说「请带上任务号」：那样用户还得再敲一次 `!status`。
+/// 多说这一串的代价只有长度，而**不设条数上限是刻意的** —— 这一句列的和 `!status`
+/// 列的是同一批任务，那边一行一个、同样没有上限；单给这里加一个截断，等于让两条命令
+/// 又各说各的（W2 收的正是这个口）。
+pub fn stop_needs_task_no_text(task_nos: &[String]) -> String {
+    format!(
+        "本群有 {} 个活跃任务，要停哪个请带上任务号：{}。",
+        task_nos.len(),
+        task_nos.join("、")
+    )
+}
+
+/// `!stop` / 卡片 stop 按钮找目标的结局。
+///
+/// **「找不着」不是一件事，是三件。** BB1 之前它们压在同一格 `NotFound` 上、
+/// 共用一句「没有这个任务」，而用户那头看到的是三种完全不同的处境：本群一个活跃任务
+/// 都没有（那该说的和 `!status` 是同一句）、省略了任务号而本群有好几个（那缺的是
+/// 「指哪一个」，不是「有没有」）、给了任务号但对不上（这一格「没有这个任务」才是对的）。
+/// 中间那一格最伤：用户刚在 `!status` 里看见三个任务，敲一句 `!stop` 被告知
+/// 「没有这个任务」—— 与 V5 留下那半截是同一种自相矛盾，只是换了个入口。
+///
+/// 所以 `NoneActive` / `Ambiguous` 从 `NotFound` 里分出来。**「查哪些任务」一个字没动**
+/// （仍是 `status_tasks`，W2 收的那个口），分出来的只是「找不着之后说什么」。
 ///
 /// **「交付中的任务停不了」是刻意的约定，不是查不到。** 理由在 worker 那边：
 /// 取消标志位只在每一步的**开头**被看一眼（`worker/src/agent.rs` 里
@@ -77,7 +105,18 @@ enum StopTarget {
     Stoppable(Task),
     /// 找得到，但停不了：已经走进 `deliver()`。
     Delivering(Task),
-    /// 本群压根没这个任务。
+    /// 本群一个活跃任务都没有 —— 这时该说的和 `!status` 是同一句。
+    ///
+    /// 只有 `!stop` 省略任务号那条路给得出这一格：**给了任务号就按任务号回答**
+    /// （即使列表是空的也回「没有这个任务」），没给才按群回答。卡片那条路
+    /// （`resolve_task`）永远给不出它，它按 `task_id` / `card_id` 找，没有「省略」这个形状。
+    NoneActive,
+    /// 省略了任务号，而本群不止一个活跃任务：指不到唯一的那一个。
+    ///
+    /// 带着候选走，不是只带个数 —— 回话要把可选的列出来（`stop_needs_task_no_text`），
+    /// 而那份列表必须和 `!status` 同源同序，不能让调用方再查一遍。
+    Ambiguous(Vec<Task>),
+    /// 给了任务号，本群这份列表里对不上。**这一格「没有这个任务」是对的**，不动。
     NotFound,
 }
 
@@ -112,6 +151,67 @@ const R4_KINDS: [EventKind; 4] = [
     EventKind::BotAdded,
     EventKind::MemberChanged,
 ];
+
+/// 路由自己丢掉一条事件时的那行 INFO（`acceptance-M.md` §8 第 3 条的观测缺口）。
+///
+/// **为什么非要有日志，计数器不够**：R1 / R2 / R8 各自的计数器（`events.nonhuman` /
+/// `events.duplicate` / `events.ignored`）早就有了，但它们只回答「丢了几条」，
+/// 答不了「丢的是哪一条」。M4 要判的恰恰是后者 —— 手上拿着开放平台的一个 event_id，
+/// 问「这条到底有没有投递到 core」。计数器答不了，于是只能去翻推送记录。
+///
+/// **一条规则一个名字，不合并。** 合成一个 `control.event_dropped` 再拿字段区分，
+/// 等于把 M4 要分的那件事（没投递 vs 投递了被丢、以及被谁丢的）重新糊回一起：
+/// `grep control.drop_duplicate` 是「平台重推的」，`grep control.drop_ignored` 是
+/// 「投递条件没满足」，两者的处置完全不同 —— 前者正常，后者多半是用户以为自己在跟
+/// Aite 说话而 Aite 没听见。
+///
+/// **级别是 INFO**：这三条都不是故障（R1/R2 是规则正常生效，R8 是群里的日常闲聊），
+/// 真机上 R8 尤其会很吵。放 WARN 会把真正的 WARN 淹掉；放 DEBUG 又等于没有 ——
+/// §0.3 的四个观察窗默认就是 INFO。字段名与 §7 那张表既有的一致（`event` / `kind`）。
+mod drop_log {
+    use aite_contracts::NormalizedEvent;
+
+    /// R1：非真人。带上 `sender_kind` —— 「机器人自言自语」和「系统消息」的处置不一样。
+    pub(super) fn nonhuman(ev: &NormalizedEvent) {
+        tracing::info!(
+            target: "aite.control",
+            event = %ev.event_id,
+            kind = %ev.kind,
+            sender_kind = %ev.sender_kind,
+            sender = %ev.sender_id,
+            "control.drop_nonhuman R1 丢弃：不是真人发的，永远不触发任务"
+        );
+    }
+
+    /// R2：`seen_event` 命中。这条是**正常**的（重连重推、平台的至少一次投递），
+    /// 打出来是为了让 M4 那句「它到底有没有到过 core」有个肯定的答案。
+    pub(super) fn duplicate(ev: &NormalizedEvent) {
+        tracing::info!(
+            target: "aite.control",
+            event = %ev.event_id,
+            kind = %ev.kind,
+            "control.drop_duplicate R2 丢弃：这条已经处理过了（平台重推）"
+        );
+    }
+
+    /// R8：其余丢弃。字段最多的一条，因为它是**唯一一条「本来可能该被处理」的丢弃**。
+    ///
+    /// `mentioned` 与 `thread` 合起来就是 R5/R6/R7 的三个入口条件为什么都没命中：
+    /// 没 @（`mentioned=false`）、又不在任何已有话题里（`thread` 为空，或者填了
+    /// 但库里查不到那个会话）。README §已知边界那条乱序重推的追问，在日志里的形状
+    /// 正是 `mentioned=false thread=om_xxx` —— 在这一行出现之前它丢得一声不吭。
+    pub(super) fn ignored(ev: &NormalizedEvent) {
+        tracing::info!(
+            target: "aite.control",
+            event = %ev.event_id,
+            kind = %ev.kind,
+            chat_type = %ev.chat_type,
+            mentioned = ev.mentioned,
+            thread = %ev.anchor.thread_id.as_deref().unwrap_or(""),
+            "control.drop_ignored R8 丢弃：既没 @ 机器人，也不在已有话题里"
+        );
+    }
+}
 
 /// `event_received` 的 `route`：这条事件是**建了任务**的那一条（R6 新建 / R7）。
 pub const ROUTE_NEW_TASK: &str = "new_task";
@@ -405,12 +505,14 @@ impl InProcessControlPlane {
         // R1：非真人一律丢弃。机器人/应用/系统消息永远不触发任务（含 Aite 自己发的）
         if ev.sender_kind != SenderKind::Human {
             self.shared.bump("events.nonhuman");
+            drop_log::nonhuman(ev);
             return Ok(());
         }
 
         // R2：重连后平台重推的重复事件
         if self.store.seen_event(&ev.event_id).await? {
             self.shared.bump("events.duplicate");
+            drop_log::duplicate(ev);
             return Ok(());
         }
 
@@ -450,6 +552,7 @@ impl InProcessControlPlane {
 
         // R8：其余丢弃（P0 无群会话、无 DM 主动监听）
         self.shared.bump("events.ignored");
+        drop_log::ignored(ev);
         Ok(())
     }
 
@@ -466,7 +569,13 @@ impl InProcessControlPlane {
                     .resolve_task(&ev.chat_id, action.task_id.as_deref(), &action.card_id)
                     .await?;
                 match task {
-                    StopTarget::NotFound => self.reply(ev, NO_SUCH_TASK_TEXT).await?,
+                    // `resolve_task` 走 `of()`，只给得出 NotFound / Delivering / Stoppable
+                    // 三格 —— 卡片按 `task_id` / `card_id` 找，没有「省略」这个形状，
+                    // 另两格到不了这里。写进来只为让 match 穷尽，并且万一哪天到得了，
+                    // 卡片这条路给的还是它原来那句话（BB1 一个字都没改卡片的行为）。
+                    StopTarget::NotFound | StopTarget::NoneActive | StopTarget::Ambiguous(_) => {
+                        self.reply(ev, NO_SUCH_TASK_TEXT).await?
+                    }
                     StopTarget::Delivering(task) => {
                         self.reply(ev, &stop_while_delivering_text(&task.task_no))
                             .await?
@@ -638,6 +747,12 @@ impl InProcessControlPlane {
 
     async fn cmd_stop(&self, ev: &NormalizedEvent, rest: &str) -> Result<(), IngressError> {
         match self.resolve_stop_target(&ev.chat_id, rest).await? {
+            // 与 `cmd_status` 同一句：两条命令看的是同一份列表，列表空的时候不许各说各的。
+            StopTarget::NoneActive => self.reply(ev, NO_ACTIVE_TASK_TEXT).await,
+            StopTarget::Ambiguous(tasks) => {
+                let task_nos: Vec<String> = tasks.into_iter().map(|t| t.task_no).collect();
+                self.reply(ev, &stop_needs_task_no_text(&task_nos)).await
+            }
             StopTarget::NotFound => self.reply(ev, NO_SUCH_TASK_TEXT).await,
             StopTarget::Delivering(task) => {
                 self.reply(ev, &stop_while_delivering_text(&task.task_no))
@@ -700,8 +815,10 @@ impl InProcessControlPlane {
                     }
                     // 停不掉的不许算进 `stopped`，也不许被默默漏掉：下面点名。
                     StopTarget::Delivering(t) => delivering.push(t.task_no),
-                    // `of_existing` 给不出这一格（它是 `of(None)` 的那一半）。
-                    StopTarget::NotFound => {}
+                    // `of_existing` 给不出这三格：它们是「找目标」那一步的结局
+                    // （`of(None)` 的那一半 + BB1 从它里面分出来的两格），
+                    // 而这里手里的任务是从 `status_tasks` 逐条取出来的，一定存在。
+                    StopTarget::NotFound | StopTarget::NoneActive | StopTarget::Ambiguous(_) => {}
                 }
             }
             session.status = SessionStatus::Archived;
@@ -751,8 +868,19 @@ impl InProcessControlPlane {
     ///
     /// 这条警告是**进程级**的（不分群）：`events.dropped` 数的是路由抛出去的事件，
     /// 而抛在 `seen_event` 上时连 `chat_id` 归谁都还没走到，分不了群。
+    ///
+    /// **数的是两个计数器的和（BB1）**，因为这句话回答的是「本进程有没有事情没办成」：
+    /// - `events.dropped` —— 事件在路由里炸了（`handle_event` 的错误分支）；
+    /// - `control.cancel_save_failed` —— `!stop` 认下来了，但 `Cancelled` 没落进库，
+    ///   而那一支是直接 `return`，用户连「没停成」都听不到。
+    ///
+    /// 这两笔以前共用 `events.dropped` 一个名字。拆名字是为了 M4 分得开（见
+    /// `cancel_task` 里那段），把和加回来是为了这句话别因为拆名字而漏报 ——
+    /// 用户要的是「有没有」，排障的人要的才是「是哪一类」。
+    /// 文案一个字没动（`{n}` 的口径从来就是「没接住的条数」，不是某个计数器的名字）。
     fn dropped_note(&self) -> String {
-        let n = self.shared.counter("events.dropped");
+        let n = self.shared.counter("events.dropped")
+            + self.shared.counter("control.cancel_save_failed");
         if n == 0 {
             return String::new();
         }
@@ -778,15 +906,24 @@ impl InProcessControlPlane {
         raw: &str,
     ) -> Result<StopTarget, IngressError> {
         let tasks = self.status_tasks(chat_id).await?;
-        let found = if raw.is_empty() {
+        if raw.is_empty() {
             // 只有一个任务时允许省略任务号。「只有一个」按**用户看得见的那份列表**算，
             // 也就是 `!status` 列出来的那些 —— 否则又成了两条命令各数各的。
-            (tasks.len() == 1).then(|| tasks.into_iter().next().expect("刚判过长度"))
-        } else {
-            let want = normalize_task_no(raw);
-            tasks.into_iter().find(|t| t.task_no == want)
-        };
-        Ok(StopTarget::of(found))
+            //
+            // 另外两种数目以前一起掉进 `NotFound`，各自分出去（见 `StopTarget` 那段）：
+            // 一个都没有 → 说 `!status` 那句；有好几个 → 点名要任务号并列出候选。
+            return Ok(match tasks.len() {
+                0 => StopTarget::NoneActive,
+                1 => StopTarget::of_existing(tasks.into_iter().next().expect("刚判过长度")),
+                _ => StopTarget::Ambiguous(tasks),
+            });
+        }
+        // 给了任务号就按任务号回答：对不上就是「没有这个任务」，**哪怕列表本来就是空的**。
+        // 空列表那一格只归省略任务号那条路 —— 用户指着一个号问，答的该是这个号的下落。
+        let want = normalize_task_no(raw);
+        Ok(StopTarget::of(
+            tasks.into_iter().find(|t| t.task_no == want),
+        ))
     }
 
     async fn resolve_task(
@@ -1267,7 +1404,19 @@ impl ControlPlane for InProcessControlPlane {
         match self.route(&ev).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                // 日志由 Ingress 打（那里有完整的 event_id / kind），这里不打第二遍。
+                // 日志由 Ingress 打，这里不打第二遍 —— BB1 逐条核过这句话，它是真的：
+                // `ingress.rs` 的 `on_event` 打 ERROR `ingress.handle_failed`，
+                // 带 `event` / `kind` / `error` 三个字段，比这里能凑出来的还全
+                // （§7 那张表上 core 那条 `ingress.handle_failed` 写的就是它）。
+                //
+                // **要查被丢的事件，去 `aite.ingress` 这个 target 上 grep
+                // `ingress.handle_failed`。** 写下这个指路是因为那份日志在另一个模块里，
+                // 而 `dropped_note()` 给用户的那句话也正是这么说的 —— 两处别再各说各的。
+                //
+                // ⚠️ `edge-client/src/ingress.rs` 里那条同名的 WARN（只有 `event_id` /
+                // `error`，没有 `kind`）**在当前接线下到不了**：`app.rs` 交给
+                // `platform.start()` 的是 `control::Ingress::handler()`，它无条件返回
+                // `Ok(())`，gRPC 那一层的 `Err` 分支永远不进。详见 BB1 回执的记账。
                 self.shared.bump("events.dropped");
                 Err(e)
             }
@@ -1374,8 +1523,20 @@ impl ControlPlane for InProcessControlPlane {
             // 两份 manifest 对不上；再回一句「已停止」更是直接对用户说假话 ——
             // 库里任务还是 created，下一条 !status 照样列着它。
             // 至少要让 `!status` 的那句进程级警告能说出「有事情没办成」。
+            //
+            // **计数器与 `events.dropped` 拆开了（BB1）。** 原来这里数的也是
+            // `events.dropped`，两件完全不同的事压在一个名字上：那个数的是「事件在路由里
+            // 炸了，可能压根没被处理」，而这一笔是「事件处理得好好的，命令也认了，
+            // 只有落库这一下没成」。M4 要分的正是这种区别，混在一起就分不出来了；
+            // 而且 `dropped_note()` 给的指路（去 grep `ingress.handle_failed`）对这一笔
+            // 是错的 —— 它的现场是上面那行 `control.cancel_save_failed`。
+            //
+            // 但那句进程级警告**不能因此哑掉**：落库失败这一支是直接 `return` 的，
+            // 用户那条 `!stop` 一个字的回音都收不到（连「没停成」都不说）。所以
+            // `dropped_note()` 改成两个计数器一起数（见那个函数），用户照旧被告知
+            // 「有事情没办成」，而 M4 拿得到分得开的两个名字。
             tracing::error!(target: "aite.control", task = %task.id, error = %e, "control.cancel_save_failed");
-            self.shared.bump("events.dropped");
+            self.shared.bump("control.cancel_save_failed");
             return task;
         }
         if let (Some(sandbox), Some(sandbox_id)) = (

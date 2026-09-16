@@ -14,7 +14,7 @@ use support::{
 
 use aite_control::{
     InProcessControlPlane, UNKNOWN_COMMAND_TEXT, restart_while_delivering_text,
-    stop_while_delivering_text,
+    stop_needs_task_no_text, stop_while_delivering_text,
 };
 
 async fn cmd(plane: &Arc<InProcessControlPlane>, text: &str, message_id: &str) {
@@ -259,12 +259,198 @@ async fn stop_accepts_task_no_without_hash() {
     assert_eq!(saved.status, TaskStatus::Cancelled);
 }
 
+/// 第三格（BB1 三格里唯一不动的那个）：**给了任务号、但对不上** —— 这句在这一格是对的。
+///
+/// 它同时钉住那条分界：空列表那一格只归省略任务号那条路。这里本群一个任务都没有，
+/// 可用户指着 `#A99` 问，答的就该是这个号的下落，不是「本群没有活跃任务」。
 #[tokio::test]
 async fn stop_unknown_task() {
     let h = Harness::new();
     let plane = h.plane();
     cmd(&plane, "!stop #A99", "om_9").await;
     assert_eq!(h.platform.last_text().expect("该回帖").text, "没有这个任务");
+}
+
+/// 第一格：**本群一个活跃任务都没有** —— `!stop` 和 `!status` 该说同一句话。
+///
+/// 改之前 `!status` 回「本群没有活跃任务」、`!stop` 回「没有这个任务」：后者说的是
+/// 「你要的那个不存在」，可用户压根没指定哪一个。两条命令查的是同一份列表
+/// （`status_tasks`，W2 收的口），列表空的时候不许各说各的。
+///
+/// 双向：正向钉住 `!stop` 的新回话，反向**直接拿 `!status` 的回话来比** ——
+/// 把 `NO_ACTIVE_TASK_TEXT` 换成任何别的措辞都会红在第二个断言上，
+/// 「两条命令一致」这件事因此不靠人眼盯着两个字符串常量。
+#[tokio::test]
+async fn stop_with_nothing_to_stop_says_exactly_what_status_says() {
+    let h = Harness::new();
+    let plane = h.plane();
+
+    cmd(&plane, "!status", "om_8").await;
+    let status_said = h.platform.last_text().expect("该回帖").text;
+
+    cmd(&plane, "!stop", "om_9").await;
+    let stop_said = h.platform.last_text().expect("该回帖").text;
+
+    assert_eq!(
+        stop_said, "本群没有活跃任务",
+        "省略任务号、而本群一个活跃任务都没有 —— 不许再说「没有这个任务」（哪一个？）"
+    );
+    assert_eq!(
+        stop_said, status_said,
+        "两条命令查的是同一份列表，空的时候必须给同一句话"
+    );
+}
+
+/// 第二格，本轨的正主：**省略任务号 + 本群有多个** —— 点名要任务号，并把可选的列出来。
+///
+/// 用户刚在 `!status` 里看见两个任务，敲一句 `!stop` 被告知「没有这个任务」——
+/// 这是 W2 记下、AA2 确认还没销的那条账。
+///
+/// 三向断言，缺一条都立不住：
+/// 1. 回话里**两个任务号都在**（列表和 `!status` 同源，用户不用再敲一次 `!status`）；
+/// 2. 不是「没有这个任务」（旧行为的红点）；
+/// 3. **一个任务都没被停掉** —— 「多于一个就随便挑一个停了」同样能让 1、2 全绿，
+///    而那是比原病更坏的改法（用户没指名，系统替他做了不可逆的决定）。
+#[tokio::test]
+async fn stop_without_a_task_no_lists_the_candidates_instead_of_denying_them() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("第一个活").message_id(ROOT).build())
+        .await
+        .expect("建任务 1");
+    plane
+        .handle_event(ev().id("e2").text("第二个活").message_id("om_2").build())
+        .await
+        .expect("建任务 2");
+    let tasks = active_tasks(&h.store, CHAT).await;
+    assert_eq!(tasks.len(), 2, "前提：本群这时有两个活跃任务");
+
+    cmd(&plane, "!stop", "om_9").await;
+
+    let body = h.platform.last_text().expect("该回帖").text;
+    assert_eq!(
+        body,
+        stop_needs_task_no_text(&tasks.iter().map(|t| t.task_no.clone()).collect::<Vec<_>>()),
+        "该点名要任务号，并把 !status 里那两个原样列出来"
+    );
+    assert_ne!(
+        body, "没有这个任务",
+        "它们明明都在 !status 的列表里 —— 这正是本轨要收掉的那句话"
+    );
+    for task in &tasks {
+        let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+        assert_eq!(
+            saved.status,
+            TaskStatus::Created,
+            "指不到唯一一个的时候，一个都不许停 —— 不许替用户挑（任务 {}）",
+            task.task_no
+        );
+    }
+}
+
+/// 同一组任务，`!status` 列出来的和 `!stop` 点名要的**必须是同一批**。
+///
+/// 上一条钉的是「说了什么」，这条钉的是「说的和 `!status` 对不对得上」：
+/// 候选列表要是自己另查一份（比如退回 `list_active_tasks`），这条就红。
+#[tokio::test]
+async fn the_candidates_offered_by_stop_are_the_ones_status_listed() {
+    let h = Harness::new();
+    let plane = h.plane();
+    for (i, text) in ["第一个活", "第二个活", "第三个活"].into_iter().enumerate() {
+        plane
+            .handle_event(
+                ev().id(&format!("e{i}"))
+                    .text(text)
+                    .message_id(&format!("om_root_{i}"))
+                    .build(),
+            )
+            .await
+            .expect("建任务");
+    }
+
+    cmd(&plane, "!status", "om_8").await;
+    let listed = h.platform.last_text().expect("该回帖").text;
+    cmd(&plane, "!stop", "om_9").await;
+    let offered = h.platform.last_text().expect("该回帖").text;
+
+    let task_nos: Vec<String> = active_tasks(&h.store, CHAT)
+        .await
+        .into_iter()
+        .map(|t| t.task_no)
+        .collect();
+    assert_eq!(task_nos.len(), 3, "前提：三个活跃任务");
+    for task_no in &task_nos {
+        assert!(
+            listed.contains(task_no),
+            "!status 该列出 {task_no}：{listed}"
+        );
+        assert!(
+            offered.contains(task_no),
+            "!stop 该把 {task_no} 也当成候选：{offered}"
+        );
+    }
+    assert!(
+        offered.contains('3'),
+        "条数得说出来，不然用户不知道自己看全了没有：{offered}"
+    );
+}
+
+/// `!stop` 认下来了、但 `Cancelled` 没落进库那一笔：**自己的计数器，别的照旧**（BB1 ②）。
+///
+/// 改之前它数的是 `events.dropped` —— 和「事件在路由里炸了」共用一个名字。两件事差得远：
+/// 这条命令投递到了、也被认出来了，只有落库这一下没成；而 M4 要分的正是
+/// 「没投递 vs 投递了被丢」。混在一个名字上就分不出来了，`dropped_note` 给的指路
+/// （去 grep `ingress.handle_failed`）对这一笔也是错的。
+///
+/// 双向，两头都得钉：
+/// * 正向 —— 新计数器 +1，且 `events.dropped` **一个字都没动**；
+/// * 反向 —— `!status` 尾巴那句进程级警告**照旧说得出来**。只拆名字不把和加回去的话，
+///   用户就彻底失去了唯一的信号：这一支是直接 `return` 的，`!stop` 连「没停成」
+///   都不回一个字（下面第三个断言钉的就是这个沉默本身）。
+#[tokio::test]
+async fn a_failed_cancel_save_counts_on_its_own_but_still_warns_in_status() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("活儿").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let task = active_tasks(&h.store, CHAT).await.remove(0);
+    let texts_before = h.platform.texts().len();
+
+    h.store.fail_next("update_task", 1);
+    cmd(&plane, &format!("!stop {}", task.task_no), "om_9").await;
+
+    assert_eq!(
+        plane.counter("control.cancel_save_failed"),
+        1,
+        "落库失败该记在自己名下"
+    );
+    assert_eq!(
+        plane.counter("events.dropped"),
+        0,
+        "路由一点没炸 —— 这笔不许再混进「事件没接住」那个数里"
+    );
+    assert_eq!(
+        h.platform.texts().len(),
+        texts_before,
+        "现状（不是本轨要改的）：这一支直接 return，用户连「没停成」都收不到 —— \
+         那句进程级警告因此是唯一的信号"
+    );
+    let saved = h.store.get_task(&task.id).await.expect("读").expect("有");
+    assert_eq!(
+        saved.status,
+        TaskStatus::Created,
+        "库里确实没被改成 cancelled"
+    );
+
+    cmd(&plane, "!status", "om_8").await;
+    let body = h.platform.last_text().expect("该回帖").text;
+    assert!(
+        body.contains("有 1 条事件没接住"),
+        "拆了名字不许让这句警告哑掉 —— 用户要的是「有没有事情没办成」：{body}"
+    );
 }
 
 // ---- !restart -------------------------------------------------------------

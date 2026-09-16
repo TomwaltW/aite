@@ -296,7 +296,60 @@ async fn shutdown(app: &AiteApp, runner: Option<JoinHandle<()>>, grace: f64) {
     if let Err(e) = app.store.close().await {
         tracing::warn!(target: "aite.app", error = %e, "aite.store_close_failed");
     }
+    log_counters(app);
     tracing::info!(target: "aite.app", "aite.down");
+}
+
+/// 收尾时把 core 侧的计数器倒出来 —— **它们此前没有任何查看入口**
+/// （`acceptance-M.md` §8 第 3 条）。
+///
+/// 对齐 edge 的做法：edge 在退出时打一行 `edge.counters`（`edge.signal` /
+/// `edge.shutting_down` / `edge.counters` / `edge.down` 四连，见 §7 末）。core 这边于是也
+/// 排在 `aite.down` 前一行，凑成 `aite.signal` / `aite.stopping` / `aite.counters` /
+/// `aite.down`。**这只补上了「停一次能看到」那一半**；「跑着的时候查得到」还没有出口，
+/// 那要么扩 `!status` 的文案（逐字冻结，要连带改一批测试，是产品决定不是本轨能定的），
+/// 要么另开一个只读入口 —— 见 BB1 回执的建议。
+///
+/// **两个字段而不是一行拍平**：`plane` 和 `ingress` 是两套各自独立的计数器
+/// （`events.handled` 只有 ingress 有，`events.ignored` 只有 plane 有），拍平之后一旦
+/// 哪天两边撞了同名 key，合并会静默吃掉一个。分开印，代价只是一个字段。
+///
+/// 值全是 `i64`，`counters()` 底下是 `BTreeMap`，所以这一行的 key 顺序是稳定的 ——
+/// 两次退出的日志可以直接对着 diff。
+fn log_counters(app: &AiteApp) {
+    tracing::info!(
+        target: "aite.app",
+        plane = %render_counters(&app.plane.counters()),
+        ingress = %render_counters(&app.ingress.counters()),
+        "aite.counters 本进程启动以来的计数器"
+    );
+}
+
+/// `{"a": 1, "b": 2}` → `[a=1 b=2]`；一个都没有就是 `[]`。
+///
+/// 为什么不直接把 `Map` 丢给 `%`：那会印成 JSON（`{"events.ignored": 2}`），
+/// 在一行 logfmt 里又是引号又是花括号，人读着费劲、`grep` 也不好写。
+///
+/// **方括号不是装饰。** tracing 的 fmt 层对 `%`（Display）字段不加引号，里面又有空格，
+/// 不界定的话整行长这样：
+///
+/// ```text
+/// aite.counters … plane=commands!status=1 events.ignored=1 ingress=events.handled=2
+/// ```
+///
+/// —— `plane` 看起来成了一个值是 `commands!status=1` 的计数器，后面几个则像是平级的。
+/// 加上方括号，「哪几个数归 plane、哪几个归 ingress」一眼就分得开，而计数器名本身
+/// **一个字都没改**（`grep events.ignored=` 照样命中，M4 要的就是这个）。
+///
+/// 空的时候是 `[]` 而不是空串：空串在 logfmt 里长得像「这个字段坏了」，
+/// 而「一条都没数到」本身是有意义的结论（比如「一个事件都没到过 core」）。
+fn render_counters(counters: &Map<String, Value>) -> String {
+    let body = counters
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("[{body}]")
 }
 
 // --------------------------------------------------------------------------

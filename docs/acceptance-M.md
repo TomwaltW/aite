@@ -1118,13 +1118,44 @@ edge 是 Go 的 slog logfmt（`level=INFO msg=edge.takeoff version=…`）。
 2. **卡片的发送与更新不写 evidence，也没有日志。** M3 明确要求「卡片至少更新 3 次
    且不新增消息」，但 `send_card` / `update_card` 在证据里没有任何痕迹，
    只能靠肉眼数。建议加 `card_sent` / `card_updated` 两类事件（或复用 `checklist_op`）。
-3. **被丢弃的事件不留痕。** R1/R2/R8 丢弃事件时只加内存计数器，INFO 级别没有日志。
-   **core 侧计数器没有查看入口**（`counters()` 全仓零调用方；只有 `events.dropped`
-   经 `!status` 尾巴漏出来一点），所以 M4 判「没投递 vs 投递了被丢」只能去开放平台
-   看推送记录（M4 第 4 步）。
-   ⚠️ **edge 侧这一条已经不成立了**：退出时会打一行 `edge.counters`
-   （`events.sent` / `ingress.invalid` / `ingress.errors` / `ingress.reconnects`），
-   见 §7 末。缺的只是「跑着的时候查不到」。
+3. ~~**被丢弃的事件不留痕。**~~ **BB1 已销大半，剩下的那一半写在本条末尾。**
+
+   原文：R1/R2/R8 丢弃事件时只加内存计数器，INFO 级别没有日志；**core 侧计数器没有
+   查看入口**（`counters()` 全仓零调用方；只有 `events.dropped` 经 `!status` 尾巴
+   漏出来一点），所以 M4 判「没投递 vs 投递了被丢」只能去开放平台看推送记录（M4 第 4 步）。
+   ⚠️ edge 侧这一条早就不成立了：退出时会打一行 `edge.counters`
+   （`events.sent` / `ingress.invalid` / `ingress.errors` / `ingress.reconnects`），见 §7 末。
+
+   **BB1 之后（2026-09-15）：**
+   - 三条丢弃规则各打一行 INFO，**一条规则一个名字**，都在 `aite.control` 这个 target 上：
+
+     | 规则 | 日志名 | 字段 |
+     |---|---|---|
+     | R1 非真人 | `control.drop_nonhuman` | `event` `kind` `sender_kind` `sender` |
+     | R2 重推去重 | `control.drop_duplicate` | `event` `kind` |
+     | R8 其余丢弃 | `control.drop_ignored` | `event` `kind` `chat_type` `mentioned` `thread` |
+
+     所以 M4 第 4 步现在可以先在 core 日志里 `grep <event_id>`：命中
+     `control.drop_*` 就是**投递了被丢**（还能看出被哪条规则丢的），一条都不命中才是
+     **没投递**，那时才需要去开放平台翻推送记录。
+   - **core 侧计数器有出口了**：收尾时打一行 `aite.counters`，排在 `aite.down` 前面 ——
+     退出四连成了 `aite.signal` / `aite.stopping` / `aite.counters` / `aite.down`，
+     和 edge 那边对齐。真机实测（没接到任何事件的一次退出）：
+
+     ```text
+     INFO aite.app: aite.counters 本进程启动以来的计数器 plane=[] ingress=[]
+     ```
+
+     有数的时候方括号里是 `k=v` 空格分隔，两格分别是控制面与 Ingress 的计数器，例如
+     `plane=[commands!status=1 events.ignored=1] ingress=[events.handled=2]`。
+   - `!stop` 落库失败那一笔从 `events.dropped` 里**拆出来**了，自己叫
+     `control.cancel_save_failed`（日志名同名）。`!status` 尾巴那句警告数的是两者之和，
+     文案一个字没改。
+
+   **还缺的那一半**：**跑着的时候**查不到 —— 要停一次进程才看得到 `aite.counters`，
+   和 edge 侧是同一个形状。`!status` 尾巴现在仍然只漏「没接住」那一个数
+   （`events.ignored` 之类一个都不说）；扩它要改 `wording.rs` 里逐字钉住的文案
+   并连带改一批测试，是产品决定，BB1 没擅自扩，建议见 BB1 回执 ③。
 4. **卡片上一个按钮都没有（RΩ 起）。** 契约 R3 的 `stop` / `evidence` 两个动作都还在，
    但 lark-oapi-go v3.12.0 收不到卡片回传帧，渲染出来的按钮点了一定没反应，
    所以现在一个都不渲染，改成卡片末尾一行文字提示（见 §0.4）。
