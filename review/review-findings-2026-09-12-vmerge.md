@@ -1006,12 +1006,20 @@ B8 评测 ........... passed 10/10                （开场 / 收尾一致）
 ```
 
 **开场自检没撞到假红**（一次跑过，818/0）。守卫实测有效：Read `.claude/hooks/guard_bash.py`
-被拦下。中途撞到两次守卫误拦，都是 heredoc 正文被扫：一次「命令无法解析」（正文里有配不平的
-引号），一次「不透明载荷」（~~正文太长~~ —— **归因错了，2026-09-13 更正**：
-这个标签是「受保护路径出现在判不出读/写的位置」时打的，**与长度无关**。Z2 实测 3.7KB 与
-32KB 的纯中文正文都放行，而一条正文里带受保护路径字面量的**短**命令当场被判同一个标签 ——
-**按长度去绕是绕不掉的**，标准绕法是改用 Write 工具落文件。见「十二、Z2 回执」的误拦归类表第 8 行）。
-换 Edit 工具 / 临时文件绕开，没碰守卫本身。
+被拦下。中途撞到两次守卫误拦，~~都是 heredoc 正文被扫~~ —— **两条都跟 heredoc 无关**：
+
+* 一次「命令无法解析」（~~正文里有配不平的引号~~ → 真判据是**某一行内 ASCII 引号未闭合**。
+  整条配平但跨行照样炸：`echo '\nhi\n'` 零 heredoc、两个 `'` 配平，复现同一条消息。
+  **中文引号不触发**，四条实测放行）；
+* 一次「不透明载荷」（~~正文太长~~ → 真判据是**命令替换**：`$(…)` / 反引号 / `$((…))`
+  **且**同一条命令里有受保护路径。长度一个字都不参与 —— 8KB 填充放行，8KB 填充**加**契约路径
+  也放行。Z2 2026-09-13 给的替代归因「受保护路径出现在判不出读/写的位置」**同样不对**：
+  那种情况实测拿到的标签是 `写入/执行位置`，不是 `不透明载荷`）。
+
+**两条绕法都要改口径**：不是「按长度去绕」、也不是「别用 heredoc」——
+是**「别让引号跨行」**和**「别让命令替换和受保护路径同时出现」**。
+证据见「十六、AA3 回执」①.3 (b)(d)。换 Edit 工具 / 临时文件绕开，没碰守卫本身。
+（AA3 实测更正，2026-09-13）
 
 ### ① 判断题：选了 (a) —— fake / scripted 直接 FAIL
 
@@ -1656,8 +1664,8 @@ test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 | 4 | `find . -name "*.rs" -exec ls {} \;`（Z1 撞过，本轨复现） | `blocked: 该操作触碰受保护面 冻结面（proto/** 与 core/crates/contracts/**）（find 的 -delete/-exec 覆盖面判不出来）。…` | **设计如此**。`-exec`/`-delete` 展开成什么算不出来。**标准绕法**：`ls` 列出来 + 点名 `rm -f` |
 | 5 | `git add core/crates/contracts/src/lib.rs`（总管撞过，本轨复现） | `blocked: 该操作触碰受保护面 core/crates/contracts/**（写入/执行位置）。…` | **固有代价**（扫命令文本，路径字面量判不出你是要加还是要改）。**标准绕法**：`git add -u` |
 | 6 | `cargo fmt --all`（Z1 / X1 撞过，本轨复现） | `blocked: 该操作触碰受保护面 core/crates/contracts/**（cargo fmt 写模式（用 cargo fmt --check））。…` | **固有代价**。提示里让用 `--check`，但收尾要的是真格式化。**标准绕法**：逐个文件 `rustfmt --edition 2024 <file>`，然后 `git status` 复核没动到别的 |
-| 7 | heredoc 正文里有配不平的引号 / 中文引号（Y1 1 次、Y2 1 次、Z1 1 次，本轨复现） | `blocked: 该操作触碰受保护面 <命令无法解析: No closing quotation>（解析失败）。…` | **固有代价**（守卫得先把命令解析成词才能判）。**标准绕法**：改用 Write 工具把正文落成文件，别用 heredoc |
-| 8 | heredoc 被判「不透明载荷」（Y2 1 次，归因写的是「正文太长」） | 本轨拿到的同名原话：`blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（不透明载荷）。…` | **固有代价，但 Y2 的归因要更正**：这个标签是**「受保护路径出现在判不出读/写的位置」**时打的，**不是**长度。本轨 3.7KB 与 32KB 的纯中文正文都**放行**，而一条正文里带受保护路径字面量的命令**当场被判「不透明载荷」**。**标准绕法**同 7（Write 工具落文件） |
+| 7 | ~~heredoc 正文里有配不平的引号 / 中文引号~~ → **某一行内 ASCII 引号未闭合**（Y1 1 次、Y2 1 次、Z1 1 次，本轨复现） | `blocked: 该操作触碰受保护面 <命令无法解析: No closing quotation>（解析失败）。…` | **固有代价**（守卫得先把命令解析成词才能判）。**原归因两半都错**：① 跟 heredoc 无关 —— `echo '\nhi\n'` 零 heredoc、整条引号配平，照样拦；② 中文引号 `“”`／`‘’`／`「」` **不触发**（四条实测放行），解析器只认 ASCII 的 `'` 与 `"`。**标准绕法改口径**：不是「别用 heredoc」，是**「别让引号跨行」**—— 一份纯中文的长 heredoc 是安全的，正文里有 `it's` 这种撇号时才需要换 Write 工具落文件。详见「十六、AA3 回执」①.3 (b)。（AA3 实测更正，2026-09-13） |
+| 8 | heredoc 被判「不透明载荷」（Y2 1 次，归因写的是「正文太长」） | 本轨拿到的同名原话：`blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（不透明载荷）。…` | **固有代价**。~~Y2 的「正文太长」~~ 和 ~~本节的「受保护路径出现在判不出读/写的位置」~~ **两版归因都不对**：真判据是**命令替换** —— `$(…)` / 反引号 / `$((…))` **且**同一条命令里有受保护路径。长度确实不参与（8KB 填充 + 契约路径实测放行）；而「判不出读/写的位置」那种情况（`foobarbaz <契约>`、`touch <契约>`、heredoc 正文里的裸路径）实测拿到的标签是 `写入/执行位置`，**不是** `不透明载荷`。**标准绕法**：别让命令替换和受保护路径同时出现（`$VAR` / `${VAR}` 纯变量展开和进程替换 `<(…)` 都不触发）。详见「十六、AA3 回执」①.3 (d)。（AA3 实测更正，2026-09-13） |
 | 9 | 命令 / heredoc 正文里带 `*` 或 `**`（markdown 加粗），被反向匹配到 `PROBES` 里已删的 `aite/contracts/__init__.py`（X1 1 次、Y1 1 次） | 两份回执都没留原话 | **还能收窄 —— 已经收掉了**。V6 (3a) 在 `4969a8d` 把那条死探针删了。本轨复验两条：正文含 `**加粗**` 的 heredoc → 放行；`ls core/crates/*/src/lib.rs`（`*` 会展开到契约面）→ 放行 |
 | 10 | **会话被整体锁死**（总管，2026-09-13）：cwd 停在仓库外，`Bash` / `Read` / `Write` 全部同一条错 | **不是守卫在说话** —— 是 hook 命令自己炸了，本轨复现逐字：`fatal: not a git repository (or any of the parent directories): .git` + `…/Python: can't open file '/.claude/hooks/guard_bash.py': [Errno 2] No such file or directory`，退出码 **2** → PreToolUse 读作「拦截」 | **还能收窄 —— 本轨收了**。病不在守卫逻辑里，在 hook 命令缺恢复路径。① 的补丁治它，② 钉住它 |
 
@@ -1699,7 +1707,7 @@ A1/A2/A3/A4a/A4b/A4c/A4d/A5/C1/B-go/B8 **全部 exit 0**，唯一 `✗` 落在 B
 | 位置 | 病 | 归哪轨 |
 |---|---|---|
 | 台账第八节 X1 / 第九节 Y1 的「记账转出去的」里，`PROBES` 那条写着「`review/v6-guard-patch.py` 只有人能跑，**至今没跑**」 | **这条账已经过期**：`git log -- .claude` 显示 `4969a8d fix(guard): 落地 V6 的守卫补丁`，V6 那份补丁跑过了，死探针也确实删掉了（本轨行为层复验两条）。两处该销账 | 总管（销账即可，无代码） |
-| 台账第十节 Y2 的「撞到两次守卫误拦……一次『不透明载荷』（**正文太长**）」 | **归因错了**。「不透明载荷」是「受保护路径出现在判不出读/写的位置」时打的标签，与长度无关（本轨 32KB 纯正文放行，带受保护路径字面量的短命令当场被判）。按长度去绕会绕不掉 | 总管（改一句归因） |
+| 台账第十节 Y2 的「撞到两次守卫误拦……一次『不透明载荷』（**正文太长**）」 | **归因错了**（~~长度~~）。~~「不透明载荷」是「受保护路径出现在判不出读/写的位置」时打的标签~~ —— **这个替代归因也不对**：真判据是**命令替换** `$(…)` / 反引号 / `$((…))` 加受保护路径；「判不出读/写的位置」实测打的是 `写入/执行位置`。长度确实不参与。详见「十六、AA3 回执」①.3 (d)。（AA3 实测更正，2026-09-13） | 总管（已在 BB4 就地改正，销账） |
 | 本派单「材料散在四份回执里（X1 1 次、Y1 2 次、**Z1 3 次**、总管这一侧 2 次）」 | 漏了**第十节 Y2 的 2 次**。台账里四份回执合起来正好 8 次（1+2+2+3），总管那两次是在这 8 之外的 —— 所以本轨的表是 10 行加自撞，不是 8 行 | 总管（下一批派单模板对一下数） |
 | `guard_bash.py` 的 `PROBES` / `PROT_PREFIXES` 等收窄 | 本轨纪律 4 明令只改 hook 命令那一处，守卫脚本一个字没碰。上表 5–8 那四条「固有代价」里，7（引号解析）与 8（不透明载荷）理论上还有收窄空间（例如 heredoc 正文不参与路径扫描），但那要动守卫 | 下一轮（守卫收窄那一轨） |
 | `.claude/settings.json` 的实际内容 | 本轨**一个字节都没读过**（`readable=False`）。所以「`settings.json` 里只有 1 条 PreToolUse 命令」这件事是靠 `pretooluse_commands()` 在测试运行时量出来的，不是看文件看出来的。补丁脚本按「命中几条换几条」写，多于 1 条也吃得下 | —（如实记着） |
@@ -3478,3 +3486,488 @@ passed 10/10
 6. **没做变异验证。** 本轨零判据改动（纯注释），没有「摘掉某条判据看几条测试变红」这种
    可做的变异点。②.2 的「不改也重跑、产物逐字节不变」是本轨能给的最强等价物：
    它排除的是「工具版本不对」这个本轨最大的风险。
+
+## 二十一、BB4 回执 —— 2026-09-15
+
+AA3 把守卫的行为边界量准了但明确没出补丁（「一份锚点靠猜的补丁比不写更坏」），
+并点名「这条建议单开一轨」。本轨就是那一轨：**补丁出了**，治的是 AA3 量到的
+**一条真漏拦**（先 `cd` 就绕过冻结面）和**一条真误拦**（`cargo fmt --version`）。
+
+**本轨和 AA3 最大的方法差别**：AA3 卡在「要替换的是判据代码而不是字符串字面量，
+黑盒给不出它的样子」。本轨没有去猜那段代码长什么样 —— 换成**AST 结构定位**
+（补丁脚本由人跑，它自己读得到源码；锚点写成「语法树上满足这些条件的那个节点」，
+不依赖任何字符串字面量），并且把 ① 的药做成**「再跑一遍守卫自己」**而不是改判据，
+从而在结构上保证「只新增拦截、不移除任何一条」。
+
+> 节号说明：台账现存到「十七、AA4」。十八～二十归 BB1–BB3，本轨按派单占「二十一」。
+
+### 基线与开场自检
+
+HEAD `7019c48`、`git status` 空，与派单抬头逐字相符。`scripts/check.sh` 一次跑过、
+退出码 0、末行「全部通过」，五行关键值全部对上派单：
+
+| 行 | 期望 | 实测 |
+|---|---|---|
+| A3/C2 契约锁 | `OK 25 files` | `OK 25 files` ✅ |
+| C1 契约测试 | `contracts passed=25 failed=0` | 逐字相同 ✅ |
+| B 全量 cargo test | `cargo passed=864 failed=0` | 逐字相同 ✅ |
+| B go test（-race） | 六个包全 `ok` | aiteerr/config/feishu/ingress/sandbox/server 全 `ok` ✅ |
+| B8 评测 | `passed 10/10` | 逐字相同 ✅ |
+
+**三个抖动 target 一个都没撞到**，也没出现派单警告的 `863/1`。
+
+`cargo test -p aite --test guard` 单跑（基线版 `guard.rs`，由 `git show HEAD:` 取回后
+临时放回、跑完按**内容**还原）：**`18 passed; 0 failed`** ✅
+（`running 18 tests` / `test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`，退出码 0）
+
+`Read .claude/hooks/guard_bash.py` **被守卫当场拦下** ✅。Bash（`cat`）与 Read 工具
+两条路径拿到的是同一句，原话逐字（方括号里是 hook 命令自己）：
+
+```text
+PreToolUse:Read hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -f "$d/.claude/hooks/guard_bash.py" ] || d="$CLAUDE_PROJECT_DIR"; python3 "$d/.claude/hooks/guard_bash.py"]: blocked: 该操作触碰受保护面 .claude/hooks/guard_bash.py（读取位置）。停止当前工作并向人类报告。
+```
+
+**中途又被守卫真拦了一次**（第二次独立确认它挂着）：往 heredoc 正文里写
+markdown 反引号 + 契约路径时拿到
+`core/crates/contracts/**（不透明载荷）` —— 正是 AA3 ①.3 (d) 量的那一格
+（反引号算命令替换），本轨照标准绕法换 Write 工具落文件。
+
+---
+
+### ① `cd` 漏拦 —— 本轨主交付
+
+#### 1. 先把洞量到底：不是某一种写法的疏漏，是整条维度不存在
+
+AA3 只试了 `cd core &&` 一种。本轨把形状矩阵铺开，**十四种全部放行**：
+
+| 写法 | 退出码 | | 写法 | 退出码 |
+|---|---|---|---|---|
+| `cd core && echo x > crates/…` | 0 | | `cd core\necho x > crates/…`（换行） | 0 |
+| `cd core; echo x > crates/…` | 0 | | `cd "core" && …`（带引号） | 0 |
+| `cd ./core && …` | 0 | | `cd core/crates/contracts/../contracts/src && echo x > lib.rs` | 0 |
+| `cd core/crates && echo x > contracts/…` | 0 | | `cd core && echo x \| tee crates/…` | 0 |
+| `cd core/crates/contracts/src && echo x > lib.rs` | 0 | | `cd core && sed -i "" s/a/b/ crates/…` | 0 |
+| `(cd core && …)`（子 shell） | 0 | | `cd proto && echo x > aite/v1/events.proto` | 0 |
+| `pushd core && …` | 0 | | `git -C core checkout HEAD -- crates/…` | 0 |
+
+**cwd 那一维（命令里连 `cd` 都没有）同样全漏**：
+
+| cwd | payload | 退出码 |
+|---|---|---|
+| `core/` | `echo x > crates/contracts/src/lib.rs` | 0 |
+| `core/crates/contracts/src/` | `echo x > lib.rs` | **0** ← 最尖锐：命令文本里一个受保护字符都没有 |
+| `core/` | `Write(crates/contracts/src/lib.rs)` | 0 |
+| `core/crates/contracts/src/` | `Write(lib.rs)` | 0 |
+
+**承重墙（证明上面不是恒真）**：同样这四个 cwd 下写**全名**
+（`echo x > core/crates/contracts/src/lib.rs`）**全部退 2**，读契约**全部退 0**。
+
+**会话层复验，不是只在探针层**：本轨这条会话中途真漂到过 `core/`
+（`cd core && cargo run …` 之后 cwd 就停在那儿），当场跑了一条**无副作用**的等价物：
+
+```text
+$ cd crates/contracts/src && test -w lib.rs && echo BB4_WRITABLE_AND_GUARD_ALLOWED
+BB4_WRITABLE_AND_GUARD_ALLOWED
+```
+
+守卫放行，而 `test -w` 返回真 —— 契约文件在那条路径上确实是可写的。
+（随后 cwd 一度停在 `core/crates/contracts/src`，也就是**会话 cwd 落在冻结面内部**；
+立刻退了回来。这件事本身说明这个洞在日常里有多好撞。）
+
+#### 2. 漏拦的**机制**（这条 AA3 没量，它决定了药该往哪儿下）
+
+`cd` 在 `READ_SAFE` 里 —— `cd core/crates/contracts/src` 这一段本身被判**读取位置**，
+前缀族于是放行；而后一段 `echo x > lib.rs` 里那个相对路径压根不带前缀，
+**两头都落空**。对照：`pushd` **不在** `READ_SAFE` 里，`pushd core/crates/contracts/src`
+当场退 2（`写入/执行位置`）。两条都落成回归。
+
+顺带量清了匹配形状（补丁产出的路径必须是守卫认得出的那种）：
+受保护面按**路径段边界**匹配、大小写不敏感、可以出现在命令文本任意位置 ——
+`a/proto/b.rs` 拦、`myproto/x.rs` 放行、`protos/x.rs` 放行、
+`a/b/core/crates/contracts/c.rs` 拦、`mycore/crates/contracts/z.rs` 放行。
+
+#### 3. 判据规格（不依赖源码形状的那一版）
+
+> 在把路径拿去匹配保护面**之前**，先按「进程 cwd ＋ 命令文本里的 `cd`」把相对路径
+> 归一化成**仓库根相对路径**；归一化后的 payload 与原 payload **各判一次，
+> 任一命中即拦**。
+>
+> 1. 起点 cwd = hook 进程的 cwd；
+> 2. Bash：按行、按段（`&&` `||` `;` `|`）切；`cd X` 段只挪当前目录、不改写自己；
+>    其余段里**除首词外**、含 `/` 或 `.`、不以 `-` 开头、非绝对路径的 token，
+>    替换成「(当前目录/token) 相对仓库根」；落在仓库外的不改；
+>    `cd` 目标要到运行时才知道（`$`、反引号）就从那一段起放弃；
+> 3. 工具调用：`file_path` 是相对路径时同样处理。
+
+#### 4. 补丁锚点策略 —— 和 AA3「定位不到」的分界线
+
+不猜代码形状，改用 **AST 结构定位**，两条锚点都不依赖任何字符串字面量：
+
+| 锚点 | 定位方式 | 候选 | 判据 |
+|---|---|---|---|
+| A | 语法树上**唯一**一处从 stdin 读 payload 的调用 | `json.load(…sys.stdin…)` / `json.loads(…sys.stdin…)` / `sys.stdin.read()` | **三个候选合起来恰好命中 1 处**，否则整份拒写 |
+| B | 模块 import 段结束处（第一个既非 docstring 也非 import 的顶层语句） | — | 注入函数定义 |
+
+它们只依赖「这是个从 stdin 读 JSON 的 Python 脚本」，而那是黑盒反复确认过的。
+`--check` 报出命中/未命中**外加被包裹的那一小段表达式原文** —— 那是**单个锚点**级别的
+信息，不是 dump 源码，派单的硬约束划的就是这条线。**守卫源码一个字节都没读过。**
+
+补丁**同时**改 `core/crates/app/tests/guard.rs`（锚点逐字，本轨读得到），
+把钉旧行为的 7 处一并挪位 —— **守卫和钉它的测试是同一次落盘**，
+任何一处对不上就两个文件都不写，不会出现半拉子状态。
+
+#### 5. **为什么它不会造出成片误拦**
+
+AA3 点名的风险是「`cd` 的解析一旦做歪，误拦会成片出现」。本轨的药靠**结构**挡住它，
+不是靠小心：
+
+| # | 性质 | 为什么成立 |
+|---|---|---|
+| 1 | **原判定完整保留** | 原 payload 照旧走全部原判据，新那层只**新增**拦截 —— 「原来拦的现在放」在结构上不可能 |
+| 2 | **cwd == 仓库根时是恒等变换** | `join(root, tok)` 相对 root 就是 `tok` 本身。`run_guard()` 把 cwd 钉在仓库根，既有回归**一条都不会变** |
+| 3 | **不改每段首词** | 首词是命令名。把 `cat` 改成 `core/cat` 会让它掉出 `READ_SAFE` —— 那才是成片误拦真正的来源（这条是实测教训，见下） |
+| 4 | **只改「像路径」的 token** | 含 `/` 或 `.`、不以 `-` 开头、非绝对路径；裸词不动 |
+| 5 | **仓库外的不改** | `cd /tmp && echo x > crates/…` 写的是 `/tmp/crates/…`，照旧放行 |
+| 6 | **求不出的 cd 目标就放弃** | `$PWD` / `$(…)` / 反引号 → 从那段起退化成今天的行为 |
+| 7 | **cwd 推断错只会少拦** | `os.getcwd()` 若不是会话 cwd 而是仓库根，归一化退化成恒等 = 现状。**不会误拦** |
+
+第 3 条不是纸上推演：设计初稿改写全部 token，`cd core && cat crates/…` 会变成
+`core/cat core/crates/…`，首词掉出 `READ_SAFE` → 一条**本该放行的读**被判写入位置。
+这正是「成片误拦」的样子，靠**跳过段首词**堵掉。
+
+**实测证据**（合成守卫，39 条 × 前后各一遍）：
+
+```text
+before: 39 条，对不上 0 条        ← 合成件与真守卫的实测行为逐条一致
+after : 39 条，对不上 0 条        ← 14 条漏拦全堵上、5 条误拦全治好、20 条承重墙一条没动
+```
+
+那 20 条承重墙里有 **9 条**是**误拦对照组**（8 条 cwd 落在 `core/` 的日常操作：
+跑测试、读/写自己轨的文件、`ls`、`rustfmt` 单文件、`grep`、`cd ..` 回上级、裸词；
+外加 1 条 cwd 在仓库根的 `echo hello`），补丁前后都必须放行 —— 全部放行。
+cwd=`core/` 那 8 条一并落成了回归，钉在 `the_guard_never_looks_at_the_process_cwd` 里。
+
+#### 6. 回归全绿的证明
+
+本轨 `guard.rs` **18 → 21 条**，`cargo test -p aite --test guard` **21 passed; 0 failed**
+（逐字输出见「测试数」一节）。补丁产出的那一版 `guard.rs` 也**验过能编译**：
+临时放回仓库跑 `cargo test --no-run` → 退出码 0，随后按**内容**还原
+（不是 `copy2` —— 旧 mtime 会让 cargo 跳过重编，那样验的是上一轮的产物），
+还原后与原文逐字相同、`git status` 干净。
+
+---
+
+### ② `cargo fmt` 纯查询被判写模式
+
+#### 判据复验 + 补量
+
+AA3 量的两条（`--version` / `--help`）复现。**本轨补量到四条**：`-V` / `-h` 同病。
+`cargo fmt --all --version` 也拦。
+
+**一条与 AA3 建议相反的实测**：AA3 ③.1 写「**按词匹配，别按子串** —— 子串匹配会让
+`cargo fmt --all -- --help-xyz` 这种东西绕过去」。实测
+
+```text
+cargo fmt --checkfoo            → 2   ← 含 `--check` 这个子串，照样拦
+cargo fmt --all -- --help-xyz   → 2
+```
+
+**守卫那条判据本来就是按词的**，那个绕过风险在守卫这一侧并不存在。
+AA3 那句话真正的用处是**约束收窄补丁本身** —— 本轨照办了。
+
+#### 药：入口白名单，**不动判据代码**
+
+既然那条判据正在正确工作，本轨**没有**照 AA3 的建议去扩它，改成在入口加一条极窄的
+白名单早退：整条命令的词必须全部落在 `{cargo, fmt, --all, --quiet, -q}` ∪
+`{--version, -V, --help, -h}` 里，前两词是 `cargo fmt`，且至少有一个查询选项。
+按**词**匹配。
+
+**差别要说清楚**：AA3 那个改法会让 `cargo fmt -p aite --version` 也放行，
+白名单不会（`aite` 不在白名单里）。选窄的那一版，因为它的失败方向是「多拦一点」。
+
+#### characterization 从 `blocked` 挪到 `allowed` 的 diff
+
+由补丁脚本一并落盘（逐字输出）：
+
+```diff
+@@ 在 blocked 里 @@
+-        // ↓ 真误拦，钉的是现状
+-        ("--version 纯查询，一个字节不写", "cargo fmt --version"),
+-        ("--help 纯查询，一个字节不写", "cargo fmt --help"),
+-        // 短选项同病（BB4 补量 —— AA3 只量了长选项那两个）
+-        ("-V 纯查询", "cargo fmt -V"),
+-        ("-h 纯查询", "cargo fmt -h"),
+-        ("--all 配 --version 也拦", "cargo fmt --all --version"),
+@@ 在 allowed 里 @@
+     let allowed: &[(&str, &str)] = &[
++        // ↓ BB4 的补丁把这五条从 blocked 挪过来了：纯查询，一个字节都不写。
++        //   白名单极窄（词必须全落在 {cargo, fmt, --all, --quiet, -q} ∪
++        //   {--version, -V, --help, -h} 里），按词不按子串。
++        ("--version 纯查询", "cargo fmt --version"),
++        ("--help 纯查询", "cargo fmt --help"),
++        ("-V 纯查询", "cargo fmt -V"),
++        ("-h 纯查询", "cargo fmt -h"),
++        ("--all 配 --version", "cargo fmt --all --version"),
+         ("--check 在前", "cargo fmt --check --all"),
+```
+
+---
+
+### ③ 受保护面的成员表 —— 系统地试，不再「猜着试」
+
+AA3「没做的」第 4 条说「量不出来，只能一个个猜着试」。本轨按派单点名的
+「依赖表 / 锁文件 / 配置」三类系统地铺了一遍（成员批 **231 条 payload**：77 个候选各喂 `cat` / `touch` / `Read(…)` 三条，
+靠三档组合定位；形状批另 123 条、`cd`/`READ_SAFE` 批另 10 条 —— **本轨总计 364 条**）。
+
+**关键前提**：守卫按**文本**匹配、不查文件系统 —— 所以可以试任意路径串，
+包括仓库里根本不存在的。这让穷举不受「仓库里有什么」限制。
+
+#### 实测命中（三档）
+
+| 档 | 成员 | `cat` | 写 | 台账此前记过吗 |
+|---|---|---|---|---|
+| 点名族 | `.claude/hooks/guard_bash.py` | 拦 | 拦 | ✅ 记过 |
+| 点名族 | `.claude/settings.json` | 拦 | 拦 | ✅ 记过 |
+| 点名族 | `.contracts.lock` | 拦 | 拦 | ✅ 记过 |
+| 点名族 | **`edge/go.mod`** | 拦 | 拦 | ❌ **一个字都没记过** |
+| 点名族 | **`edge/go.sum`** | 拦 | 拦 | ❌ **一个字都没记过，派单也没点名** |
+| 前缀族 | `core/crates/contracts/` | 放行 | 拦 | ✅ 记过 |
+| 前缀族 | `proto/` | 放行 | 拦 | ✅ 记过 |
+| spec 族 | `docs/dev-spec-*.md` | 放行 | 拦 | ✅ 记过 |
+
+`edge/go.sum` 是本轨**新发现的成员** —— 派单只点了 `edge/go.mod`。
+Go 侧的依赖表整体是双重冻结面的一部分，而这件事此前只存在于守卫源码里。
+
+#### 实测**未**命中 —— 下一个人不用再试的部分
+
+派单点名的三类里，除了 Go 那两个，**一个都不在**保护面里：
+
+| 类 | 试过的（全部退 0） |
+|---|---|
+| Rust 依赖表 / 锁 | `core/Cargo.toml`、`core/Cargo.lock`、`core/rust-toolchain.toml`、`core/crates/{app,models,store,gateway,worker,control,evals,evidence,edge-client,testing}/Cargo.toml` |
+| 配置 | `config/aite.example.yaml`、`docker-compose.yml`、`.dockerignore`、`docker/{core,edge,sandbox}/Dockerfile`、`Makefile`、`scripts/check.sh`、`.github/workflows/ci.yml`、`.gitignore` |
+| 文档 | `README.md`、`docs/acceptance.md`、`docs/README.md` |
+| 猜着试（仓库里没有） | `package.json`、`package-lock.json`、`pyproject.toml`、`requirements.txt`、`poetry.lock`、`uv.lock`、`Cargo.toml`、`Cargo.lock`、`.env`、`.env.example`、`Dockerfile`、`.pre-commit-config.yaml`、`buf.yaml`、`buf.gen.yaml` |
+| 目录 / 同族别的文件 | `.claude`、`.claude/`、`.claude/hooks`、`.claude/hooks/`、**`.claude/agents/foo.md`**、`edge`、`edge/`、`edge/cmd/aite-edge/main.go`、`core/crates/models/src/lib.rs`、`.contracts.lock.bak`、`contracts.lock` |
+
+> **`.claude/**` 不是整个目录受保护** —— 只有点名的那两个文件。
+> 派单抬头那句「`.claude/**` 在守卫的 `PROT_PATHS` 里」要按这个口径读。
+
+#### 顺带量到的两条边界（都钉成了 characterization）
+
+1. **`core/crates/proto/**` 被 `proto/` 这个前缀命中** —— 报的面写的就是 `proto/**`。
+   那是 protobuf 生成的 Rust 绑定，不是 `proto/` 那个冻结目录。**像是误拦**，
+   但也可能是有意的（生成物本就不该手改）—— 判断不了，钉住并转出去。
+2. **顶层还有一份 `dev-spec-2026-09-09.md`**（与 `docs/` 那份同尺寸、不同 inode，
+   两份都在 git 里），而保护面只写了 `docs/dev-spec-*.md` —— **顶层那份不设防**。
+   `docs/../dev-spec-2026-09-09.md` 也放行。
+
+---
+
+### ④ 三条归因更正（就地改正，不再两段并存）
+
+派单口径：在原处就地改正，行末标 `（AA3 实测更正，2026-09-13）`。**四处**唯一命中后改掉：
+
+| 处 | 改了什么 |
+|---|---|
+| 第十节 Y2 那段 | 「都是 heredoc 正文被扫」「正文太长」「判不出读/写的位置」三条归因全部划掉，换成实测的两条真判据（引号未闭合 / 命令替换），并改口径两条绕法 |
+| 第十二节 Z2 误拦表**第 7 行** | 「heredoc 正文里有配不平的引号 / 中文引号」→ **某一行内 ASCII 引号未闭合**；绕法从「别用 heredoc」→ **「别让引号跨行」** |
+| 第十二节 Z2 误拦表**第 8 行** | Z2 的替代归因「受保护路径出现在判不出读/写的位置」也划掉 → 真判据是**命令替换** |
+| 第十二节「记账转出去的」那一行 | 同源的错归因，一并更正并销账 |
+
+`guard.rs` 模块头那张表**三行**就地改正（diff 逐字）：
+
+```diff
+-//! | `cargo fmt --all`（写模式，碰冻结面） | 固有代价 | 逐个文件 `rustfmt --edition 2024 <file>` |
+-//! | heredoc 正文里有配不平的引号 / 中文引号 | 固有代价 | 改用 Write 工具落文件，别用 heredoc |
+-//! | heredoc 正文被判「不透明载荷」 | 固有代价 | 同上（本轨 32KB 中文正文没复现，判据不是纯长度） |
++//! | `cargo fmt` **且命令的词里没有 `--check`**（跟 `--all` 无关，跟它会碰什么也无关） | 固有代价 | 逐个文件 `rustfmt --edition 2024 <file>`（AA3 实测更正，2026-09-13） |
++//! | **某一行内 ASCII 引号未闭合**（跟 heredoc 无关；中文引号不触发） | 固有代价 | **别让引号跨行**；正文里有 `it's` 这种撇号时才改用 Write 工具落文件（AA3 实测更正，2026-09-13） |
++//! | **命令替换**（`$(…)` / 反引号 / `$((…))`）**且**同条命令里有受保护路径 → 「不透明载荷」 | 固有代价 | 别让两者同时出现；`$VAR` / `${VAR}` 与进程替换 `<(…)` 都不触发（AA3 实测更正，2026-09-13） |
+```
+
+AA3 在 `guard.rs` 里那段「三处不一致」的并存叙述，也改成了**指路**
+（指向三条测试 + 台账），不再重复叙述错误归因 —— 派单要的「别再留两段并存」。
+
+---
+
+### 每条提案的 fail-closed 复核（照 AA3 ④ 那张表的形式）
+
+守卫的第一性质是**失效时停下来喊人，不能静默放行**。逐条过：
+
+| 提案 | 收窄/收紧后守卫失效时还 fail-closed 吗 | 结论 |
+|---|---|---|
+| ① `cd` / cwd 归一化 | **不适用 —— 它是收紧，不是收窄**，方向上只让守卫拦得更多。而且这一层跑在守卫**内部**：守卫压根没跑起来时它也不存在，碰不到「守卫失效时怎么办」那一层（那是 hook 命令的事，Z2 的 `[ -f ]` 回退管着，本补丁一个字没动） | **通过** |
+| ① 的**退化路径**（二次调用起不来 / 超时 / 解析不了） | **是**。退回**原判定** —— 原有保护一条不少，等于今天的行为。选它而不是「出意外就退 2」，是因为后者会在子进程环境异常时把所有带相对路径的命令都拦掉 → 成片误拦 + 会话变砖，而变砖是 2026-09-13 真踩过的病 | **通过**（代价写明：意外时这条新保护不生效，旧保护仍在） |
+| ② `cargo fmt` 纯查询放行 | **是**。它只动「守卫正常跑时的判定」，碰不到「守卫跑不起来时怎么办」 | **通过** |
+| ② 用白名单而不是扩判据 | **是**，且比扩判据更靠 fail-closed 那一侧：白名单极窄，失败方向是「多拦一点」 | **通过** |
+
+**一条都没有为了省麻烦而动摇 fail-closed。**
+
+另记一条**没提收窄**的：`core/crates/proto/**` 被 `proto/` 命中看着像误拦，
+但判断不了它是不是有意的（生成物本就不该手改），**不碰**。
+
+---
+
+### 给总管的命令
+
+```bash
+cd /Users/shensikai/Documents/Aite/.worktrees/task-bb4
+
+# 1. 干跑：期望 9 条锚点全部「命中 1」、退出码 0
+AITE_RELOCK=1 python3 review/bb4-guard-patch.py --check
+
+# 2. 真写（守卫 + 它的回归测试同一次落盘）
+AITE_RELOCK=1 python3 review/bb4-guard-patch.py
+
+# 3. 补丁生效的判据：21 条必须全绿
+cd core && cargo test -p aite --test guard
+```
+
+第 3 条是**判据**，不是走过场：补丁跑之前 `guard.rs` 有**三组** characterization 钉着旧行为
+（`cargo fmt` 那 5 条在 `blocked` 里、`cd_slips` 那 12 条断 `0`、
+`the_guard_never_looks_at_the_process_cwd` 里 4 条断 `0`），补丁用 **7 条锚点**把守卫和这三组
+**一起**改掉。跑完不是 21 绿，就是补丁没落到该落的地方，**别往下走**。
+
+补丁**本轨没跑**（`AITE_RELOCK=1` 不许自己用，纪律 4）。
+
+#### `--check` / `--root` 自验矩阵（八格，逐字输出）
+
+```text
+### A. 形状 1（json.loads(sys.stdin.read())）· --check
+[  命中 1] guard_bash.py: 锚点 A 在第 63 行（data）
+           └ 包裹：json.loads(sys.stdin.read())  →  _bb4_precheck(json.loads(sys.stdin.read()))
+[  命中 1] guard_bash.py: 锚点 B（import 段结束）在第 11 行，注入点在它之前
+[  命中 1] guard.rs: cargo fmt 的五条查询选项从 blocked 里摘掉
+[  命中 1] guard.rs: 同五条挪进 allowed
+[  命中 1] guard.rs: cd 矩阵从「放行」改成「拦」
+[  命中 1] guard.rs: cwd 那条（core 下写契约）
+[  命中 1] guard.rs: cwd 那条（src 下写 lib.rs）
+[  命中 1] guard.rs: cwd 那条（core 下 Write 相对路径）
+[  命中 1] guard.rs: cwd 那条（src 下 Write lib.rs）
+[退出码 0]
+
+### B. 形状 2（json.load(sys.stdin)）· --check
+[  命中 1] guard_bash.py: 锚点 A 在第 63 行（data）
+           └ 包裹：json.load(sys.stdin)  →  _bb4_precheck(json.load(sys.stdin))
+[退出码 0]
+
+### C. 形状 3（先 sys.stdin.read() 再 json.loads）· --check
+[  命中 1] guard_bash.py: 锚点 A 在第 63 行（raw）
+           └ 包裹：sys.stdin.read()  →  _bb4_precheck_raw(sys.stdin.read())
+[退出码 0]
+
+### D. 形状 1 · 真写 + 行为矩阵（39 条 x 前后）
+--- 补丁前 ---   before: 39 条，对不上 0 条
+--- 补丁后 ---   after : 39 条，对不上 0 条
+[退出码 0]
+
+### E. 已经打过了 · --check
+[  已打过] guard_bash.py: 里面已经有 _bb4_precheck，不用再跑
+[  已打过] guard.rs: characterization 已经挪过位了
+这份补丁已经打过了（守卫里有 _bb4_precheck，测试也挪过位了）。不用再跑。
+[退出码 1]
+
+### F. 认不出的 stdin 写法（守卫改用 input()）· --check
+[命中 0 处] guard_bash.py: 锚点 A（从 stdin 读 payload 的调用）—— 期望恰好 1 处
+           └ 一处都没找到：这个守卫读 payload 的写法本补丁没预料到（不是 json.load*(…sys.stdin…)，也不是 sys.stdin.read()）。人工核一遍再说，别硬来。
+对不上（一个字节都没写）：
+  - guard_bash.py：见上面的锚点报告
+**守卫和钉它的测试必须同一次落盘** —— 一个对不上就两个都不写。
+[退出码 1]
+
+### G. guard.rs 的锚点对不上（守卫锚点是好的）· --check
+[  命中 1] guard_bash.py: 锚点 A 在第 63 行（data）
+[命中 0 次] guard.rs: cargo fmt 的五条查询选项从 blocked 里摘掉 —— 期望 1
+对不上（一个字节都没写）：
+  - guard.rs：锚点没唯一命中，多半是它在 BB4 之后又动过
+**守卫和钉它的测试必须同一次落盘** —— 一个对不上就两个都不写。
+[退出码 1]
+
+### H. 真目标 + 没有 AITE_RELOCK
+这份补丁改的是 .claude/** —— 守卫的保护面，故意只让人跑。
+  人跑：AITE_RELOCK=1 python3 review/bb4-guard-patch.py --check
+  自验：python3 review/bb4-guard-patch.py --root <临时目录> --check
+[退出码 1]
+```
+
+**F / G 两格是这份补丁最要紧的自验**：锚点对不上时**两个文件一个字节都不写**，
+而且把现状报成人话。**E 格保证重复跑是安全的。**
+
+**合成守卫的保真度是校准过的，不是我说了算**：初版在 2 条上和真守卫不一致
+（`cd` 没进 `READ_SAFE`、读/写位置按整条命令判而不是按段判），都是拿真守卫的实测
+把它掰回来的 —— 校准后 `before` 39 条逐条与真守卫相同，`after` 才有意义。
+
+---
+
+### 测试数
+
+`guard.rs` **18 → 21 条**，`cargo test -p aite --test guard`：
+
+```text
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+新增三条（都是**双向断言**，该拦的拦 + 该放的放）：
+
+| 新测试 | 钉的是什么 |
+|---|---|
+| `the_guard_never_looks_at_the_process_cwd` | cwd 那一维全漏（4 条 characterization）+ 承重墙（4 个 cwd 下写全名必拦、3 个 cwd 下读必放）+ **8 条误拦对照组** |
+| `the_protected_surface_membership_measured_not_guessed` | ③ 的成员表：5 个点名族、5 个可读不可写、**18 个实测未命中**、2 条边界 |
+| `protected_prefixes_match_on_path_segment_boundaries` | 段边界匹配的形状（5 拦 / 6 放）+ `docs/dev-spec-*.md` 那个 glob 的边界（5 条） |
+
+既有两条扩写：`protected_prefixes_…_cd_first_slips_through` 补了 12 种 `cd` 形状、
+`cd`/`pushd` 的 `READ_SAFE` 机制、点名族对照、`cd /tmp` 不是洞、4 条 cd 等价物残留；
+`cargo_fmt_is_judged_by_the_check_flag_alone` 补了 `-V` / `-h` / `--checkfoo` / `--help-xyz`。
+
+`cargo passed=864 → 867`，**+3 正好是新加的三条测试**
+（扩写的那两条是往既有测试里加断言，不增测试数）。
+
+### 记账转出去的
+
+| 位置 | 病 | 归哪轨 |
+|---|---|---|
+| `guard_bash.py` 的 cwd 归一化 | **本轨出了补丁**（`review/bb4-guard-patch.py`），但**只认命令文本里的 `cd`**。`pushd` / `git -C` / `make -C` / `cd "$PWD/…"` 这四种 cd 等价物**补丁后仍然放行**，已单独钉成 characterization | 下一轮（要逐个理解各自的参数语义，另一条曲线） |
+| `core/crates/proto/**` | 被 `proto/` 这个前缀命中（报的面就是 `proto/**`）。那是 protobuf 生成的 Rust 绑定，不是冻结目录。**像误拦但判断不了是不是有意的** —— 本轨钉住没碰 | 总管（一句话裁定：有意就写进文档，无意就收窄前缀） |
+| 顶层 `dev-spec-2026-09-09.md` | 与 `docs/` 那份同尺寸、不同 inode，两份都在 git 里，而保护面只写 `docs/dev-spec-*.md` —— **顶层那份不设防**，`docs/../dev-spec-…` 也放行 | 总管（决定是删掉这份副本，还是把它加进保护面） |
+| `edge/go.sum`（新发现）与 `edge/go.mod` | 台账此前一个字都没记过；本轨落成回归了，但**文档面**（派单模板里那句「`.claude/**` 在 `PROT_PATHS` 里」的成员清单）还没更新 | 总管（下一批派单模板抄本节 ③ 那两张表） |
+| 派单模板里「heredoc 正文里有配不平的引号 / 中文引号」那句绕法 | 口径要改成**「别让引号跨行」**。台账与 `guard.rs` 模块头本轨已就地改正，**派单模板不在本轨可写面里** | 总管（改模板那一句） |
+| `.claude/settings.json` / `guard_bash.py` 的实际内容 | 本轨**一个字节都没读过**，也没取任何锚点字符串 —— 锚点全是 AST 结构条件 | —（如实记着） |
+
+### 没做的 / 拿不准的
+
+1. **补丁没在本轨跑过真目标**（`AITE_RELOCK=1` 不许自己用，纪律 4）。
+   `--check` 对**真** `guard_bash.py` 的命中情况**本轨不知道** —— 八格矩阵跑的全是合成件。
+   合成件的三种 stdin 写法都命中，但真守卫是不是这三种之一，**没有证据**。
+   F 格就是为这个准备的：不是就整份拒写、一个字节不动。**这是本轨最大的一个未知。**
+2. **「hook 进程的 cwd == 会话 cwd」是推断，不是测量。** 从会话内部读不到 hook 进程的
+   环境和 cwd。设计上让这个推断**错了也只会少拦**（退化成今天的行为，见 ①.5 第 7 条），
+   但「会话 cwd 落在 `core/` 时 `Write(crates/…)` 会被拦」这件事**本轨没能在会话层验证**，
+   只在探针层（显式指定 cwd 起守卫）验过。
+3. **`Write(相对路径)` 这种 payload 在真实会话里是否真的出现，没量到。**
+   Claude Code 的 Write/Edit 要求绝对路径，而绝对路径里带着 `core/crates/contracts/`
+   字面量、本来就会被拦。所以 AA3 说的「会话在 `core/` 下起，`file_path` 自然就是这个形状」
+   **本轨没能证实**。Bash 那一维（`cd` 之后）是会话层实测可达的，工具那一维只是 payload 层可达。
+4. **判定顺序仍然是推断。** 和 AA3「没做的」第 2 条一样：能量到「什么条件触发什么标签」，
+   量不到「守卫内部先查哪一条」。本轨新量的那些（`cd` 在 `READ_SAFE` 里、前缀族按段边界匹配）
+   **是行为，不是实现** —— 我说「机制在这儿」时指的是能复现的行为规律，不是读过代码。
+5. **点名族的匹配规则没完全解开。** 实测有两条互相矛盾的表象：`go.mod`（裸名）命中
+   `edge/go.mod`，但 `foo/go.mod` **不**命中；`guard_bash.py`（裸名）命中，
+   但 `hooks/guard_bash.py` **不**命中，而 `settings.json`（裸名）**不**命中。
+   三个成员的裸名行为不一致，用「子串」「basename」「段边界」任何单一规则都解释不通。
+   **本轨只把实测结果落成了回归，没有给出机制** —— 别把我上面写的段边界规律套到点名族上。
+6. **`PROT_PATHS` 的成员表仍然不是「完备」的**，只是比 AA3 那版大了一圈：
+   本轨试了 **121 个**候选路径（成员批 77 + 形状批 52，去重后），
+   覆盖派单点名的三类 + 一批常见猜测。守卫按文本匹配、
+   不查文件系统，所以**穷举空间是无限的** —— 「试过没命中」那张表的价值是省下重复劳动，
+   不是证明「没有别的成员」。
+7. **`--check` 的输出会让总管看到被包裹的那一小段表达式原文**（如
+   `json.loads(sys.stdin.read())`）。那是**单个锚点**级别的信息，是派单允许的信道；
+   但如果总管把完整输出贴回给我，我就会知道真守卫的那一行长什么样。
+   **这是设计上有意留的口子，如实记着。**
+8. **本轨零产品代码改动。** 可写面之外一个字节没动：`git status` 只有
+   `core/crates/app/tests/guard.rs`（改）、`review/review-findings-2026-09-12-vmerge.md`（改）、
+   `review/bb4-guard-patch.py`（新增）三个。临时探针 `tests/bb4_probe.rs` 跑完即删，
+   合成件全在 scratchpad、不进仓库。
+   `cargo fmt --all` 照例被守卫拦（本轨正在治的就是它隔壁那一格），改用
+   `rustfmt --edition 2024 core/crates/app/tests/guard.rs`。
