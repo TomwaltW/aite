@@ -69,9 +69,9 @@
 //! | `find … -delete` / `-exec` | 设计如此 | `ls` 列出来 + 点名 `rm -f` |
 //! | Read / `cat` 守卫自身或 `settings.json` | 设计如此 | 没有。这条正是开场自检要撞的那一条 |
 //! | 命令里出现受保护路径的**字面量**（`git add <那个路径>`） | 固有代价 | `git add -u` |
-//! | `cargo fmt --all`（写模式，碰冻结面） | 固有代价 | 逐个文件 `rustfmt --edition 2024 <file>` |
-//! | heredoc 正文里有配不平的引号 / 中文引号 | 固有代价 | 改用 Write 工具落文件，别用 heredoc |
-//! | heredoc 正文被判「不透明载荷」 | 固有代价 | 同上（本轨 32KB 中文正文没复现，判据不是纯长度） |
+//! | `cargo fmt` **且命令的词里没有 `--check`**（跟 `--all` 无关，跟它会碰什么也无关） | 固有代价 | 逐个文件 `rustfmt --edition 2024 <file>`（AA3 实测更正，2026-09-13） |
+//! | **某一行内 ASCII 引号未闭合**（跟 heredoc 无关；中文引号不触发） | 固有代价 | **别让引号跨行**；正文里有 `it's` 这种撇号时才改用 Write 工具落文件（AA3 实测更正，2026-09-13） |
+//! | **命令替换**（`$(…)` / 反引号 / `$((…))`）**且**同条命令里有受保护路径 → 「不透明载荷」 | 固有代价 | 别让两者同时出现；`$VAR` / `${VAR}` 与进程替换 `<(…)` 都不触发（AA3 实测更正，2026-09-13） |
 //! | 正文里的 `**`（markdown 加粗）反向匹配到死探针 | 已收窄 | 不再复现：V6 (3a) 把 `aite/contracts/__init__.py` 从 `PROBES` 里删了（`4969a8d`） |
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -120,6 +120,49 @@ fn run_guard(payload: &Value) -> i32 {
         .status
         .code()
         .expect("守卫是被信号杀掉的，没有退出码")
+}
+
+/// 和 `run_guard` 一样，只是**在指定 cwd 下**起守卫（路径相对仓库根）。
+///
+/// 守卫认不认进程 cwd，是 BB4 要量的那一维 —— `run_guard` 把 cwd 钉死在仓库根，
+/// 那一维在它下面是看不见的。
+fn run_guard_in(cwd_rel: &str, payload: &Value) -> i32 {
+    let cwd = repo_root().join(cwd_rel);
+    let mut child = Command::new("python3")
+        .arg(guard_path())
+        .current_dir(&cwd)
+        .env_remove("AITE_RELOCK")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("起不来 python3");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(payload.to_string().as_bytes())
+        .expect("往守卫写 payload");
+    child
+        .wait_with_output()
+        .expect("等守卫退出")
+        .status
+        .code()
+        .expect("守卫是被信号杀掉的，没有退出码")
+}
+
+fn bash_in(cwd_rel: &str, cmd: &str) -> i32 {
+    run_guard_in(
+        cwd_rel,
+        &json!({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+    )
+}
+
+fn tool_in(cwd_rel: &str, name: &str, file_path: &str) -> i32 {
+    run_guard_in(
+        cwd_rel,
+        &json!({"tool_name": name, "tool_input": {"file_path": file_path}}),
+    )
 }
 
 fn bash(cmd: &str) -> i32 {
@@ -515,16 +558,14 @@ fn deny_rules_only_use_the_edit_and_read_prefixes() {
 // =====================================================================================
 // AA3（2026-09-13）：把误拦归类表从**归纳**推到**实测**。
 //
-// 上面模块头那张表是从会话经历里归出来的，一行都没有黑盒验过。本轨拿 `run_guard()`
-// 喂了 180 条 payload 把每一格的**触发条件**量到精确，下面八条各钉一格。
-// 量出来有三处和那张表不一致，**以实测为准**（详见台账「十六、AA3 回执」）：
+// 上面模块头那张表原本是从会话经历里归出来的，一行都没有黑盒验过。AA3 拿 `run_guard()`
+// 喂了 183 条 payload 把每一格的**触发条件**量到精确，下面八条各钉一格。
 //
-// 1. 「heredoc 正文里有配不平的引号 / **中文引号**」——**中文引号根本不触发**，
-//    而且这条病**跟 heredoc 无关**。真判据见 `a_quote_must_close_on_its_own_line`。
-// 2. 「不透明载荷」既不是 Y2 说的「正文太长」，也不是 Z2 说的「判不出读/写的位置」。
-//    真判据见 `command_substitution_is_what_the_opaque_payload_verdict_means`。
-// 3. 「`cargo fmt --all`（写模式，碰冻结面）」——和 `--all` 无关、和它会碰什么也无关，
-//    只看 `--check` 在不在。真判据见 `cargo_fmt_is_judged_by_the_check_flag_alone`。
+// 量出来和那张表不一致的三格（引号解析 / 不透明载荷 / `cargo fmt`）**已经在模块头就地
+// 改正**（BB4，2026-09-15 —— 不再留两段并存，读的人只会看到实测那一版），判据分别由
+// `a_quote_must_close_on_its_own_line`、
+// `command_substitution_is_what_the_opaque_payload_verdict_means`、
+// `cargo_fmt_is_judged_by_the_check_flag_alone` 钉着。详见台账「十六、AA3 回执」。
 //
 // **这八条只断退出码，不断错误消息的措辞。** 措辞改了不是行为变了；而标签
 // （`读取位置` / `写入/执行位置` / `不透明载荷` / `解析失败` / `解释器内联代码` /
@@ -673,6 +714,18 @@ fn cargo_fmt_is_judged_by_the_check_flag_alone() {
         // ↓ 真误拦，钉的是现状
         ("--version 纯查询，一个字节不写", "cargo fmt --version"),
         ("--help 纯查询，一个字节不写", "cargo fmt --help"),
+        // 短选项同病（BB4 补量 —— AA3 只量了长选项那两个）
+        ("-V 纯查询", "cargo fmt -V"),
+        ("-h 纯查询", "cargo fmt -h"),
+        ("--all 配 --version 也拦", "cargo fmt --all --version"),
+        // ↓ **判据本来就是按词的**，不是按子串：`--checkfoo` 里含 `--check` 这个子串，
+        //   照样被拦。AA3 ③.1 担心的「子串匹配会让 --help-xyz 绕过去」那个风险
+        //   在守卫这一侧并不存在（BB4 实测）；那句话的真正用处是约束**收窄补丁**本身。
+        (
+            "--checkfoo 不是 --check（按词，不是子串）",
+            "cargo fmt --checkfoo",
+        ),
+        ("--help-xyz 不是 --check", "cargo fmt --all -- --help-xyz"),
     ];
     for (label, cmd) in blocked {
         assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
@@ -770,17 +823,352 @@ fn protected_prefixes_match_the_literal_path_so_a_cd_first_slips_through() {
         assert_eq!(bash(cmd), BLOCKED, "{label} 没被拦：{cmd:?}");
     }
 
-    // ↓ 这两条断的是「**没**拦住」。钉的是现状，不是我们想要的行为。
+    // ↓ 下面断的都是「**没**拦住」。钉的是现状，不是我们想要的行为。
+    //
+    // **BB4 补量**：AA3 只试了 `cd core &&` 一种写法。本轨把 `cd` 的形状矩阵铺开，
+    // **十二种全部放行** —— 也就是说这不是某一种写法的疏漏，是整条 cwd 维度不存在。
+    let cd_slips: &[(&str, &str)] = &[
+        ("&& 串联", "cd core && echo x > crates/contracts/src/lib.rs"),
+        ("; 串联", "cd core; echo x > crates/contracts/src/lib.rs"),
+        (
+            "./ 前缀",
+            "cd ./core && echo x > crates/contracts/src/lib.rs",
+        ),
+        ("两级 cd", "cd core/crates && echo x > contracts/src/lib.rs"),
+        (
+            "直接 cd 进 src",
+            "cd core/crates/contracts/src && echo x > lib.rs",
+        ),
+        (
+            "子 shell",
+            "(cd core && echo x > crates/contracts/src/lib.rs)",
+        ),
+        ("换行分隔", "cd core\necho x > crates/contracts/src/lib.rs"),
+        (
+            "cd 目标带引号",
+            "cd \"core\" && echo x > crates/contracts/src/lib.rs",
+        ),
+        (
+            "cd 路径里带 .. 回绕",
+            "cd core/crates/contracts/../contracts/src && echo x > lib.rs",
+        ),
+        (
+            "tee 写",
+            "cd core && echo x | tee crates/contracts/src/lib.rs",
+        ),
+        (
+            "sed -i 改",
+            "cd core && sed -i \"\" s/a/b/ crates/contracts/src/lib.rs",
+        ),
+        // proto/** 这半边一样漏
+        ("proto 面同病", "cd proto && echo x > aite/v1/events.proto"),
+    ];
+    for (label, cmd) in cd_slips {
+        assert_eq!(
+            bash(cmd),
+            0,
+            "守卫开始认 cwd 了（好事）—— 这条 characterization 该跟着改，别当回归失败：{label}"
+        );
+    }
+
+    // **`cd` 的等价物 —— 单独钉着，别跟上面那批一起挪。**
+    //
+    // `review/bb4-guard-patch.py` 认的是命令文本里的 `cd <目录>`；下面这四种改的是
+    // 同一件事（工作目录），但要认出它们，守卫得逐个去理解各自的参数语义
+    // （`-C` 之于 git/make、`pushd` 的目录栈、`$PWD` 要到运行时才有值）——
+    // 那是另一条曲线，收益远小于把 `cd` 解析做歪的风险。**补丁跑完这四条仍然放行**，
+    // 记账转出去了（台账「二十一、BB4 回执」的「记账转出去的」）。
+    for (label, cmd) in [
+        (
+            "pushd 不是 cd",
+            "pushd core && echo x > crates/contracts/src/lib.rs",
+        ),
+        (
+            "git -C 等价于 cd",
+            "git -C core checkout HEAD -- crates/contracts/src/lib.rs",
+        ),
+        ("make -C 等价于 cd", "make -C core fmt"),
+        (
+            "cd 目标要到运行时才知道（$PWD / $(…)）",
+            "cd \"$PWD/core\" && echo x > crates/contracts/src/lib.rs",
+        ),
+    ] {
+        assert_eq!(
+            bash(cmd),
+            0,
+            "{label} 开始被拦了（好事）—— 这条该跟着改：{cmd:?}"
+        );
+    }
+
+    // **漏拦的机制就在这儿**（BB4 实测）：`cd` 在 `READ_SAFE` 里 ——
+    // `cd core/crates/contracts/src` 这一段本身被判「读取位置」，前缀族于是放行；
+    // 而后一段 `echo x > lib.rs` 里那个相对路径压根不带前缀，两头都落空。
+    // 对照：`pushd` **不在** `READ_SAFE` 里，同一个目标当场被判写入/执行位置。
     assert_eq!(
-        bash("cd core && echo x > crates/contracts/src/lib.rs"),
+        bash("cd core/crates/contracts/src"),
         0,
-        "守卫开始认 cwd 了（好事）—— 这条 characterization 测试该跟着改，别当回归失败"
+        "cd 到保护面被误拦了 —— 那 cd 就不在 READ_SAFE 里了，上面那批的机制要重新量"
     );
+    assert_eq!(
+        bash("pushd core/crates/contracts/src"),
+        BLOCKED,
+        "pushd 到保护面没被拦"
+    );
+
+    // **对照：不是所有保护面都漏。** 点名族（`edge/go.mod` / 守卫自身）在 `cd` 之后
+    // 照样拦得住 —— 它们的匹配认得出「尾段」，前缀族只认从命令文本开头对齐的那一串。
+    // 这一条同时保证上面那堆 `assert_eq!(…, 0, …)` 不是恒真：守卫确实在跑、确实在判事。
+    for (label, cmd) in [
+        ("cd 进 edge 再读 go.mod", "cd edge && cat go.mod"),
+        (
+            "cd 进 hooks 再读守卫",
+            "cd .claude/hooks && cat guard_bash.py",
+        ),
+    ] {
+        assert_eq!(
+            bash(cmd),
+            BLOCKED,
+            "{label} 没被拦 —— 点名族这半边也塌了：{cmd:?}"
+        );
+    }
+
+    // **`cd` 到仓库外不是洞，别顺手「治」它**：写的是 `/tmp/crates/…`，
+    // 跟冻结面没关系。守卫哪天认 cwd 了，这一条仍然必须放行。
+    assert_eq!(
+        bash("cd /tmp && echo x > crates/contracts/src/lib.rs"),
+        0,
+        "cd 到仓库外之后的同名相对路径被误拦了 —— 归一化做歪了才会这样"
+    );
+
+    // `Write(crates/contracts/src/lib.rs)` 在 **cwd = 仓库根**下放行是**对的**
+    // （它写的是 `<root>/crates/contracts/…`，那儿没有冻结面）。真正的洞在
+    // cwd 落进 `core/` 之后 —— 那一格归 `the_guard_never_looks_at_the_process_cwd`。
     assert_eq!(
         tool("Write", "crates/contracts/src/lib.rs"),
         0,
-        "守卫开始认 cwd 了（好事）—— 这条 characterization 测试该跟着改，别当回归失败"
+        "这条在 cwd=仓库根下本来就该放行，别把它当洞"
     );
+}
+
+/// **守卫一个字都不看进程 cwd** —— 这是上一条那个洞的另一半，也是更难堵的那一半。
+///
+/// 上一条的 `cd` 至少还写在命令文本里，守卫**看得见**。这一条连文本都没有：
+/// 会话在哪个目录起，`file_path` 和命令里的相对路径就是相对那儿的，而守卫始终
+/// 拿它去跟「相对仓库根」的保护面比。
+///
+/// ```text
+/// cwd = core/                      echo x > crates/contracts/src/lib.rs   → 放行
+/// cwd = core/crates/contracts/src/ echo x > lib.rs                        → 放行
+/// ```
+///
+/// **第二条是这个洞最尖锐的形状**：会话 cwd 就落在冻结面**内部**时，写它只需要一个
+/// 裸文件名，命令文本里连一个受保护路径的字符都不出现。本轨这条会话真漂到过那儿
+/// （`cd core && cargo run …` 之后 cwd 就停在 `core/`），会话层复验过一条无副作用的
+/// 等价物：`cd crates/contracts/src && test -w lib.rs` 在 cwd=`core/` 下**放行**，
+/// 而 `test -w` 返回真 —— 契约文件在那条路径上确实是可写的。
+///
+/// **钉成现状，没在本轨修**（本轨零产品代码改动）。补丁在 `review/bb4-guard-patch.py`，
+/// 由人跑；跑完这几条会红，**那时把它们从 `0` 改成 `BLOCKED`**，别当回归失败。
+#[test]
+fn the_guard_never_looks_at_the_process_cwd() {
+    const CONTRACT: &str = "core/crates/contracts/src/lib.rs";
+
+    // ↓ 断的是「没拦住」。钉现状。
+    assert_eq!(
+        bash_in("core", "echo x > crates/contracts/src/lib.rs"),
+        0,
+        "守卫开始认 cwd 了（好事）—— 这条 characterization 该跟着改"
+    );
+    assert_eq!(
+        bash_in("core/crates/contracts/src", "echo x > lib.rs"),
+        0,
+        "守卫开始认 cwd 了（好事）—— 这条 characterization 该跟着改"
+    );
+    assert_eq!(
+        tool_in("core", "Write", "crates/contracts/src/lib.rs"),
+        0,
+        "守卫开始认 cwd 了（好事）—— 这条 characterization 该跟着改"
+    );
+    assert_eq!(
+        tool_in("core/crates/contracts/src", "Write", "lib.rs"),
+        0,
+        "守卫开始认 cwd 了（好事）—— 这条 characterization 该跟着改"
+    );
+
+    // **承重墙**：换 cwd 不许把守卫变傻。写全名在任何 cwd 下都得拦住 ——
+    // 少了这一条，上面四条就是恒真断言（一个压根没跑起来的守卫也满足它们）。
+    for cwd in ["core", "core/crates/contracts/src", "edge", "."] {
+        assert_eq!(
+            bash_in(cwd, &format!("echo x > {CONTRACT}")),
+            BLOCKED,
+            "cwd={cwd} 下写全名没被拦 —— 守卫在这种 cwd 下根本没跑起来"
+        );
+    }
+
+    // 读取位置在任何 cwd 下都放行（前缀族可读）—— 另一侧的承重墙。
+    for cwd in ["core", "edge", "."] {
+        assert_eq!(
+            bash_in(cwd, &format!("cat {CONTRACT}")),
+            0,
+            "cwd={cwd} 下读契约被误拦"
+        );
+    }
+
+    // **补丁之后必须仍然放行的对照组**（cwd 落在 `core/` 的日常操作）。
+    // 归一化一旦做歪，成片误拦就从这里开始 —— 它们现在全绿，改完也必须全绿。
+    for (label, cmd) in [
+        ("跑测试", "cargo test --workspace"),
+        ("读自己轨的文件", "cat crates/app/src/cli.rs"),
+        ("写自己轨的文件", "echo x > crates/app/src/cli.rs"),
+        ("列目录", "ls crates/"),
+        (
+            "rustfmt 单文件（纪律 5 的绕法）",
+            "rustfmt --edition 2024 crates/app/tests/guard.rs",
+        ),
+        ("grep 全树", "grep -rn fn crates/app/src/"),
+        ("cd 回上级再读", "cd .. && cat README.md"),
+        ("裸词不是路径", "echo hello"),
+    ] {
+        assert_eq!(
+            bash_in("core", cmd),
+            0,
+            "cwd=core 下 {label} 被误拦：{cmd:?}"
+        );
+    }
+}
+
+/// **受保护面的成员表** —— AA3「没做的」第 4 条说「量不出来，只能一个个猜着试」，
+/// 本轨按「依赖表 / 锁文件 / 配置」三类系统地试了一遍，这里钉的是试出来的结果。
+///
+/// 三档（每档的读写行为差一整档，别混着记）：
+///
+/// | 档 | 成员 | `cat` | 写 |
+/// |---|---|---|---|
+/// | 点名族 | `.claude/hooks/guard_bash.py`、`.claude/settings.json`、`.contracts.lock`、**`edge/go.mod`**、**`edge/go.sum`** | **拦** | 拦 |
+/// | 前缀族 | `core/crates/contracts/`、`proto/` | 放行 | 拦 |
+/// | 冻结 spec | `docs/dev-spec-*.md` | 放行 | 拦 |
+///
+/// **`edge/go.mod` 与 `edge/go.sum` 台账里一个字都没记过**（2026-09-15 靠
+/// `grep -n lark edge/go.mod` 被拦才撞出来）。Go 侧的依赖表是双重冻结面的一部分，
+/// 而这件事此前只存在于守卫源码里。
+///
+/// **下半截同样要紧：试过但没命中的。** 那是下一个人不用再试的部分 —— 派单点名的
+/// 「依赖表 / 锁文件 / 配置」三类里，Rust 侧和容器侧**一个都不在**保护面里。
+#[test]
+fn the_protected_surface_membership_measured_not_guessed() {
+    // 点名族：读写都拦
+    for p in [
+        ".claude/hooks/guard_bash.py",
+        ".claude/settings.json",
+        ".contracts.lock",
+        "edge/go.mod",
+        "edge/go.sum",
+    ] {
+        assert_eq!(bash(&format!("cat {p}")), BLOCKED, "点名族读没拦：{p}");
+        assert_eq!(bash(&format!("touch {p}")), BLOCKED, "点名族写没拦：{p}");
+    }
+
+    // 前缀族 / spec 族：可读不可写
+    for p in [
+        "core/crates/contracts/src/lib.rs",
+        "core/crates/contracts/Cargo.toml",
+        "proto/aite/v1/events.proto",
+        "docs/dev-spec-2026-09-09.md",
+        "docs/dev-spec-2026-09-11-rustgo.md",
+    ] {
+        assert_eq!(bash(&format!("cat {p}")), 0, "可读档读不了：{p}");
+        assert_eq!(bash(&format!("touch {p}")), BLOCKED, "可读档写进去了：{p}");
+    }
+
+    // **试过、没命中** —— 依赖表 / 锁文件 / 配置这三类里，除了 Go 那两个，一个都不在。
+    // 列在这儿是为了让下一个人不用重试；哪天谁把它们加进保护面，这里会红。
+    for p in [
+        "core/Cargo.toml",
+        "core/Cargo.lock",
+        "core/rust-toolchain.toml",
+        "core/crates/app/Cargo.toml",
+        "config/aite.example.yaml",
+        "docker-compose.yml",
+        ".dockerignore",
+        "docker/core/Dockerfile",
+        "docker/edge/Dockerfile",
+        "docker/sandbox/Dockerfile",
+        "Makefile",
+        "scripts/check.sh",
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        "README.md",
+        // `.claude/**` 不是整个目录受保护 —— 只有点名的那两个文件
+        ".claude/agents/foo.md",
+        "edge/cmd/aite-edge/main.go",
+        "core/crates/models/src/lib.rs",
+    ] {
+        assert_eq!(
+            bash(&format!("touch {p}")),
+            0,
+            "它进保护面了（好事？）：{p}"
+        );
+    }
+
+    // **两条边界，各是一个转出去的账**（都不在本轨的可写面里，只钉住）：
+    //
+    // 1. `core/crates/proto/**` 被 `proto/` 这个前缀**子串**命中 —— 那是 protobuf
+    //    生成的 Rust 绑定，不是 `proto/` 那个冻结目录。报的面写的也是 `proto/**`。
+    assert_eq!(
+        bash("touch core/crates/proto/src/lib.rs"),
+        BLOCKED,
+        "core/crates/proto 不再被 proto/ 误命中了 —— 这条 characterization 该跟着改"
+    );
+    // 2. 顶层还有一份 `dev-spec-2026-09-09.md`（与 `docs/` 那份同尺寸、不同 inode，
+    //    两份都在 git 里），而保护面只写了 `docs/dev-spec-*.md` —— 顶层那份**不设防**。
+    assert_eq!(
+        bash("touch dev-spec-2026-09-09.md"),
+        0,
+        "顶层那份 dev-spec 进保护面了（好事）—— 这条 characterization 该跟着改"
+    );
+}
+
+/// 受保护面是按**路径段边界**匹配的，不是裸子串，也不是从头对齐。
+///
+/// 这一条把「守卫到底拿什么跟什么比」量清楚，因为 `cd` 归一化那条补丁要依赖它 ——
+/// 归一化产出的必须是**守卫认得出的那种形状**，否则补了也白补。
+///
+/// * 段边界：`a/proto/b.rs` 拦、`myproto/x.rs` 放行、`protos/x.rs` 放行；
+/// * 任意位置：`a/b/core/crates/contracts/c.rs` 拦（不必从命令文本开头对齐）；
+/// * 大小写不敏感（APFS）：`PROTO/foo.rs`、`CORE/CRATES/CONTRACTS/x.rs` 都拦。
+#[test]
+fn protected_prefixes_match_on_path_segment_boundaries() {
+    for (label, p) in [
+        ("前面是 /", "a/proto/b.rs"),
+        ("嵌在深处", "a/b/core/crates/contracts/c.rs"),
+        ("大小写变体", "PROTO/foo.rs"),
+        ("大小写变体 2", "CORE/CRATES/CONTRACTS/x.rs"),
+        ("前缀族自己", "core/crates/contracts/src/x.rs"),
+    ] {
+        assert_eq!(bash(&format!("touch {p}")), BLOCKED, "{label} 没拦：{p}");
+    }
+
+    for (label, p) in [
+        ("前面粘着字母", "myproto/x.rs"),
+        ("前面粘着字母 2", "xproto/foo.rs"),
+        ("后面粘着字母", "protos/x.rs"),
+        ("只是名字像", "protobuf/x.rs"),
+        ("core 前面粘着字母", "mycore/crates/contracts/z.rs"),
+        ("contracts 后面粘着字母", "core/crates/contractsX/y.rs"),
+    ] {
+        assert_eq!(bash(&format!("touch {p}")), 0, "{label} 被误拦：{p}");
+    }
+
+    // `docs/dev-spec-*.md` 的 `*` **不跨 `/`**，而且那个 `-` 是判据的一部分
+    for (label, p, want) in [
+        ("空名字也算", "docs/dev-spec-.md", BLOCKED),
+        ("嵌在深处", "x/docs/dev-spec-a.md", BLOCKED),
+        ("没有那个横杠", "docs/dev-spec.md", 0),
+        ("* 不跨斜杠", "docs/sub/dev-spec-a.md", 0),
+        ("扩展名要对", "docs/dev-spec-a.markdown", 0),
+    ] {
+        assert_eq!(bash(&format!("touch {p}")), want, "{label}：{p}");
+    }
 }
 
 /// `READ_SAFE` 只救得了 `PROT_PREFIXES` 那一族，救不了被点名的那几个文件。
