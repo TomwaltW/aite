@@ -29,7 +29,7 @@ use crate::context::{
 };
 use crate::deps::WorkerDeps;
 use crate::local_tools::{self, parse_final};
-use crate::{Clock, RunError, Sleeper, budget, fingerprint, texts};
+use crate::{Clock, RunError, Sleeper, budget, fingerprint, redact, texts};
 
 /// §3.3 模型调用异常 / 5xx：重试 2 次（首发 + 两次退避，共 3 次调用）
 pub const MODEL_RETRY_DELAYS: [f64; 2] = [2.0, 5.0];
@@ -108,12 +108,9 @@ pub const MAX_CONSECUTIVE_REPEATS: u32 = 5;
 /// 最后一行（`SandboxError` / `ModuleNotFoundError: No module named 'xxx'` 这种），
 /// 而那正是 §8 第 6 条说「排 M3 的沙箱问题时最疼」的那一行。
 ///
-/// **摘要不做脱敏，也没有任何脱敏器认得它** —— `preflight` 的 `Redactor` 只在起飞
-/// 自检那条路上、只认配置里的环境变量名，根本不在证据这条路上；`evidence show` 的
-/// `redact()` 是**渲染时**按键名打码的，只作用在 `tool_call` 的 `arguments` 上。
-/// 这不是新开的口子：`tool_call` 证据早就把 `arguments` **全文**原样存进去了，
-/// 摘要存的是同一趟调用的输出侧，风险面没有变大。真要收紧，该收的是整个证据面的
-/// 写入侧脱敏，那是单独一件事（见回执「记账转出去的」）。
+/// **CC3 ⑨ 起摘要在写入侧脱敏**（`redact::redact_text`，先脱敏再截断），`tool_call` 的
+/// `arguments` 同样（`redact::redact_args`）。`content_hash` 仍对原文算。
+/// `evidence show` 的 `redact()` 是**渲染时**按键名打码的，两道都在。
 pub const MAX_TOOL_SUMMARY_CHARS: usize = 200;
 
 /// Worker（T2）。一个实例可以跑多个任务，每个任务的状态都在 `run()` 的栈上。
@@ -307,7 +304,7 @@ impl AgentWorker {
                     self.append_evidence(
                         &ctx.task.id,
                         EvidenceKind::ToolCall,
-                        json!({"call_id": call.call_id, "name": call.name, "arguments": call.arguments}),
+                        json!({"call_id": call.call_id, "name": call.name, "arguments": redact::redact_args(&call.arguments)}),
                     )
                     .await?;
                     match parse_final(call) {
@@ -562,7 +559,7 @@ impl AgentWorker {
                 "ok": ok,
                 "error": code.map(|c| c.as_str()),
                 "content_hash": sha256_hex(content.as_bytes()),
-                "content_summary": clip(content, MAX_TOOL_SUMMARY_CHARS),
+                "content_summary": clip(&redact::redact_text(content), MAX_TOOL_SUMMARY_CHARS),
                 "duration_ms": 0,
             }),
         )
@@ -582,7 +579,7 @@ impl AgentWorker {
         self.append_evidence(
             &ctx.task.id,
             EvidenceKind::ToolCall,
-            json!({"call_id": call.call_id, "name": call.name, "arguments": call.arguments}),
+            json!({"call_id": call.call_id, "name": call.name, "arguments": redact::redact_args(&call.arguments)}),
         )
         .await?;
         let Some(gateway) = self.gateway.clone() else {
@@ -611,7 +608,7 @@ impl AgentWorker {
                 // 具体的报错文本 —— 排沙箱问题时最疼的就是这个。
                 // **摘要不进 `content_hash`**：那个 hash 是对 content 全文算的，
                 // 摘要只是同一份 content 的另一个视图，进去了就变成「改摘要即改哈希」。
-                "content_summary": clip(&result.content, MAX_TOOL_SUMMARY_CHARS),
+                "content_summary": clip(&redact::redact_text(&result.content), MAX_TOOL_SUMMARY_CHARS),
                 "sandbox_id": sandbox_id,
                 "duration_ms": result.duration_ms,
             }),

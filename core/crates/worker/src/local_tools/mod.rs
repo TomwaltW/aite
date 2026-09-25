@@ -57,7 +57,7 @@ impl AgentWorker {
         self.append_evidence(
             &ctx.task.id,
             EvidenceKind::ToolCall,
-            json!({"call_id": call.call_id, "name": call.name, "arguments": args}),
+            json!({"call_id": call.call_id, "name": call.name, "arguments": crate::redact::redact_args(args)}),
         )
         .await?;
         match call.name.as_str() {

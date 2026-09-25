@@ -25,6 +25,7 @@ pub mod local_tools;
 #[path = "loop.rs"]
 mod r#loop;
 pub mod mime;
+pub mod redact;
 pub mod snapshot;
 pub mod texts;
 

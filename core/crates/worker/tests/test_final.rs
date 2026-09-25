@@ -637,3 +637,79 @@ async fn every_tool_call_gets_a_reply() {
         .collect();
     assert_eq!(called, vec!["final", "final"], "没执行的不写证据");
 }
+
+// ---- CC3 ⑨ 证据写入侧脱敏 --------------------------------------------------
+
+/// 原始证据里找不到 `sk-` 后面那串、Bearer 后的令牌、名单键的值；`url_or_token` 原值还在；
+/// `content_hash` 仍对原文算。
+#[tokio::test]
+async fn redaction_masks_bearer_and_keys() {
+    let secret_output = "请求成功 sk-RESULTSECRET99 token=zzzTOK 完成";
+    let gateway = FakeGateway::new(None);
+    let gateway = std::sync::Arc::new(
+        std::sync::Arc::try_unwrap(gateway)
+            .ok()
+            .expect("刚建的 gateway 没有别的引用")
+            .with_result(
+                "run_python",
+                aite_contracts::ToolResult {
+                    call_id: String::new(),
+                    name: "run_python".into(),
+                    ok: true,
+                    content: secret_output.into(),
+                    data: None,
+                    error: None,
+                    duration_ms: 0,
+                    artifacts: Vec::new(),
+                },
+            ),
+    );
+    let mut h = Harness::with_gateway(Some(gateway));
+    h.seed("调一下接口", Vec::new()).await;
+    let model = std::sync::Arc::new(ScriptedModel::new(vec![
+        tool_turn(&[
+            (
+                "run_python",
+                json!({
+                    "code": "h={'Authorization': 'Bearer abc123TOKENxyz'}\nk='sk-live-SECRETVALUE'",
+                    "api_key": "plainSECRET",
+                    "nested": {"Password": "pASSw0rd"}
+                }),
+            ),
+            ("read_document", json!({"url_or_token": "doccnKEEPME123"})),
+        ]),
+        final_turn("调好了。"),
+    ]));
+    let task = h.run(model).await;
+    assert_eq!(task.status, TaskStatus::Delivered);
+
+    let raw = h.evidence.raw(&task.id);
+    for leaked in [
+        "abc123TOKENxyz",
+        "SECRETVALUE",
+        "plainSECRET",
+        "pASSw0rd",
+        "RESULTSECRET99",
+        "zzzTOK",
+    ] {
+        assert!(!raw.contains(leaked), "证据里漏了 {leaked}");
+    }
+    assert!(
+        raw.contains("doccnKEEPME123"),
+        "url_or_token 是冻结参数，原值要留着"
+    );
+    let results = h.evidence.payloads(&task.id, EvidenceKind::ToolResult);
+    let run_python = results
+        .iter()
+        .find(|p| p.get("name").and_then(Value::as_str) == Some("run_python"))
+        .expect("run_python 的 tool_result");
+    assert_eq!(
+        run_python.get("content_hash").and_then(Value::as_str),
+        Some(sha256_hex(secret_output.as_bytes()).as_str()),
+        "content_hash 仍对原文算"
+    );
+    assert_eq!(
+        run_python.get("content_summary").and_then(Value::as_str),
+        Some("请求成功 sk-*** token=*** 完成")
+    );
+}
