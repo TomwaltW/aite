@@ -1375,3 +1375,38 @@ R7 竞态的修法（在仓库副本上验过，未入库）：
 ## 11. 契约缺口
 
 无。骨架 crate 只预声明现有 workspace 依赖，没有逼出任何需要契约的形状。
+
+## 12. 追记：工作项 6 打进主树（总管放开 `core/Cargo.toml` 写权限之后）
+
+总管在会话里放开了 `core/Cargo.toml` 的写权限，让 CC1 直接跑补丁脚本。
+
+```
+$ python3 review/p1/cc1-crates-patch.py --check
+[命中 1 条] core/Cargo.toml: workspace 依赖表上方那句注释：放开四个骨架 crate 依赖 aite-gateway
+[命中 1 条] core/Cargo.toml: workspace 依赖表：aite-evals 之后加五条 aite-*
+[命中 1 条] core/crates/app/Cargo.toml: aite 的 [dependencies]：aite-evals 之后挂五个骨架 crate
+[  合法] 五个 lib.rs：rustfmt 认、没有 doctest 形状
+[  合法] 临时副本：cargo metadata 过、Cargo.lock 恰好多 5 个 aite-* 包、零删除行
+$ python3 review/p1/cc1-crates-patch.py
+改了 core/Cargo.lock（恰好多 5 个 aite-* 包、零删除行）
+[读回 OK] 三处锚点都换成了新内容
+$ git diff --numstat -- core/Cargo.lock
+96	0	core/Cargo.lock
+$ git diff -- core/Cargo.lock | grep '^+name = '
++name = "aite-admin"
++name = "aite-githost"
++name = "aite-memory"
++name = "aite-routines"
++name = "aite-search"
+$ cargo metadata --no-deps（包名）
+17 ['aite', 'aite-admin', 'aite-contracts', 'aite-control', 'aite-edge-client', 'aite-evals', 'aite-evidence', 'aite-gateway', 'aite-githost', 'aite-memory', 'aite-models', 'aite-proto', 'aite-routines', 'aite-search', 'aite-store', 'aite-testing', 'aite-worker']
+```
+
+之后的 `scripts/check.sh`（全量，含 clippy）：A 各格、`OK 25 files`、`contracts passed=25 failed=0`、`go packages ok=9 fail=0`、`passed 10/10`、B9 skip 都对；
+**B 那格两次是 `cargo passed=896 failed=1`**，失败 target 是 `-p aite-evals --test evals_runner`（check.sh 只打 target 名，没抓到测试名）。
+
+- 这不是补丁带来的：补丁只加了五个空 crate 与三个 Cargo 文件，evals 一行没动；`cargo passed` 仍是 897 条（Δ=0）。
+- 复现不出来：单跑 `evals_runner` 18 次、全量 `cargo test --workspace` 4 次、按 check.sh 的顺序（A1 → clippy → A5 → C1 → B）全量 3 次，
+  加上一份把 B 那格输出落盘的 check.sh 副本跑 3 次、`scripts/check.sh --quick` 1 次——**全是 897/0**。
+- 怀疑对象：`evals_runner.rs` 里带墙钟的那条 `a_plane_that_never_settles_times_out_with_a_reason`（`timeout_sec = 0.3`、5ms 轮询），冷编之后 CPU 紧时最可能踩线。
+  没抓到现场，只是推断；记进 `CLAUDE.md`「已知时序抖动」要由总管定（不在本轨可写面里）。

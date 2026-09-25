@@ -29,14 +29,19 @@ dependencies = [
 name = "aite"
 version = "0.0.1"
 dependencies = [
+ "aite-admin",
  "aite-contracts",
  "aite-control",
  "aite-edge-client",
  "aite-evals",
  "aite-evidence",
  "aite-gateway",
+ "aite-githost",
+ "aite-memory",
  "aite-models",
  "aite-proto",
+ "aite-routines",
+ "aite-search",
  "aite-store",
  "aite-testing",
  "aite-worker",
@@ -54,6 +59,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "aite-admin"
+version = "0.0.1"
+dependencies = [
+ "aite-contracts",
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -154,6 +174,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "aite-githost"
+version = "0.0.1"
+dependencies = [
+ "aite-contracts",
+ "aite-gateway",
+ "aite-testing",
+ "async-trait",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "aite-memory"
+version = "0.0.1"
+dependencies = [
+ "aite-contracts",
+ "aite-gateway",
+ "aite-testing",
+ "async-trait",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "aite-models"
 version = "0.0.1"
 dependencies = [
@@ -181,6 +240,43 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "aite-routines"
+version = "0.0.1"
+dependencies = [
+ "aite-contracts",
+ "aite-gateway",
+ "aite-testing",
+ "async-trait",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "aite-search"
+version = "0.0.1"
+dependencies = [
+ "aite-contracts",
+ "aite-gateway",
+ "aite-testing",
+ "async-trait",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

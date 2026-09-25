@@ -101,5 +101,5 @@ P0 冻结规格：`docs/dev-spec-2026-09-11-rustgo.md`（Python 时代那份 `do
 云端要点（详见 `docs/p1/cloud-runbook.md`）：会话是 root（check.sh 自动降权，单跑只读类测试要自己带 `setpriv` 前缀）；
 每个会话都从冷编起跑；docker daemon 默认不在（`dockerd &` 手动起）；Docker Hub 匿名拉取会 429、出口 TLS 拦截代理让容器里的 HTTPS 验不过证书，
 所以真容器那组在云端建不出沙箱镜像，以 CI 的 `sandbox-docker` 为准；一份 `core/target` 约 15G，会话磁盘额度装不下第二份。
-CC1 的五个骨架 crate 走补丁脚本 `review/p1/cc1-crates-patch.py`（总管本机跑）；打上之后 cargo 条数不变（Δ=0），包数 12 → 17。
+CC1 的五个骨架 crate（admin / search / githost / routines / memory）已由补丁脚本 `review/p1/cc1-crates-patch.py` 打进主树（总管放开 `core/Cargo.toml` 写权限后在会话里跑）：cargo 条数不变（Δ=0），包数 12 → 17。
 （T0c 合并后补 B1 行。）

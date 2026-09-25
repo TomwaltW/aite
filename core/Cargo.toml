@@ -11,7 +11,7 @@ rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
-# 本仓库 crate（各轨只许依赖 contracts / proto / testing；跨轨依赖 → 停下报告）
+# 本仓库 crate（各轨只许依赖 contracts / proto / testing；memory / routines / search / githost 四个骨架 crate 另许依赖 aite-gateway；其余跨轨依赖 → 停下报告）
 aite-contracts = { path = "crates/contracts" }
 aite-proto = { path = "crates/proto" }
 aite-store = { path = "crates/store" }
@@ -23,6 +23,12 @@ aite-models = { path = "crates/models" }
 aite-edge-client = { path = "crates/edge-client" }
 aite-testing = { path = "crates/testing" }
 aite-evals = { path = "crates/evals" }
+# P1 骨架 crate（2026-09-25 CC1 预建，W2 / W3 各轨只写自己那一个目录，不改这里与 Cargo.lock）
+aite-admin = { path = "crates/admin" }
+aite-search = { path = "crates/search" }
+aite-githost = { path = "crates/githost" }
+aite-routines = { path = "crates/routines" }
+aite-memory = { path = "crates/memory" }
 
 # 第三方：版本在这里统一钉；各 crate 用 `xxx.workspace = true`。加新依赖 → 停下报告（R0 归属）。
 tokio = { version = "1", features = ["full"] }

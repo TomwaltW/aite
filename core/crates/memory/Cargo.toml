@@ -1,0 +1,31 @@
+[package]
+name = "aite-memory"
+description = "按群 / 工作区的记忆文件与 memory_read / memory_write 工具。骨架 crate：CC1 预建，W3 由 EE1 填。owner: EE1"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# 依赖是 CC1 预先声明的：W3 谁都不改 Cargo.toml / Cargo.lock（计划 §6.4），漏了只能停下报告。
+# 全部取自 [workspace.dependencies]、都已在 Cargo.lock 里，不是新依赖。
+# aite-gateway 是定死的（原卡 [REVISION 2026-09-25]）：记忆工具实现 CC4 放在 gateway 里的 GatewayTool trait。
+# rusqlite：每群一份记忆（计划 CT21「每群一份记忆文件（SQLite）」）；bundled，不引入系统库。
+# uuid 给记忆条目编号；chrono 盖写入时间；serde / serde_json 出工具参数与结果；
+# tokio / async-trait 是工具与存储的异步面；thiserror 出错误类型；tracing 记审计日志。
+[dependencies]
+aite-contracts.workspace = true
+aite-gateway.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+aite-testing.workspace = true
