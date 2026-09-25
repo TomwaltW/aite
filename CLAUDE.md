@@ -45,8 +45,12 @@ P0 冻结规格：`docs/dev-spec-2026-09-11-rustgo.md`（Python 时代那份 `do
 
 - 一条命令：`scripts/check.sh`（= `make check`）。**别在它后面接 `| tail`**。
 - 2026-09-25 在 `98e4460` 的实测基线：`cargo passed=897 failed=0`、`contracts passed=25 failed=0`、
-  `OK 25 files`、`passed 10/10`、Go 9 个包全 ok —— 但 check.sh 那一格只显示 8 行
-  （`run()` 只留最后 8 行，`edge/cmd/aite-edge` 永远被截掉；单跑 `cd edge && go test -race ./cmd/... -count=1`）。
+  `OK 25 files`、`passed 10/10`、`go packages ok=9 fail=0`、`B9 skip：evals/p1 尚无场景`。
+  CC1 起的新口径：Go 那一格不再逐包列 `ok`，先打失败包名（最多 5 个）、末行 `go packages ok=N fail=M`
+  （N 含 `[no test files]`，以这行为准）；B9 跑 `evals/p1`，有场景要 `passed k/k`，没场景打 skip 不算红；
+  `scripts/check.sh --docker`（可与 `--quick` 同给）另跑真容器那组，与 `make docker-test`、CI 的 `sandbox-docker` 同口径。
+  以 root 跑时（云端会话就是 uid 0）两格全量测试自动经 `setpriv` 摘掉 `CAP_DAC_OVERRIDE` / `CAP_DAC_READ_SEARCH`，
+  否则 7 条只读类测试必红（890/7）。
   P0-CLOSE（AA4 + BB2 + BB4，总管本机打）落地之后：`cargo passed=901`、`contracts passed=27`、`OK 25 files`（以实测为准）。
   之后每个同步点的新基线由对应轨写进下面「云端基线」一节。
 - **B8 不变量**（`evals/p0` 钉死的，任何一轨弄红就停下报告）：场景 01/03/04/05/06/10 的 `send_text` 恰好 1 条、02 恰好 2 条
@@ -89,4 +93,13 @@ P0 冻结规格：`docs/dev-spec-2026-09-11-rustgo.md`（Python 时代那份 `do
 
 ## 云端基线
 
-（CC1 首次在云端跑完 `scripts/check.sh` 后填：各行条数、耗时、哪些时序测试抖过；T0c 合并后补 B1 行。）
+| 基线 | sha | cargo / contracts / 锁 | go packages | B8 / B9 | 墙钟（冷 / 热） | 来源 |
+|---|---|---|---|---|---|---|
+| B0 | `c159d12`（D0 之后的 main） | `897/0` / `25/0` / `OK 25 files` | `ok=9 fail=0` | `passed 10/10` / skip | 5m58s / 42s（开场自检旧 check.sh 冷编 7m30s） | CC1 云端实测（2026-09-25，4 vCPU、uid 0；时序测试一次没抖） |
+| P0-CLOSE 之后 | — | `901` / `27` / `OK 25 files` | `ok=9 fail=0` | `passed 10/10` / skip | — | **计划值（§5.1），待总管实测** |
+
+云端要点（详见 `docs/p1/cloud-runbook.md`）：会话是 root（check.sh 自动降权，单跑只读类测试要自己带 `setpriv` 前缀）；
+每个会话都从冷编起跑；docker daemon 默认不在（`dockerd &` 手动起）；Docker Hub 匿名拉取会 429、出口 TLS 拦截代理让容器里的 HTTPS 验不过证书，
+所以真容器那组在云端建不出沙箱镜像，以 CI 的 `sandbox-docker` 为准；一份 `core/target` 约 15G，会话磁盘额度装不下第二份。
+CC1 的五个骨架 crate 走补丁脚本 `review/p1/cc1-crates-patch.py`（总管本机跑）；打上之后 cargo 条数不变（Δ=0），包数 12 → 17。
+（T0c 合并后补 B1 行。）
