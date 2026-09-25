@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 
 use aite_contracts::{
     Anchor, Attachment, EvidenceKind, IngressError, NormalizedEvent, OutboundText, ReactionKind,
-    Session, SessionKind, SessionStatus, Task, TaskStatus, Turn, TurnRole,
+    Session, SessionKind, SessionStatus, StoreError, Task, TaskStatus, Turn, TurnRole,
 };
 use rand::Rng;
 
@@ -17,6 +17,9 @@ use crate::plane::InProcessControlPlane;
 /// `!restart` 回灌话题历史时最多读这么多条（CC2 ④）。与 worker 读群历史的量级相当，
 /// 既够把一段对话接上，又不至于一次把 transcript 塞爆。
 pub(crate) const RESTART_HISTORY_LIMIT: u32 = 50;
+
+/// `append_turn` 撞 `DuplicateTurn` 时最多写几次（含第一次，CC2 ⑩）。
+pub(crate) const APPEND_TURN_ATTEMPTS: u32 = 3;
 
 /// 32 hex（Python 的 `secrets.token_hex(16)`）。
 pub(crate) fn token_hex_16() -> String {
@@ -80,16 +83,37 @@ impl InProcessControlPlane {
             last_active_at: now,
             archived_at: None,
         };
-        self.store.create_session(&session).await?;
+        // `!restart`（CC2 ④）的历史在建会话之前读好：读历史是一次网络往返，不能拿着锁读。
+        let history = match seed_from_thread {
+            Some(thread_id) => self.thread_history(ev, thread_id).await,
+            None => Vec::new(),
+        };
+        // 建会话与它的头几轮在**同一段** `turn_seq_lock` 临界区里（CC1 记账转来的 R7 竞态）：
+        // 会话一落库，同话题并发到达的追问就能经 `find_session_by_thread` 命中 R6；原来这中间
+        // 隔着一次 `add_reaction` 的 await，追问会先拿到 seq=0，transcript 顺序反了。
+        {
+            let _seq_guard = self.turn_seq_lock.lock().await;
+            self.store.create_session(&session).await?;
+            for (role, uid, content, at) in history {
+                self.write_turn_locked(&session, role, uid, &content, Vec::new(), at)
+                    .await?;
+            }
+            if !text.is_empty() {
+                self.write_turn_locked(
+                    &session,
+                    TurnRole::User,
+                    Some(ev.sender_id.clone()),
+                    text,
+                    ev.attachments.clone(),
+                    ev.occurred_at,
+                )
+                .await?;
+            }
+        }
         if react {
             self.ack(ev).await;
         }
-        // `!restart`（CC2 ④）：历史在前、`rest` 在后
-        if let Some(thread_id) = seed_from_thread {
-            self.seed_thread_history(&session, ev, thread_id).await?;
-        }
         if !text.is_empty() {
-            self.append_turn(&session, ev, TurnRole::User, text).await?;
             self.start_task(&session, ev, Some(text)).await?;
         }
         Ok(session)
@@ -101,14 +125,13 @@ impl InProcessControlPlane {
     /// 回灌是锦上添花，不能让一次读失败把 `!restart` 本身弄没。按时间正序写：真人的话记成
     /// `User`（带 `platform_user_id`），其余（机器人 / 应用 / 系统，含 Aite 自己之前的答复）
     /// 记成 `SystemNote` 并标出发言人。`!restart` 这一条本身不写（它的 `rest` 随后单独写）。
-    async fn seed_thread_history(
+    async fn thread_history(
         &self,
-        session: &Session,
         ev: &NormalizedEvent,
         thread_id: &str,
-    ) -> Result<(), IngressError> {
+    ) -> Vec<(TurnRole, Option<String>, String, DateTime<Utc>)> {
         if !self.platform.capabilities().supports_history {
-            return Ok(());
+            return Vec::new();
         }
         let history = match self
             .platform
@@ -118,9 +141,10 @@ impl InProcessControlPlane {
             Ok(history) => history,
             Err(e) => {
                 tracing::warn!(target: "aite.control", thread = %thread_id, error = %e, "control.restart_history_failed");
-                return Ok(());
+                return Vec::new();
             }
         };
+        let mut out = Vec::new();
         for msg in history {
             if msg.message_id == ev.anchor.message_id || msg.text.trim().is_empty() {
                 continue;
@@ -135,17 +159,9 @@ impl InProcessControlPlane {
                     .unwrap_or_else(|| msg.sender_id.clone());
                 (TurnRole::SystemNote, format!("[{who}] {}", msg.text))
             };
-            self.append_turn_raw(
-                session,
-                role,
-                Some(msg.sender_id.clone()),
-                &content,
-                Vec::new(),
-                msg.created_at,
-            )
-            .await?;
+            out.push((role, Some(msg.sender_id.clone()), content, msg.created_at));
         }
-        Ok(())
+        out
     }
 
     /// 六步顺序严格：造 Task → `create_task` → `task_created` 证据 → `event_received`
@@ -239,7 +255,10 @@ impl InProcessControlPlane {
     /// `DuplicateTurn`；这一报发生在 `seen_event` **已经落库之后**，于是事件既没变成任务，
     /// 也永远不会被重推第二次（R2 认得它了）—— 用户那句话就此消失。M2 后半句在这里破。
     ///
-    /// P0 是单进程单副本，进程内一把锁就够。
+    /// plane 自己的写者由 `turn_seq_lock` 串住。**但它不是唯一的写者**（CC2 ⑩）：CC3 起 worker
+    /// 在 `deliver()` 里用 `store.next_turn_seq` 写 Assistant 轮，那是在这把锁**之外**写的，
+    /// 「进程内一把锁就够」不再成立。所以撞 `DuplicateTurn` 就重读 seq 再写，见
+    /// [`Self::write_turn_locked`]。
     pub(crate) async fn append_turn(
         &self,
         session: &Session,
@@ -269,20 +288,54 @@ impl InProcessControlPlane {
         created_at: DateTime<Utc>,
     ) -> Result<(), IngressError> {
         let _seq_guard = self.turn_seq_lock.lock().await;
-        let recent = self.store.list_turns(&session.id, 1).await?;
-        let seq = recent.last().map(|t| t.seq + 1).unwrap_or(0);
-        self.store
-            .append_turn(&Turn {
+        self.write_turn_locked(
+            session,
+            role,
+            platform_user_id,
+            content,
+            attachments,
+            created_at,
+        )
+        .await
+    }
+
+    /// 写一轮；调用方**已经持有** `turn_seq_lock`。
+    ///
+    /// 撞 `DuplicateTurn`（锁外的写者 —— worker 的 Assistant 轮 —— 抢先占了这个 seq）就重读 seq
+    /// 再写，**至多 [`APPEND_TURN_ATTEMPTS`] 次**；都撞 → 照旧把 `Store` 错误传出去（经 CC2 ③
+    /// 成 `Err`，平台重推 —— 但 `seen_event` 已落库，重推会被 R2 吃掉，与 ③ 记的契约缺口同一个）。
+    /// 其它 `StoreError` 不重试。
+    pub(crate) async fn write_turn_locked(
+        &self,
+        session: &Session,
+        role: TurnRole,
+        platform_user_id: Option<String>,
+        content: &str,
+        attachments: Vec<Attachment>,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), IngressError> {
+        let mut attempt = 1;
+        loop {
+            let recent = self.store.list_turns(&session.id, 1).await?;
+            let seq = recent.last().map(|t| t.seq + 1).unwrap_or(0);
+            let turn = Turn {
                 session_id: session.id.clone(),
                 seq,
                 role,
-                platform_user_id,
+                platform_user_id: platform_user_id.clone(),
                 content: content.to_string(),
-                attachments,
+                attachments: attachments.clone(),
                 created_at,
-            })
-            .await?;
-        Ok(())
+            };
+            match self.store.append_turn(&turn).await {
+                Ok(()) => return Ok(()),
+                Err(StoreError::DuplicateTurn { .. }) if attempt < APPEND_TURN_ATTEMPTS => {
+                    tracing::warn!(target: "aite.control", session = %session.id, seq, attempt, "control.turn_seq_retry 撞号，重读 seq 再写");
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 
     /// 给这条消息加一个「收到」。失败不影响后面的事（Python 的 contextlib.suppress）。

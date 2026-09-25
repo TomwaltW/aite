@@ -342,6 +342,8 @@ struct StoreData {
 pub struct FakeStore {
     data: Mutex<StoreData>,
     fail: Mutex<HashMap<String, usize>>,
+    /// `append_turn` 接下来几次先替「别的写者」占掉该 seq、再报 `DuplicateTurn`（CC2 ⑩）
+    duplicate: Mutex<usize>,
     pub attempts: Mutex<Vec<String>>,
 }
 
@@ -350,8 +352,15 @@ impl FakeStore {
         Arc::new(Self {
             data: Mutex::new(StoreData::default()),
             fail: Mutex::new(HashMap::new()),
+            duplicate: Mutex::new(0),
             attempts: Mutex::new(Vec::new()),
         })
+    }
+
+    /// 模拟 worker 在 plane 的 `turn_seq_lock` 之外抢先写了一轮（CC2 ⑩）：接下来 `times` 次
+    /// `append_turn`，先把调用方要写的那个 seq 用一条 Assistant 轮占掉，再报 `DuplicateTurn`。
+    pub fn duplicate_next_append_turn(&self, times: usize) {
+        *lk(&self.duplicate) = times;
     }
 
     /// 让某个方法接下来 `times` 次调用直接报错（抛在方法体之前，什么都不做）。
@@ -434,6 +443,17 @@ impl SessionStore for FakeStore {
         tokio::task::yield_now().await;
         let mut data = lk(&self.data);
         let turns = data.turns.entry(t.session_id.clone()).or_default();
+        {
+            let mut dup = lk(&self.duplicate);
+            if *dup > 0 && !turns.contains_key(&t.seq) {
+                *dup -= 1;
+                let mut other = t.clone();
+                other.role = aite_contracts::TurnRole::Assistant;
+                other.platform_user_id = None;
+                other.content = format!("（别的写者抢先写的 seq={}）", t.seq);
+                turns.insert(t.seq, other);
+            }
+        }
         if turns.contains_key(&t.seq) {
             return Err(StoreError::DuplicateTurn {
                 session_id: t.session_id.clone(),

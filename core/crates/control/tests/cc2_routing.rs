@@ -143,3 +143,78 @@ async fn r6_followup_gets_ack() {
         "R7 一次、R6 两条路各一次、bot 零次"
     );
 }
+
+// ---- ⑩ `append_turn` 撞 `DuplicateTurn` 重读 seq 重试 ---------------------
+
+/// 锁外的写者（CC3 起 worker 在 `deliver()` 里写 Assistant 轮）抢先占了追问要写的那个 seq：
+/// plane 重读 seq 再写一次，追问不丢、入口不报错。
+#[tokio::test]
+async fn plane_append_turn_retries_duplicate_turn() {
+    let h = Harness::new();
+    let plane = h.plane();
+    let ingress = Ingress::new(plane.clone());
+    plane
+        .handle_event(ev().text("第一件事").build())
+        .await
+        .expect("R7 建会话");
+    let session = h
+        .store
+        .find_session_by_thread(CHAT, ROOT)
+        .await
+        .expect("查")
+        .expect("有");
+
+    h.store.duplicate_next_append_turn(1);
+    let before = h
+        .store
+        .attempts
+        .lock()
+        .expect("attempts 锁")
+        .iter()
+        .filter(|m| *m == "append_turn")
+        .count();
+
+    let out = (ingress.handler())(followup("e2", "om_2", "再补一句")).await;
+    assert!(out.is_ok(), "撞号该被重试兜住，实际 {out:?}");
+    assert_eq!(ingress.counter("ingress.errors"), 0);
+
+    let turns = h.store.list_turns(&session.id, 100).await.expect("读");
+    let got: Vec<(u64, String)> = turns.into_iter().map(|t| (t.seq, t.content)).collect();
+    assert_eq!(
+        got,
+        vec![
+            (0, "第一件事".to_string()),
+            (1, "（别的写者抢先写的 seq=1）".to_string()),
+            (2, "再补一句".to_string()),
+        ],
+        "追问接在被占的那个号后面"
+    );
+    let after = h
+        .store
+        .attempts
+        .lock()
+        .expect("attempts 锁")
+        .iter()
+        .filter(|m| *m == "append_turn")
+        .count();
+    assert_eq!(after - before, 2, "撞一次、重试一次");
+}
+
+/// 撞满 3 次就放弃，照旧把 `Store` 错误传出去（不无限重试）。
+#[tokio::test]
+async fn append_turn_gives_up_after_three_duplicates() {
+    let h = Harness::new();
+    let plane = h.plane();
+    let ingress = Ingress::new(plane.clone());
+    plane
+        .handle_event(ev().text("第一件事").build())
+        .await
+        .expect("R7 建会话");
+
+    h.store.duplicate_next_append_turn(3);
+    let out = (ingress.handler())(followup("e2", "om_2", "再补一句")).await;
+    assert!(
+        matches!(out, Err(IngressError::Store(_))),
+        "3 次都撞：存储错误照旧传出去，实际 {out:?}"
+    );
+}
