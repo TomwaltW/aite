@@ -18,6 +18,24 @@ fn role_of(turn: TurnRole) -> Role {
     }
 }
 
+/// 给 User 轮署名（CC3 ④）：返回一份正文带 `[名字] ` 前缀的副本，**存库的正文不改**。
+///
+/// Assistant / SystemNote 与没有 `platform_user_id` 的 User 轮不加。名字怎么取由调用方给
+/// （`name_of(platform_user_id)`：发起人用显示名、其余用群历史里的 `sender_name`、再不行用 id）。
+/// 与 [`transcript_messages`] 分开两步：那个函数仍是纯截断。
+pub fn attributed_turns(turns: &[Turn], name_of: impl Fn(&str) -> String) -> Vec<Turn> {
+    turns
+        .iter()
+        .map(|t| match (&t.role, &t.platform_user_id) {
+            (TurnRole::User, Some(uid)) => Turn {
+                content: texts::attributed_line(&name_of(uid), &t.content),
+                ..t.clone()
+            },
+            _ => t.clone(),
+        })
+        .collect()
+}
+
 /// 本会话 transcript。超过 40 轮时保留前 2 轮 + 最近 30 轮 + 一条省略说明。
 pub fn transcript_messages(turns: &[Turn]) -> Vec<Message> {
     let (kept, omitted): (Vec<&Turn>, usize) = if turns.len() <= MAX_TRANSCRIPT_TURNS {

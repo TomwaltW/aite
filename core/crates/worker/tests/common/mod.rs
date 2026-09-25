@@ -1344,6 +1344,21 @@ impl Harness {
             .await;
     }
 
+    /// 同 `push_steer`，但说话的是 `uid`（CC3 ④ 署名用例）。不写证据。
+    pub async fn push_steer_as(&self, uid: &str, text: &str) {
+        let seq = self.turn_seq.fetch_add(1, Ordering::SeqCst);
+        self.store.push_turn(Turn {
+            session_id: self.session.id.clone(),
+            seq,
+            role: TurnRole::User,
+            platform_user_id: Some(uid.to_string()),
+            content: text.to_string(),
+            attachments: Vec::new(),
+            created_at: Utc::now(),
+        });
+        self.steer.lock().expect("steer").push(text.to_string());
+    }
+
     /// 控制面 `cancel_task` 的「在跑」分支：只置旗 + 清掉排队的追问，收尾归 worker。
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);

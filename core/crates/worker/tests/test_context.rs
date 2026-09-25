@@ -85,7 +85,8 @@ async fn context_order_and_content() {
     );
 
     assert_eq!(sent[1].role, Role::User, "transcript");
-    assert_eq!(sent[1].content, "按月画个图");
+    // CC3 ④ 改写：原来是 "按月画个图"；User 行带署名（发起人显示名「张三」）
+    assert_eq!(sent[1].content, "[张三] 按月画个图");
 
     let hist = &sent[2];
     assert!(hist.content.starts_with(HISTORY_HEADER));
@@ -177,6 +178,63 @@ async fn catalog_comes_from_gateway() {
         want,
         "4 个 checklist + final + gateway 给的那一份，顺序固定"
     );
+}
+
+/// CC3 ④：transcript 的 User 行署名 —— 发起人用显示名、别人用群历史里的名字、再不行用 id；
+/// Assistant 轮不署；任务标题取原始正文，不带前缀。
+#[tokio::test]
+async fn transcript_lines_are_attributed() {
+    let mut h = Harness::new();
+    h.platform
+        .set_history(history(&[("om_h1", "human", "李四", "上周的数在这")]));
+    h.seed("按月画个图", Vec::new()).await;
+    for (uid, text, role) in [
+        (Some("ou_lisi"), "我也要一份", TurnRole::User),
+        (Some("ou_wangwu"), "加上同比", TurnRole::User),
+        (None, "好的。", TurnRole::Assistant),
+    ] {
+        let seq = h.store.turns(&h.session.id).len() as u64;
+        h.store.push_turn(Turn {
+            session_id: h.session.id.clone(),
+            seq,
+            role,
+            platform_user_id: uid.map(str::to_string),
+            content: text.into(),
+            attachments: Vec::new(),
+            created_at: Utc::now(),
+        });
+    }
+    // 李四在群历史里有名字（history() 造的 sender_id 就是名字本身），王五没有
+    h.platform.set_history(vec![aite_contracts::HistoryMessage {
+        message_id: "om_h1".into(),
+        sender_id: "ou_lisi".into(),
+        sender_kind: "human".into(),
+        sender_name: Some("李四".into()),
+        text: "上周的数在这".into(),
+        thread_id: None,
+        created_at: Utc::now(),
+    }]);
+    let model = std::sync::Arc::new(ScriptedModel::new(vec![final_turn("好")]));
+    let task = h.run(model.clone()).await;
+
+    let sent = model.call(0);
+    let lines: Vec<(Role, String)> = sent[1..5]
+        .iter()
+        .map(|m| (m.role, m.content.clone()))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            (Role::User, "[张三] 按月画个图".to_string()),
+            (Role::User, "[李四] 我也要一份".to_string()),
+            (Role::User, "[ou_wangwu] 加上同比".to_string()),
+            (Role::Assistant, "好的。".to_string()),
+        ]
+    );
+    // 标题别串味：取的是最后一句用户原话，不带署名前缀
+    assert_eq!(task.title, "加上同比");
+    // 存库的正文没被改
+    assert_eq!(h.store.user_turn_texts(&h.session.id)[0], "按月画个图");
 }
 
 // ---- W9 -----------------------------------------------------------------

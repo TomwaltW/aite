@@ -30,7 +30,9 @@ mod transcript;
 
 pub use attachments::{ATTACHMENT_HEADER, attachments_message};
 pub use history::{HISTORY_HEADER, history_message};
-pub use transcript::{HEAD_TURNS, MAX_TRANSCRIPT_TURNS, TAIL_TURNS, transcript_messages};
+pub use transcript::{
+    HEAD_TURNS, MAX_TRANSCRIPT_TURNS, TAIL_TURNS, attributed_turns, transcript_messages,
+};
 
 /// 预埋块能看到的材料（CC3：只放现成的；T0c 贯通 Services 时再加字段）。
 pub struct BlockCtx<'a> {

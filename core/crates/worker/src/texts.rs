@@ -55,6 +55,11 @@ pub fn tool_error_content(code: &str, message: &str) -> String {
     format!("[{code}] {message}")
 }
 
+/// 署名（CC3 ④）：多人话题里模型得知道每句话是谁说的。`[名字] 正文`。
+pub fn attributed_line(name: &str, text: &str) -> String {
+    format!("[{name}] {text}")
+}
+
 pub fn omitted_turns(omitted: usize) -> String {
     format!("[中间省略 {omitted} 轮]")
 }

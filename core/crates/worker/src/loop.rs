@@ -8,22 +8,22 @@
 //!
 //! CC3 起执行面按职责拆开（零行为变化，原样搬）：本文件留结构体、主循环、上下文与模型调用、
 //! 工具分发骨架与小工具；收尾在 `deliver.rs`，卡片三件在 `card.rs`，本地工具在 `local_tools/`。
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use aite_contracts::{
     AiteConfig, CardStatus, EvidenceKind, EvidenceWriter, Message, ModelError, ModelPort,
     ModelTurn, PlatformPort, Role, RunHooks, SandboxPort, Session, SessionStore, Task, TaskStatus,
-    ToolCallRequest, ToolContext, ToolErrorCode, ToolGateway, ToolSpec, checklist_tools,
-    final_tool, gateway_tools,
+    ToolCallRequest, ToolContext, ToolErrorCode, ToolGateway, ToolSpec, Turn, TurnRole,
+    checklist_tools, final_tool, gateway_tools,
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::card::{CardCoalescer, MAX_TITLE_CHARS, clip};
-use crate::context::{BlockCtx, assemble, load_system_prompt};
+use crate::context::{BlockCtx, assemble, attributed_turns, load_system_prompt};
 use crate::deps::WorkerDeps;
 use crate::local_tools::{self, parse_final};
 use crate::{Clock, RunError, Sleeper, budget, fingerprint, texts};
@@ -110,7 +110,8 @@ impl AgentWorker {
     ) -> Result<Task, RunError> {
         let mut messages = self.build_messages(ctx).await?;
         if ctx.task.title.is_empty() {
-            let last = last_user_text(&messages);
+            // CC3 ④：从原始 turn 正文取，不从上下文取 —— 上下文里的 User 行带了署名前缀
+            let last = ctx.last_user_turn.clone();
             let raw = if last.is_empty() {
                 "处理中"
             } else {
@@ -143,7 +144,12 @@ impl AgentWorker {
 
             // R6 排队进来的 steer 消息，在每步开始前合并进上下文
             for text in (hooks.drain_steer)() {
-                messages.push(Message::text(Role::User, text));
+                // CC3 ④：steer 也署名（发言人从 transcript 里认领，认不准就不署）
+                let line = match self.steer_speaker(ctx, &text).await {
+                    Some(name) => texts::attributed_line(&name, &text),
+                    None => text,
+                };
+                messages.push(Message::text(Role::User, line));
             }
 
             let step_index = ctx.task.steps;
@@ -311,6 +317,24 @@ impl AgentWorker {
                 Vec::new()
             }
         };
+        // CC3 ④：署名要用的名字表（群历史里真人的 id → 显示名）、已进上下文的 turn、原始的最后一句
+        ctx.names = history
+            .iter()
+            .filter_map(|h| {
+                h.sender_name
+                    .as_deref()
+                    .filter(|n| !n.is_empty())
+                    .map(|n| (h.sender_id.clone(), n.to_string()))
+            })
+            .collect();
+        ctx.claimed_turns = turns.iter().map(|t| t.seq).collect();
+        ctx.last_user_turn = turns
+            .iter()
+            .rev()
+            .find(|t| t.role == TurnRole::User && !t.content.is_empty())
+            .map(|t| t.content.clone())
+            .unwrap_or_default();
+        let signed = attributed_turns(&turns, |uid| ctx.display_name(uid));
         // 附件取「最后一个有附件的 turn」
         let attachments = turns
             .iter()
@@ -329,7 +353,37 @@ impl AgentWorker {
             turns: &turns,
             history: &history,
         };
-        Ok(assemble(&prompt, &turns, &history, &attachments, &blocks).await)
+        Ok(assemble(&prompt, &signed, &history, &attachments, &blocks).await)
+    }
+
+    /// 这句 steer 是谁说的（CC3 ④）。`RunHooks.drain_steer` 只给正文（契约锁定），但控制面是
+    /// **先** `append_turn` **再**入队，所以 transcript 里一定有一条正文相同的 User 轮：
+    /// 取最早一条还没被认领的。同一句话被不同的人说过（候选里发言人不止一个）→ 认不准，不署名。
+    pub(crate) async fn steer_speaker(&self, ctx: &mut RunContext, text: &str) -> Option<String> {
+        let turns = match self.store.list_turns(&ctx.session.id, STEER_LOOKBACK).await {
+            Ok(turns) => turns,
+            Err(err) => {
+                tracing::warn!(task = %ctx.task.id, %err, "worker.steer_speaker_failed");
+                return None;
+            }
+        };
+        let candidates: Vec<&Turn> = turns
+            .iter()
+            .filter(|t| {
+                t.role == TurnRole::User && t.content == text && !ctx.claimed_turns.contains(&t.seq)
+            })
+            .collect();
+        let speakers: HashSet<Option<&String>> = candidates
+            .iter()
+            .map(|t| t.platform_user_id.as_ref())
+            .collect();
+        if speakers.len() != 1 {
+            return None;
+        }
+        let first = candidates.first()?;
+        let uid = first.platform_user_id.clone()?;
+        ctx.claimed_turns.insert(first.seq);
+        Some(ctx.display_name(&uid))
     }
 
     /// 进模型的工具目录（CC3 ②，全仓唯一的目录行）：本地的 checklist_* 与 final、启用的额外本地工具、
@@ -544,6 +598,9 @@ impl aite_contracts::TaskWorker for AgentWorker {
             repeats: 0,
             last_call_sig: None,
             attachments_message_id: None,
+            names: HashMap::new(),
+            claimed_turns: HashSet::new(),
+            last_user_turn: String::new(),
         };
 
         let out = match self.agent_loop(&mut ctx, &hooks).await {
@@ -579,6 +636,9 @@ impl aite_contracts::TaskWorker for AgentWorker {
     }
 }
 
+/// steer 认领发言人时往回看多少轮（CC3 ④）。
+const STEER_LOOKBACK: u32 = 50;
+
 /// `store.list_turns` 的上限：W1 先砍到最近 200 轮，再按 40 轮规则截断。
 const TRANSCRIPT_LIMIT: u32 = 200;
 
@@ -595,9 +655,26 @@ pub(crate) struct RunContext {
     pub(crate) repeats: u32,
     pub(crate) last_call_sig: Option<String>,
     pub(crate) attachments_message_id: Option<String>,
+    /// 署名用（CC3 ④）：群历史里真人的 id → 显示名
+    pub(crate) names: HashMap<String, String>,
+    /// 已经进了上下文的 turn（按 seq）：steer 认领发言人时跳过它们
+    pub(crate) claimed_turns: HashSet<u64>,
+    /// transcript 里最后一句用户原话（不带署名），起任务标题用
+    pub(crate) last_user_turn: String,
 }
 
 impl RunContext {
+    /// 署名用的名字：发起人用 `run()` 拿到的显示名，其余用群历史里的 `sender_name`，再不行用 id。
+    pub(crate) fn display_name(&self, uid: &str) -> String {
+        if uid == self.session.created_by {
+            return self.initiator.clone();
+        }
+        self.names
+            .get(uid)
+            .cloned()
+            .unwrap_or_else(|| uid.to_string())
+    }
+
     pub(crate) fn thread_root(&self) -> String {
         self.session
             .anchor
@@ -622,15 +699,6 @@ pub(crate) fn tool_message(call: &ToolCallRequest, content: &str) -> Message {
         tool_call_id: Some(call.call_id.clone()),
         name: Some(call.name.clone()),
     }
-}
-
-pub(crate) fn last_user_text(messages: &[Message]) -> String {
-    messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::User && !m.content.is_empty())
-        .map(|m| m.content.clone())
-        .unwrap_or_default()
 }
 
 /// W8：`model_call` 只留输入消息的 hash，正文不进证据。
