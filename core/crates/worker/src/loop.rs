@@ -5,24 +5,27 @@
 //!
 //! 旧版 `AppWorker` 只多做两件事（登记 session_token、记 in_flight），Rust 版并进来 ——
 //! 冻结的 `ToolGateway` 已经显式化了 `register_task / release_task`，没必要再套一层。
+//!
+//! CC3 起执行面按职责拆开（零行为变化，原样搬）：本文件留结构体、主循环、上下文与模型调用、
+//! 工具分发骨架与小工具；收尾在 `deliver.rs`，卡片三件在 `card.rs`，本地工具在 `local_tools/`。
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use aite_contracts::{
-    AiteConfig, CardStatus, ChecklistItem, ChecklistState, EvidenceKind, EvidenceWriter, Message,
-    ModelError, ModelPort, ModelTurn, OutboundFile, OutboundText, PlatformPort, Role, RunHooks,
-    SandboxPort, SandboxSpec, Session, SessionStore, Task, TaskStatus, ToolCallRequest,
-    ToolContext, ToolErrorCode, ToolGateway, all_model_tools, final_tool, is_local_tool,
+    AiteConfig, CardStatus, EvidenceKind, EvidenceWriter, Message, ModelError, ModelPort,
+    ModelTurn, PlatformPort, Role, RunHooks, SandboxPort, Session, SessionStore, Task, TaskStatus,
+    ToolCallRequest, ToolContext, ToolErrorCode, ToolGateway, all_model_tools, final_tool,
 };
 use async_trait::async_trait;
-use chrono::Utc;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::card::{CardCoalescer, MAX_ITEM_CHARS, MAX_TITLE_CHARS, clip, render_card};
-use crate::context::{build_context, load_system_prompt};
-use crate::{Clock, RunError, Sleeper, fingerprint, mime, texts};
+use crate::card::{CardCoalescer, MAX_TITLE_CHARS, clip};
+use crate::context::{BlockCtx, assemble, load_system_prompt};
+use crate::deps::WorkerDeps;
+use crate::local_tools::{self, parse_final};
+use crate::{Clock, RunError, Sleeper, budget, fingerprint, texts};
 
 /// §3.3 模型调用异常 / 5xx：重试 2 次（首发 + 两次退避，共 3 次调用）
 pub const MODEL_RETRY_DELAYS: [f64; 2] = [2.0, 5.0];
@@ -54,31 +57,20 @@ pub const MAX_CONSECUTIVE_REPEATS: u32 = 5;
 /// 写入侧脱敏，那是单独一件事（见回执「记账转出去的」）。
 pub const MAX_TOOL_SUMMARY_CHARS: usize = 200;
 
-/// 组装入口（RΩ 按这个接，名字别自己发明）。
-pub struct WorkerDeps {
-    pub store: Arc<dyn SessionStore>,
-    pub platform: Arc<dyn PlatformPort>,
-    pub model: Arc<dyn ModelPort>,
-    pub evidence: Arc<dyn EvidenceWriter>,
-    pub config: AiteConfig,
-    pub gateway: Option<Arc<dyn ToolGateway>>,
-    pub sandbox: Option<Arc<dyn SandboxPort>>,
-}
-
 /// Worker（T2）。一个实例可以跑多个任务，每个任务的状态都在 `run()` 的栈上。
 pub struct AgentWorker {
-    store: Arc<dyn SessionStore>,
-    platform: Arc<dyn PlatformPort>,
-    model: Arc<dyn ModelPort>,
-    evidence: Arc<dyn EvidenceWriter>,
-    config: AiteConfig,
-    gateway: Option<Arc<dyn ToolGateway>>,
-    sandbox: Option<Arc<dyn SandboxPort>>,
-    clock: Clock,
-    sleep: Sleeper,
+    pub(crate) store: Arc<dyn SessionStore>,
+    pub(crate) platform: Arc<dyn PlatformPort>,
+    pub(crate) model: Arc<dyn ModelPort>,
+    pub(crate) evidence: Arc<dyn EvidenceWriter>,
+    pub(crate) config: AiteConfig,
+    pub(crate) gateway: Option<Arc<dyn ToolGateway>>,
+    pub(crate) sandbox: Option<Arc<dyn SandboxPort>>,
+    pub(crate) clock: Clock,
+    pub(crate) sleep: Sleeper,
     /// 此刻在飞的任务（app 收尾时给硬取消的任务善终用）。每次 `_save` 刷新快照，
     /// 免得收尾拿到的是开跑那一刻的 steps=0。
-    in_flight: Mutex<HashMap<String, (Task, Session)>>,
+    pub(crate) in_flight: Mutex<HashMap<String, (Task, Session)>>,
 }
 
 impl AgentWorker {
@@ -108,10 +100,13 @@ impl AgentWorker {
         self.sleep = sleep;
         self
     }
-
     // ---- 主循环 --------------------------------------------------------
 
-    async fn agent_loop(&self, ctx: &mut RunContext, hooks: &RunHooks) -> Result<Task, RunError> {
+    pub(crate) async fn agent_loop(
+        &self,
+        ctx: &mut RunContext,
+        hooks: &RunHooks,
+    ) -> Result<Task, RunError> {
         let mut messages = self.build_messages(ctx).await?;
         if ctx.task.title.is_empty() {
             let last = last_user_text(&messages);
@@ -140,6 +135,10 @@ impl AgentWorker {
                 let text = texts::wall_limit(&ctx.task.task_no);
                 return self.fail(ctx, &text).await;
             }
+            // EE3 的挂点（CC3 预埋，本轨恒 None）
+            if let Some(text) = budget::before_step(&ctx.task).await {
+                return self.fail(ctx, &text).await;
+            }
 
             // R6 排队进来的 steer 消息，在每步开始前合并进上下文
             for text in (hooks.drain_steer)() {
@@ -155,6 +154,8 @@ impl AgentWorker {
                     return self.fail(ctx, &text).await;
                 }
             };
+            // EE3 的挂点（CC3 预埋，本轨空实现）
+            budget::after_model_call(&ctx.task, &turn.usage).await;
 
             ctx.task.steps += 1;
             ctx.task.tokens_in += turn.usage.input_tokens;
@@ -200,7 +201,7 @@ impl AgentWorker {
                 // 本地工具照样进计数（口径要和观测侧对得上），但不由它开火：连发 checklist_*
                 // 是 §3.8 08_step_limit 已经钉住的 max_steps 那条路，抢在前面接会把那条规格
                 // 声明在真实 max_steps=40 下变成假的。
-                let spinning = !is_local_tool(&call.name);
+                let spinning = !local_tools::is_local(&call.name);
 
                 if spinning && ctx.repeats >= MAX_CONSECUTIVE_REPEATS {
                     // 在执行**之前**就收：前 4 次结果一模一样，第 5 次没有再跑一遍的必要，
@@ -286,7 +287,10 @@ impl AgentWorker {
 
     // ---- 上下文与模型 --------------------------------------------------
 
-    async fn build_messages(&self, ctx: &mut RunContext) -> Result<Vec<Message>, RunError> {
+    pub(crate) async fn build_messages(
+        &self,
+        ctx: &mut RunContext,
+    ) -> Result<Vec<Message>, RunError> {
         let turns = self
             .store
             .list_turns(&ctx.session.id, TRANSCRIPT_LIMIT)
@@ -318,10 +322,16 @@ impl AgentWorker {
             None => ctx.session.anchor.message_id.clone(),
         });
         let prompt = load_system_prompt(Path::new(&self.config.worker.system_prompt_path))?;
-        Ok(build_context(&prompt, &turns, &history, &attachments))
+        let blocks = BlockCtx {
+            session: &ctx.session,
+            task: &ctx.task,
+            turns: &turns,
+            history: &history,
+        };
+        Ok(assemble(&prompt, &turns, &history, &attachments, &blocks).await)
     }
 
-    async fn chat(&self, messages: &[Message]) -> Result<ModelTurn, ModelError> {
+    pub(crate) async fn chat(&self, messages: &[Message]) -> Result<ModelTurn, ModelError> {
         let mut last: Option<ModelError> = None;
         for delay in [0.0, MODEL_RETRY_DELAYS[0], MODEL_RETRY_DELAYS[1]] {
             if delay > 0.0 {
@@ -344,7 +354,7 @@ impl AgentWorker {
         Err(last.unwrap_or_else(|| ModelError::Upstream("模型调用没有产生结果".into())))
     }
 
-    fn price(&self, tokens_in: u64, tokens_out: u64) -> f64 {
+    pub(crate) fn price(&self, tokens_in: u64, tokens_out: u64) -> f64 {
         let m = &self.config.model;
         (tokens_in as f64 * m.price_in_per_mtok + tokens_out as f64 * m.price_out_per_mtok)
             / 1_000_000.0
@@ -352,150 +362,19 @@ impl AgentWorker {
 
     // ---- 工具分发（W2）-------------------------------------------------
 
-    async fn run_tool(
+    pub(crate) async fn run_tool(
         &self,
         ctx: &mut RunContext,
         call: &ToolCallRequest,
     ) -> Result<ToolOutcome, RunError> {
-        if is_local_tool(&call.name) {
+        if local_tools::is_local(&call.name) {
             self.run_local_tool(ctx, call).await
         } else {
             self.run_gateway_tool(ctx, call).await
         }
     }
 
-    async fn run_local_tool(
-        &self,
-        ctx: &mut RunContext,
-        call: &ToolCallRequest,
-    ) -> Result<ToolOutcome, RunError> {
-        let args = &call.arguments;
-        self.append_evidence(
-            &ctx.task.id,
-            EvidenceKind::ToolCall,
-            json!({"call_id": call.call_id, "name": call.name, "arguments": args}),
-        )
-        .await?;
-
-        match call.name.as_str() {
-            "checklist_add" => {
-                // 先整体校验再截到 8 项：第 9 项是空串照样算不合法（与 Python 同口径）
-                let valid = args.get("items").and_then(Value::as_array).filter(|xs| {
-                    !xs.is_empty()
-                        && xs
-                            .iter()
-                            .all(|x| x.as_str().is_some_and(|s| !s.trim().is_empty()))
-                });
-                let Some(items) = valid else {
-                    return self
-                        .local_result(
-                            ctx,
-                            call,
-                            false,
-                            texts::CHECKLIST_ITEMS_INVALID,
-                            Some(ToolErrorCode::InvalidArgs),
-                        )
-                        .await;
-                };
-                let mut added: Vec<String> = Vec::new();
-                for text in items.iter().take(8) {
-                    let id = format!("c{}", ctx.task.checklist.len() + 1);
-                    ctx.task.checklist.push(ChecklistItem {
-                        id: id.clone(),
-                        text: clip(text.as_str().unwrap_or_default(), MAX_ITEM_CHARS),
-                        state: ChecklistState::Todo,
-                        note: None,
-                    });
-                    added.push(id);
-                }
-                let all_texts: Vec<String> =
-                    ctx.task.checklist.iter().map(|i| i.text.clone()).collect();
-                self.checklist_evidence(
-                    &ctx.task.id,
-                    "add",
-                    json!({"ids": added, "items": all_texts}),
-                )
-                .await?;
-                let content = texts::checklist_added(added.len(), &added);
-                self.local_result(ctx, call, true, &content, None).await
-            }
-            "checklist_check" | "checklist_fail" => {
-                let wanted = args.get("id").and_then(Value::as_str);
-                let idx = wanted.and_then(|id| ctx.task.checklist.iter().position(|i| i.id == id));
-                let Some(idx) = idx else {
-                    let content =
-                        texts::checklist_no_such_item(&fingerprint::py_repr(args.get("id")));
-                    return self
-                        .local_result(ctx, call, false, &content, Some(ToolErrorCode::InvalidArgs))
-                        .await;
-                };
-                if call.name == "checklist_check" {
-                    ctx.task.checklist[idx].state = ChecklistState::Done;
-                } else {
-                    let reason = args.get("reason").and_then(Value::as_str);
-                    let Some(reason) = reason.filter(|r| !r.trim().is_empty()) else {
-                        return self
-                            .local_result(
-                                ctx,
-                                call,
-                                false,
-                                texts::CHECKLIST_REASON_REQUIRED,
-                                Some(ToolErrorCode::InvalidArgs),
-                            )
-                            .await;
-                    };
-                    ctx.task.checklist[idx].state = ChecklistState::Failed;
-                    ctx.task.checklist[idx].note = Some(clip(reason, 40));
-                }
-                let item_id = ctx.task.checklist[idx].id.clone();
-                let state = ctx.task.checklist[idx].state;
-                // BB2 ③：带上这一项的文本。原来只有 `id` + `state`，单看一条
-                // `checklist_op` 读不懂 —— `aite evidence show` 靠回放前面的 `add`
-                // 事件补了回来，但那意味着**每个消费方都得自己回放**。
-                // 代价比 §8 估的小得多：`checklist_add` 那边已经 `clip(·, 20)` 过，
-                // 一份副本最多 20 个字符，不是「文本不短」。
-                let item_text = ctx.task.checklist[idx].text.clone();
-                // "checklist_check"[10:] == "check"；"checklist_fail"[10:] == "fail"
-                let op = &call.name[10..];
-                self.checklist_evidence(
-                    &ctx.task.id,
-                    op,
-                    json!({"id": item_id, "state": state, "text": item_text}),
-                )
-                .await?;
-                let content = texts::checklist_marked(&item_id, state.as_str());
-                self.local_result(ctx, call, true, &content, None).await
-            }
-            "checklist_note" => {
-                let text = args.get("text").and_then(Value::as_str);
-                let Some(text) = text.filter(|t| !t.trim().is_empty()) else {
-                    return self
-                        .local_result(
-                            ctx,
-                            call,
-                            false,
-                            texts::CHECKLIST_TEXT_REQUIRED,
-                            Some(ToolErrorCode::InvalidArgs),
-                        )
-                        .await;
-                };
-                // 备注只活在这一趟 run 里（卡片 footer 上），不落库
-                ctx.note = Some(clip(text, 40));
-                let note = ctx.note.clone().unwrap_or_default();
-                self.checklist_evidence(&ctx.task.id, "note", json!({"text": note}))
-                    .await?;
-                self.local_result(ctx, call, true, texts::CHECKLIST_NOTE_UPDATED, None)
-                    .await
-            }
-            other => {
-                let content = texts::unknown_tool(other);
-                self.local_result(ctx, call, false, &content, Some(ToolErrorCode::NotFound))
-                    .await
-            }
-        }
-    }
-
-    async fn local_result(
+    pub(crate) async fn local_result(
         &self,
         ctx: &RunContext,
         call: &ToolCallRequest,
@@ -524,26 +403,7 @@ impl AgentWorker {
         })
     }
 
-    async fn checklist_evidence(
-        &self,
-        task_id: &str,
-        op: &str,
-        extra: Value,
-    ) -> Result<(), RunError> {
-        let mut payload = Map::new();
-        payload.insert("op".into(), Value::String(op.to_string()));
-        if let Value::Object(rest) = extra {
-            for (k, v) in rest {
-                payload.insert(k, v);
-            }
-        }
-        self.evidence
-            .append(task_id, EvidenceKind::ChecklistOp, payload)
-            .await?;
-        Ok(())
-    }
-
-    async fn run_gateway_tool(
+    pub(crate) async fn run_gateway_tool(
         &self,
         ctx: &mut RunContext,
         call: &ToolCallRequest,
@@ -600,7 +460,7 @@ impl AgentWorker {
         })
     }
 
-    fn tool_context(&self, ctx: &RunContext) -> ToolContext {
+    pub(crate) fn tool_context(&self, ctx: &RunContext) -> ToolContext {
         ToolContext {
             tenant_id: ctx.session.tenant_id.clone(),
             workspace_id: ctx.session.workspace_id.clone(),
@@ -613,280 +473,7 @@ impl AgentWorker {
         }
     }
 
-    // ---- 卡片（W3 / W4）------------------------------------------------
-
-    async fn ensure_card(&self, ctx: &mut RunContext) -> Result<(), RunError> {
-        if ctx.card.sent() {
-            return Ok(());
-        }
-        ctx.task.status = TaskStatus::Working;
-        let card = render_card(
-            &ctx.task,
-            &ctx.session,
-            &ctx.initiator,
-            CardStatus::Working,
-            ctx.note.as_deref(),
-        );
-        let chat_id = ctx.session.chat_id.clone();
-        let reply_to = ctx.thread_root();
-        ctx.card
-            .ensure_card(&chat_id, Some(reply_to.as_str()), &card)
-            .await?;
-        ctx.task.card_id = ctx.card.card_id().map(str::to_string);
-        self.save(ctx).await
-    }
-
-    async fn refresh_card(&self, ctx: &mut RunContext, status: CardStatus) -> Result<(), RunError> {
-        if !ctx.card.sent() {
-            return Ok(());
-        }
-        let card = render_card(
-            &ctx.task,
-            &ctx.session,
-            &ctx.initiator,
-            status,
-            ctx.note.as_deref(),
-        );
-        ctx.card.update(card).await?;
-        Ok(())
-    }
-
-    async fn close_card(&self, ctx: &mut RunContext, status: CardStatus) -> Result<(), RunError> {
-        if !ctx.card.sent() {
-            return Ok(());
-        }
-        let card = render_card(
-            &ctx.task,
-            &ctx.session,
-            &ctx.initiator,
-            status,
-            ctx.note.as_deref(),
-        );
-        ctx.card.force_flush(Some(card)).await?;
-        Ok(())
-    }
-
-    // ---- 收尾 ----------------------------------------------------------
-
-    /// W5：产物逐个 get_file → send_file → evidence artifact；然后 send_text；delivered；finalize。
-    async fn deliver(
-        &self,
-        ctx: &mut RunContext,
-        reply: &str,
-        artifacts: &[Map<String, Value>],
-        answering: bool,
-    ) -> Result<Task, RunError> {
-        // Answering 路径（W3：第一步就 final，没发过卡片）在状态机上是独立的一格
-        ctx.task.status = if answering {
-            TaskStatus::Answering
-        } else {
-            TaskStatus::Working
-        };
-        self.save(ctx).await?;
-
-        let thread_root = ctx.thread_root();
-        let mut missing: Vec<String> = Vec::new();
-        for art in artifacts {
-            let path = plain_string(art.get("path"));
-            // Python 是 `str(art.get("title") or art.get("path", ""))`（loop.py:464）：
-            // 退回 `path` 的判据是**真值语义**，不是「字符串化之后为空」。
-            // 弱模型给 `title: false` / `0` / `{}` 时，后者会把标题发成字面量 "false"。
-            let title = if art.get("title").is_some_and(is_truthy) {
-                plain_string(art.get("title"))
-            } else {
-                path.clone()
-            };
-            let Some(data) = self.fetch_artifact(ctx, &path).await else {
-                missing.push(if title.is_empty() {
-                    path.clone()
-                } else {
-                    title
-                });
-                continue;
-            };
-            // 同一条真值语义：Python 是
-            // `art.get("mime") or mimetypes.guess_type(path)[0] or "application/octet-stream"`
-            // （loop.py:469）。
-            let mime = if art.get("mime").is_some_and(is_truthy) {
-                plain_string(art.get("mime"))
-            } else {
-                mime::guess(&path)
-                    .unwrap_or("application/octet-stream")
-                    .to_string()
-            };
-            let name = Path::new(&path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| title.clone());
-            self.platform
-                .send_file(&OutboundFile {
-                    chat_id: ctx.session.chat_id.clone(),
-                    reply_to: Some(thread_root.clone()),
-                    name,
-                    mime: mime.clone(),
-                    data: data.clone(),
-                })
-                .await?;
-            self.append_evidence(
-                &ctx.task.id,
-                EvidenceKind::Artifact,
-                json!({
-                    "title": title,
-                    "mime": mime,
-                    "sha256": sha256_hex(&data),
-                    "size": data.len(),
-                }),
-            )
-            .await?;
-        }
-
-        let mut text = reply.trim().to_string();
-        if !missing.is_empty() {
-            let lines: Vec<String> = missing.iter().map(|m| texts::artifact_missing(m)).collect();
-            text.push('\n');
-            text.push_str(&lines.join("\n"));
-        }
-        self.platform
-            .send_text(&OutboundText {
-                chat_id: ctx.session.chat_id.clone(),
-                text,
-                reply_to: Some(thread_root),
-                in_thread: true,
-            })
-            .await?;
-
-        ctx.task.status = TaskStatus::Delivered;
-        ctx.task.result_summary = clip(reply, 200);
-        // 收卡片在写终态证据**之前**（BB2 ② 起）。卡片推送现在自己会写一条
-        // `card_updated` 证据，而 `delivered` / `failed` / `cancelled` 必须是链上
-        // 最后一条 —— `evidence show` 的「终态」就是拿最后一行的 kind 认的
-        // （`cli.rs::is_terminal_kind`），`app/tests` 那两条贯通用例也钉着这一点。
-        // 先收卡片、再落终态，链的收口顺序才和「任务真的结束了」对得上。
-        self.close_card(ctx, CardStatus::Delivered).await?;
-        self.append_evidence(
-            &ctx.task.id,
-            EvidenceKind::Delivered,
-            json!({
-                "artifacts": artifacts.len() - missing.len(),
-                "missing": missing,
-                "steps": ctx.task.steps,
-            }),
-        )
-        .await?;
-        self.finish(ctx).await?;
-        Ok(ctx.task.clone())
-    }
-
-    async fn fail(&self, ctx: &mut RunContext, text: &str) -> Result<Task, RunError> {
-        ctx.task.status = TaskStatus::Failed;
-        ctx.task.result_summary = clip(text, 200);
-        let msg = OutboundText {
-            chat_id: ctx.session.chat_id.clone(),
-            text: text.to_string(),
-            reply_to: Some(ctx.thread_root()),
-            in_thread: true,
-        };
-        // 发不出去也要把状态与证据落全：回帖只是通知，不是失败面的一部分
-        if let Err(err) = self.platform.send_text(&msg).await {
-            tracing::error!(task = %ctx.task.id, %err, "worker.fail_notice_failed");
-        }
-        self.close_card(ctx, CardStatus::Failed).await?; // 次序理由见 deliver()
-        self.append_evidence(
-            &ctx.task.id,
-            EvidenceKind::Failed,
-            json!({"reason": text, "steps": ctx.task.steps}),
-        )
-        .await?;
-        self.finish(ctx).await?;
-        Ok(ctx.task.clone())
-    }
-
-    async fn cancel(&self, ctx: &mut RunContext) -> Result<Task, RunError> {
-        ctx.task.status = TaskStatus::Cancelled;
-        self.close_card(ctx, CardStatus::Cancelled).await?; // 次序理由见 deliver()
-        self.append_evidence(
-            &ctx.task.id,
-            EvidenceKind::Cancelled,
-            json!({"steps": ctx.task.steps}),
-        )
-        .await?;
-        self.finish(ctx).await?;
-        Ok(ctx.task.clone())
-    }
-
-    async fn finish(&self, ctx: &mut RunContext) -> Result<(), RunError> {
-        let model = if ctx.task.model.is_empty() {
-            self.model.name()
-        } else {
-            ctx.task.model.clone()
-        };
-        let manifest = json_object(json!({
-            "session_id": ctx.session.id,
-            "task_no": ctx.task.task_no,
-            "created_by": ctx.task.created_by,
-            "model": model,
-        }));
-        ctx.task.evidence_root_hash = Some(self.evidence.finalize(&ctx.task.id, manifest).await?);
-        // delivered / failed / cancelled 三条路都汇到这里，沙箱在这里还。
-        // 不还的话容器要挂到 reaper 的 idle_sec 空闲超时才被收，任务结束了还占着。
-        if let Some(gateway) = &self.gateway {
-            gateway.release_task(&ctx.task.id).await;
-        }
-        self.save(ctx).await
-    }
-
-    async fn save(&self, ctx: &mut RunContext) -> Result<(), RunError> {
-        ctx.task.updated_at = Utc::now();
-        self.store.update_task(&ctx.task).await?;
-        if let Ok(mut live) = self.in_flight.lock()
-            && let Some(slot) = live.get_mut(&ctx.task.id)
-        {
-            slot.0 = ctx.task.clone();
-        }
-        Ok(())
-    }
-
-    /// §3.3：path 不在 /work 下或取不到 → 跳过该产物，任务仍 delivered。
-    async fn fetch_artifact(&self, ctx: &mut RunContext, path: &str) -> Option<Vec<u8>> {
-        if !path.starts_with("/work/") {
-            return None;
-        }
-        let sandbox = self.sandbox.clone()?;
-        if ctx.task.sandbox_id.is_none() {
-            // 产物是 run_python 在 Gateway 那个沙箱里写出来的，得先问它要。
-            // 不问就直接 acquire 的话拿到的是个全新的空容器，产物必然找不到。
-            if let Some(gateway) = &self.gateway {
-                ctx.task.sandbox_id = gateway.sandbox_id_of(&ctx.task.id).await;
-            }
-        }
-        if ctx.task.sandbox_id.is_none() {
-            let cfg = &self.config.sandbox;
-            let spec = SandboxSpec {
-                image: cfg.image.clone(),
-                cpu: cfg.cpu,
-                mem_mb: cfg.mem_mb,
-                ..SandboxSpec::new(cfg.image.clone())
-            };
-            match sandbox.acquire(&ctx.task.id, &spec).await {
-                Ok(id) => ctx.task.sandbox_id = Some(id),
-                Err(err) => {
-                    tracing::error!(task = %ctx.task.id, %path, %err, "worker.artifact_failed");
-                    return None;
-                }
-            }
-        }
-        let sandbox_id = ctx.task.sandbox_id.clone()?;
-        match sandbox.get_file(&sandbox_id, path).await {
-            Ok(data) => Some(data),
-            Err(err) => {
-                tracing::error!(task = %ctx.task.id, %path, %err, "worker.artifact_failed");
-                None
-            }
-        }
-    }
-
-    async fn append_evidence(
+    pub(crate) async fn append_evidence(
         &self,
         task_id: &str,
         kind: EvidenceKind,
@@ -976,22 +563,22 @@ impl aite_contracts::TaskWorker for AgentWorker {
 const TRANSCRIPT_LIMIT: u32 = 200;
 
 /// 一次 `run()` 的可变状态。放一个结构体里免得在方法间传七八个参数。
-struct RunContext {
-    task: Task,
-    session: Session,
-    card: CardCoalescer,
-    initiator: String,
-    note: Option<String>,
-    invalid_args: u32,
-    sandbox_errors: u32,
+pub(crate) struct RunContext {
+    pub(crate) task: Task,
+    pub(crate) session: Session,
+    pub(crate) card: CardCoalescer,
+    pub(crate) initiator: String,
+    pub(crate) note: Option<String>,
+    pub(crate) invalid_args: u32,
+    pub(crate) sandbox_errors: u32,
     /// 上一张牌的指纹，以及它已经连着出了几次（跨步保留：33 次重复是一步一次出来的）
-    repeats: u32,
-    last_call_sig: Option<String>,
-    attachments_message_id: Option<String>,
+    pub(crate) repeats: u32,
+    pub(crate) last_call_sig: Option<String>,
+    pub(crate) attachments_message_id: Option<String>,
 }
 
 impl RunContext {
-    fn thread_root(&self) -> String {
+    pub(crate) fn thread_root(&self) -> String {
         self.session
             .anchor
             .thread_id
@@ -1001,72 +588,13 @@ impl RunContext {
 }
 
 /// 本地工具的执行结果，形状对齐 `ToolResult` 里 worker 关心的那几项。
-struct ToolOutcome {
-    ok: bool,
-    content: String,
-    error_code: Option<ToolErrorCode>,
+pub(crate) struct ToolOutcome {
+    pub(crate) ok: bool,
+    pub(crate) content: String,
+    pub(crate) error_code: Option<ToolErrorCode>,
 }
 
-struct FinalError {
-    content: &'static str,
-    code: ToolErrorCode,
-}
-
-fn parse_final(call: &ToolCallRequest) -> Result<(String, Vec<Map<String, Value>>), FinalError> {
-    let args = &call.arguments;
-    let reply = args.get("reply").and_then(Value::as_str);
-    let Some(reply) = reply.filter(|r| !r.trim().is_empty()) else {
-        return Err(FinalError {
-            content: texts::FINAL_REPLY_REQUIRED,
-            code: ToolErrorCode::InvalidArgs,
-        });
-    };
-    let artifacts = match args.get("artifacts") {
-        None => Vec::new(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_object)
-            .filter(|m| m.get("path").is_some_and(is_truthy))
-            .cloned()
-            .collect(),
-        // Python 是 `raw = args.get("artifacts") or []`（loop.py:634）：**假值**
-        // （`null` / `""` / `{}` / `0` / `false` / `[]`）一律当成「没有产物」照常交付，
-        // 只有**真值但不是数组**才判 invalid_args。
-        // 这条曾经是 Rust 侧的行为翻转：弱模型给 `artifacts: ""` 不罕见，那时 Python
-        // 交付、Rust 退回重来 —— 而这是**交付路径**，退回去的代价是用户什么都收不到。
-        Some(v) if !is_truthy(v) => Vec::new(),
-        Some(_) => {
-            return Err(FinalError {
-                content: texts::FINAL_ARTIFACTS_MUST_BE_ARRAY,
-                code: ToolErrorCode::InvalidArgs,
-            });
-        }
-    };
-    Ok((reply.to_string(), artifacts))
-}
-
-/// Python 的真值语义：空串 / 0 / false / null / 空容器都是假。
-fn is_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-/// 对齐 Python 的 `str(art.get(key, ""))`：字符串取原文，缺省取空串，别的取 JSON 形态。
-fn plain_string(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
-}
-
-fn tool_message(call: &ToolCallRequest, content: &str) -> Message {
+pub(crate) fn tool_message(call: &ToolCallRequest, content: &str) -> Message {
     Message {
         role: Role::Tool,
         content: content.to_string(),
@@ -1076,7 +604,7 @@ fn tool_message(call: &ToolCallRequest, content: &str) -> Message {
     }
 }
 
-fn last_user_text(messages: &[Message]) -> String {
+pub(crate) fn last_user_text(messages: &[Message]) -> String {
     messages
         .iter()
         .rev()
@@ -1086,7 +614,7 @@ fn last_user_text(messages: &[Message]) -> String {
 }
 
 /// W8：`model_call` 只留输入消息的 hash，正文不进证据。
-fn messages_hash(messages: &[Message]) -> String {
+pub(crate) fn messages_hash(messages: &[Message]) -> String {
     let joined = messages
         .iter()
         .map(|m| serde_json::to_string(m).unwrap_or_default())
@@ -1095,11 +623,11 @@ fn messages_hash(messages: &[Message]) -> String {
     sha256_hex(joined.as_bytes())
 }
 
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
-fn json_object(v: Value) -> Map<String, Value> {
+pub(crate) fn json_object(v: Value) -> Map<String, Value> {
     match v {
         Value::Object(m) => m,
         _ => Map::new(),

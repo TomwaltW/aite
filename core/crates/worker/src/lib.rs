@@ -14,16 +14,24 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-pub mod agent;
+pub mod budget;
 pub mod card;
 pub mod context;
+mod deliver;
+mod deps;
 pub mod fingerprint;
+pub mod label;
+pub mod local_tools;
+#[path = "loop.rs"]
+mod r#loop;
 pub mod mime;
+pub mod snapshot;
 pub mod texts;
 
-pub use agent::{
+pub use deps::WorkerDeps;
+pub use r#loop::{
     AgentWorker, MAX_CONSECUTIVE_INVALID_ARGS, MAX_CONSECUTIVE_REPEATS,
-    MAX_CONSECUTIVE_SANDBOX_ERRORS, MODEL_RETRY_DELAYS, REPEAT_NUDGE_AT, WorkerDeps,
+    MAX_CONSECUTIVE_SANDBOX_ERRORS, MAX_TOOL_SUMMARY_CHARS, MODEL_RETRY_DELAYS, REPEAT_NUDGE_AT,
 };
 
 /// 单调钟（秒）。测试注入假钟，免得 500ms 卡片合并窗口与 max_wall_sec 要真等。
