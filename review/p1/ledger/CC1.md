@@ -1410,3 +1410,20 @@ $ cargo metadata --no-deps（包名）
   加上一份把 B 那格输出落盘的 check.sh 副本跑 3 次、`scripts/check.sh --quick` 1 次——**全是 897/0**。
 - 怀疑对象：`evals_runner.rs` 里带墙钟的那条 `a_plane_that_never_settles_times_out_with_a_reason`（`timeout_sec = 0.3`、5ms 轮询），冷编之后 CPU 紧时最可能踩线。
   没抓到现场，只是推断；记进 `CLAUDE.md`「已知时序抖动」要由总管定（不在本轨可写面里）。
+
+### 12.1 自审补的一处：B cargo 那格打出失败的测试名
+
+合并前自审 PR diff 时发现：B cargo 那格的注释说要「把失败的测试名打出来」，实际只 grep 了 `^error: test failed`，
+那一行只给到 target（`-p aite-evals --test evals_runner`）一级——上面那次抖动就是因此没抓到名字。
+改成连 `---- <测试名> stdout ----` 一起打（与编译错误合计最多 7 行，第 8 行是计数，塞得进 `run()` 的 8 行）。
+
+变异验证（在 `aite-admin` 里临时加一条 `assert_eq!(1, 2)` 的探针测试，`scripts/check.sh --quick`）：
+
+```
+---- zz_cc1_probe_fails stdout ----
+error: test failed, to rerun pass `-p aite-admin --test zz_cc1_probe`
+cargo passed=897 failed=1
+-> exit 1  ✗
+```
+
+删掉探针 → `cargo passed=897 failed=0`、`全部通过`；之后全量 `scripts/check.sh` 连跑两次都是 `全部通过`（897/0，evals_runner 没再红）。

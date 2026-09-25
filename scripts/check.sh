@@ -60,7 +60,9 @@ run "C1 契约测试"                   bash -c 'cd core && cargo test -p aite-c
 # 退出码同时看 cargo 自己的（c）：工作区**编不过**时一行 `^test result` 都没有，
 # 只看 f 的话 `exit (f>0)` 得 0 —— 2026-09-25 云端首次 CC1 实测过这格假绿
 # （`cargo passed= failed=` 却 `-> exit 0`）。NR==0 那一条兜「cargo 退 0 却一条结果都没有」。
-run "B 全量 cargo test"             ${NOROOT[@]+"${NOROOT[@]}"} bash -c 'cd core && o=$(cargo test --workspace --no-fail-fast 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^error(: test failed|: could not compile|\[E[0-9]+\])" | sort -u | head -n 5; printf "%s\n" "$o" | grep -E "^test result" | awk -v c="$c" "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p+0 \" failed=\" f+0; exit (c != 0 || f > 0 || NR == 0)}"'
+# 失败名取 `---- <测试名> stdout ----` 那一行（`error: test failed` 只给到 target 一级）；
+# 连同编译错误一共最多 7 行，第 8 行是计数，正好塞进 run() 的 8 行。
+run "B 全量 cargo test"             ${NOROOT[@]+"${NOROOT[@]}"} bash -c 'cd core && o=$(cargo test --workspace --no-fail-fast 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^(---- .* stdout ----|error(: test failed|: could not compile|\[E[0-9]+\]))" | sort -u | head -n 7; printf "%s\n" "$o" | grep -E "^test result" | awk -v c="$c" "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p+0 \" failed=\" f+0; exit (c != 0 || f > 0 || NR == 0)}"'
 # -race 不是可选项：Go 侧的并发面（长连接重连、令牌桶、容器记账表、gRPC 并发读
 # capabilities）都不是单线程的，而竞态在普通 go test 下完全隐形 —— 合流审核那次
 # 就是靠它抓出 fakeFeishu 的读取侧没持锁（TestTransportErrorIsRetryable 现行）。
