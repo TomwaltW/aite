@@ -58,6 +58,20 @@ jobs:
       # 这一步红 = 十个 P0 场景里有跑不过的，不许合。
       - name: "B8 评测（硬门禁：passed 10/10）"
         run: core/target/debug/aite evals run evals/p0 --platform fake --model scripted
+      # B9 —— P1 场景（evals/p1）。与 scripts/check.sh 的 B9 同一个判空条件与判据：
+      # 没场景就 skip（load_suite 对「目录不存在 / 没有 yaml」都报错，所以先判空）；
+      # 有场景要求退出码 0 且末行 `passed k/k`（两数相等）。
+      # `set -o pipefail` 不能省：没写 `shell:` 时 run 用的是 `bash -e {0}`、**不带 pipefail**，
+      # `aite … | tee` 的退出码就成了 tee 的 —— 实测「打出 passed 1/1 却退 1」会被放行。
+      - name: "B9 评测 evals/p1（有场景就要 passed k/k）"
+        run: |
+          set -o pipefail
+          if ls evals/p1/*.yaml >/dev/null 2>&1 || ls evals/p1/*.yml >/dev/null 2>&1; then
+            core/target/debug/aite evals run evals/p1 --platform fake --model scripted | tee /tmp/b9.log
+            tail -n 1 /tmp/b9.log | awk '$1 == "passed" && split($2, a, "/") == 2 && a[1] == a[2] {ok = 1} END {exit !ok}'
+          else
+            echo "B9 skip：evals/p1 尚无场景"
+          fi
 
   # compose 起飞冒烟 —— 独立 job，跟 checks 并行。
   #
@@ -278,4 +292,26 @@ jobs:
         if: always()
         run: |
           docker compose down -v || true
+          test "$(docker ps -a --filter label=aite.task -q | wc -l | tr -d ' ')" = 0
+
+  # 真容器那组 —— 2026-09-25（CC1）之前哪都不跑：edge/internal/sandbox/docker_test.go 带
+  # `//go:build docker`，checks 那步刻意不含 docker tag，compose-smoke 刻意不建沙箱镜像。
+  # 独立 job，与 checks、compose-smoke 并行；与 `make docker-test`、`scripts/check.sh --docker` 同口径。
+  sandbox-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: edge/go.sum
+      - name: "建沙箱镜像 aite-sandbox:p0"
+        run: docker build -t aite-sandbox:p0 docker/sandbox
+      - name: "go test -tags docker ./internal/sandbox/..."
+        run: cd edge && go test -tags docker ./internal/sandbox/... -count=1
+      - name: "不许留下 aite.task 容器"
+        if: always()
+        run: |
+          docker ps -a --filter label=aite.task
           test "$(docker ps -a --filter label=aite.task -q | wc -l | tr -d ' ')" = 0

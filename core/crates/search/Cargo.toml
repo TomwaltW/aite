@@ -1,0 +1,30 @@
+[package]
+name = "aite-search"
+description = "服务端联网搜索（SearchPort）与工作区搜索工具。骨架 crate：CC1 预建，W3 由 EE4 填。owner: EE4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# 依赖是 CC1 预先声明的：W3 谁都不改 Cargo.toml / Cargo.lock（计划 §6.4），漏了只能停下报告。
+# 全部取自 [workspace.dependencies]、都已在 Cargo.lock 里，不是新依赖。
+# aite-gateway 是定死的（原卡 [REVISION 2026-09-25]）：web_search 等工具实现 CC4 放在 gateway 里的 GatewayTool trait。
+# reqwest：联网搜索在服务端跑、直接发 HTTP（博查 / 智谱 / 千帆，计划 CT19），不经沙箱代理。
+# rusqlite：工作区搜索的本地消息索引（派单点名的候选）；用不上也不花钱（bundled 已在锁里）。
+# serde / serde_json 解析搜索结果；tokio / async-trait / thiserror / tracing 同其他 crate。
+[dependencies]
+aite-contracts.workspace = true
+aite-gateway.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+aite-testing.workspace = true

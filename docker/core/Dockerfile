@@ -11,9 +11,22 @@
 # docs/acceptance-M.md 里的 `core/target/debug/aite` 口径，也避免为了一个运维形态
 # 去换优化档（§1 禁「顺手做一点 P1」）。
 
+# ---- 镜像构建参数（2026-09-25 CC1；`make compose-build` 透传，国内取值见 docs/p1/cloud-runbook.md）----
+# 五个都是「不传 = 上游、与加它们之前逐字等价」：CI 的 compose-smoke 直接 `docker compose build`，
+# 不经 make，那条路一个字节都不能变（纪律同 docker/edge/Dockerfile 里 BB3 的 GOPROXY）。
+#   BASE_REGISTRY  基础镜像仓库（默认 docker.io）。只在 FROM 行里用，所以只要这一条全局声明。
+#   APT_MIRROR     空 = 不动 apt 源；非空 = 镜像**主机名**（不是 URL），deb.debian.org 与
+#                  security.debian.org 都换成它（debian-security 那条跟着落到镜像上）。每个 FROM 之后重新声明。
+#   PROTOC_URL     protoc release 的**前缀**，版本号与架构仍在下面拼（arm64 / amd64 都照旧）。
+#   CARGO_REGISTRY 空 = crates.io；非空 = sparse 源（`sparse+https://…/`），写成
+#                  [source.crates-io] replace-with —— 对 `--locked` 透明，Cargo.lock 一个字不变。
+#   GOPROXY        只有 edge 用（BB3 那个 ARG），这里没有。
+# 不用的构建参数 docker 只告警（"build-arg … not consumed"），不报错。
+ARG BASE_REGISTRY=docker.io
+
 # ---------------------------------------------------------------- builder
 ARG RUST_VERSION=1.98.1
-FROM rust:${RUST_VERSION}-trixie AS builder
+FROM ${BASE_REGISTRY}/library/rust:${RUST_VERSION}-trixie AS builder
 
 # rust 官方镜像装的是 minimal profile（rustc/cargo/rust-std，**没有 rustfmt 与 clippy**），
 # 而 core/rust-toolchain.toml 的 components 里写着这两个 —— 不管的话 rustup 每次 build
@@ -33,17 +46,23 @@ ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 # 架构用 BuildKit 的 TARGETARCH，不用 `uname -m`：交叉 build 时 uname 报的是 builder 的。
 ARG PROTOC_VERSION=31.1
 ARG TARGETARCH
+ARG APT_MIRROR=
+ARG PROTOC_URL=https://github.com/protocolbuffers/protobuf/releases/download
 RUN set -eu; \
     case "${TARGETARCH}" in \
       arm64) arch=aarch_64 ;; \
       amd64) arch=x86_64 ;; \
       *) echo "不支持的 TARGETARCH=${TARGETARCH}（只接 arm64 / amd64）" >&2; exit 1 ;; \
     esac; \
+    if [ -n "${APT_MIRROR}" ]; then \
+      sed -i -e "s#deb\.debian\.org#${APT_MIRROR}#g" -e "s#security\.debian\.org#${APT_MIRROR}#g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends curl unzip; \
     rm -rf /var/lib/apt/lists/*; \
     curl -fsSL -o /tmp/protoc.zip \
-      "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${arch}.zip"; \
+      "${PROTOC_URL:-https://github.com/protocolbuffers/protobuf/releases/download}/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${arch}.zip"; \
     unzip -q /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'; \
     rm /tmp/protoc.zip; \
     protoc --version
@@ -65,14 +84,22 @@ COPY core ./core
 # `Could not find protoc` / exit 101。所以「本机 build 绿」不等于「依赖齐」——
 # 判据在 CI 那一侧（.github/workflows/ci.yml 的 compose-smoke job，runner 每次都是冷的）。
 ENV CARGO_TARGET_DIR=/target
+# CARGO_REGISTRY 非空时的配置写在 $CARGO_HOME（/usr/local/cargo）下、cache mount 之外，
+# 只影响这一个 builder 阶段，运行层不带。
+ARG CARGO_REGISTRY=
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/target,sharing=locked \
-    cd core && cargo build --workspace --locked \
+    if [ -n "${CARGO_REGISTRY}" ]; then \
+      printf '[source.crates-io]\nreplace-with = "aite-mirror"\n\n[source.aite-mirror]\nregistry = "%s"\n' \
+        "${CARGO_REGISTRY}" > "${CARGO_HOME}/config.toml"; \
+    fi \
+    && cd core && cargo build --workspace --locked \
     && mkdir -p /out && cp /target/debug/aite /out/aite
 
 # ---------------------------------------------------------------- 运行层
-FROM debian:trixie-slim
+FROM ${BASE_REGISTRY}/library/debian:trixie-slim
+ARG APT_MIRROR=
 
 # ca-certificates 是硬要求，不是「顺手装的」：reqwest 配的是
 # default-features=false, features=["json","rustls"]（core/Cargo.toml:48），
@@ -82,7 +109,11 @@ FROM debian:trixie-slim
 # （edge-client/src/ingress.rs 只 add_service(IngressServiceServer)），
 # 所以健康判据是「ingress socket connect 得上」，靠 `nc -U -z`。
 # rusqlite 是 bundled（core/Cargo.toml:46），sqlite 静态进二进制，运行层不要 libsqlite3。
-RUN apt-get update \
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i -e "s#deb\.debian\.org#${APT_MIRROR}#g" -e "s#security\.debian\.org#${APT_MIRROR}#g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
 

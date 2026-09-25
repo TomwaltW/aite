@@ -28,6 +28,13 @@ aite-models.workspace = true
 aite-edge-client.workspace = true
 aite-testing.workspace = true
 aite-evals.workspace = true
+# P1 骨架 crate：CC1 预先挂上，W2 / W3 接线时不必再改这份清单与 Cargo.lock（计划 §6.4）。
+# 现在都是空 crate，app 代码里没有 `use` 它们（接线归 CC4 / 各功能轨的 features/*.rs）。
+aite-admin.workspace = true
+aite-search.workspace = true
+aite-githost.workspace = true
+aite-routines.workspace = true
+aite-memory.workspace = true
 clap.workspace = true
 sha2.workspace = true
 hex.workspace = true

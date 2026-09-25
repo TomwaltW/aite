@@ -1,0 +1,31 @@
+[package]
+name = "aite-routines"
+description = "例程：定时 / 跟进 / 频道观察的调度与 schedule_followup 工具。骨架 crate：CC1 预建，W3 由 EE2 填。owner: EE2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# 依赖是 CC1 预先声明的：W3 谁都不改 Cargo.toml / Cargo.lock（计划 §6.4），漏了只能停下报告。
+# 全部取自 [workspace.dependencies]、都已在 Cargo.lock 里，不是新依赖。
+# aite-gateway 是定死的（原卡 [REVISION 2026-09-25]）：例程工具实现 CC4 放在 gateway 里的 GatewayTool trait。
+# chrono 算 next_run（Asia/Shanghai 固定 +08:00，不引入时区库，计划 NEW20）；
+# rusqlite：routines 表（计划 CT22）若落在本 crate 自己的库里就要它；uuid 给例程编号；
+# serde / serde_json 出工具参数与结果；tokio 跑调度循环；async-trait / thiserror / tracing 同其他 crate。
+[dependencies]
+aite-contracts.workspace = true
+aite-gateway.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+aite-testing.workspace = true

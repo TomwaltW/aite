@@ -1,0 +1,32 @@
+[package]
+name = "aite-githost"
+description = "GitHost 端口与 GitLab / 极狐适配（提交 API 建分支、Draft MR）。骨架 crate：CC1 预建，W3 由 EE5 填。owner: EE5"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# 依赖是 CC1 预先声明的：W3 谁都不改 Cargo.toml / Cargo.lock（计划 §6.4），漏了只能停下报告。
+# 全部取自 [workspace.dependencies]、都已在 Cargo.lock 里，不是新依赖。
+# aite-gateway 是定死的（原卡 [REVISION 2026-09-25]）：git 工具实现 CC4 放在 gateway 里的 GatewayTool trait。
+# reqwest 调 GitLab REST（项目访问令牌只在服务端，不进沙箱）；
+# sha2 / hex 给提交内容与归档算摘要（提交 API 的 content 校验、证据里记摘要）；
+# uuid 给分支名去重；serde / serde_json 出 API 请求体；tokio / async-trait / thiserror / tracing 同其他 crate。
+[dependencies]
+aite-contracts.workspace = true
+aite-gateway.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+aite-testing.workspace = true
