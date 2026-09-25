@@ -30,6 +30,61 @@ use crate::{Clock, RunError, Sleeper, budget, fingerprint, texts};
 
 /// §3.3 模型调用异常 / 5xx：重试 2 次（首发 + 两次退避，共 3 次调用）
 pub const MODEL_RETRY_DELAYS: [f64; 2] = [2.0, 5.0];
+/// 429 的 `retry-after-ms` 最多等这么久（秒）。上游给出更长的等待时，这一步宁可失败也不挂一分钟以上。
+pub const RETRY_AFTER_CAP_SEC: f64 = 60.0;
+
+/// 模型错误怎么重试（CC3 ⑤；DD4 在此之上做按类型重试）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RetryClass {
+    /// 不重试：配置缺项、4xx（429 除外）—— 再调一次也还是同一个错
+    Never,
+    /// 按上游给的时间退避（429 带 `retry-after-ms`，已封顶 [`RETRY_AFTER_CAP_SEC`]）
+    After(f64),
+    /// 照 [`MODEL_RETRY_DELAYS`] 退避：5xx、传输错、`BadResponse`、没带等待时间的 429
+    Default,
+}
+
+/// 给一个模型错误分类。按**变体里的字符串**判，不按 Display（Display 带「模型服务错误：」前缀）。
+///
+/// 上游文本的格式：CC6 起是 `HTTP <status>: <detail>`（ASCII 冒号），今天的实现是全角
+/// `HTTP <status>：<detail>` —— 两种都认。
+pub fn retry_class(err: &ModelError) -> RetryClass {
+    let text = match err {
+        ModelError::Config(_) => return RetryClass::Never,
+        ModelError::BadResponse(_) => return RetryClass::Default,
+        ModelError::Upstream(text) => text,
+    };
+    let Some(status) = http_status(text) else {
+        return RetryClass::Default;
+    };
+    match status {
+        429 => match retry_after_ms(text) {
+            Some(ms) => RetryClass::After((ms as f64 / 1000.0).min(RETRY_AFTER_CAP_SEC)),
+            None => RetryClass::Default,
+        },
+        400..=499 => RetryClass::Never,
+        _ => RetryClass::Default,
+    }
+}
+
+/// `HTTP 404: …` / `HTTP 404：…` → `Some(404)`。
+fn http_status(text: &str) -> Option<u16> {
+    let rest = text.trim_start().strip_prefix("HTTP ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let after = rest[digits.len()..].chars().next()?;
+    if digits.len() != 3 || !(after == ':' || after == '：') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// 文本里的 `retry-after-ms=<n>`。
+fn retry_after_ms(text: &str) -> Option<u64> {
+    let (_, tail) = text.split_once("retry-after-ms=")?;
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 /// §3.3 同一任务连续 N 次 → failed
 pub const MAX_CONSECUTIVE_INVALID_ARGS: u32 = 3;
 pub const MAX_CONSECUTIVE_SANDBOX_ERRORS: u32 = 2;
@@ -406,12 +461,10 @@ impl AgentWorker {
         messages: &[Message],
     ) -> Result<ModelTurn, ModelError> {
         let tools = self.tool_catalog(ctx);
-        let mut last: Option<ModelError> = None;
-        for delay in [0.0, MODEL_RETRY_DELAYS[0], MODEL_RETRY_DELAYS[1]] {
-            if delay > 0.0 {
-                (self.sleep)(delay).await;
-            }
-            match self
+        // 首发 + 至多 MODEL_RETRY_DELAYS.len() 次重试；哪些错误重试、等多久见 `retry_class`（CC3 ⑤）
+        let mut retries = 0;
+        loop {
+            let err = match self
                 .model
                 .chat(
                     messages,
@@ -422,10 +475,23 @@ impl AgentWorker {
                 .await
             {
                 Ok(turn) => return Ok(turn),
-                Err(err) => last = Some(err),
+                Err(err) => err,
+            };
+            let delay = match retry_class(&err) {
+                RetryClass::Never => return Err(err),
+                RetryClass::After(secs) => secs,
+                RetryClass::Default => match MODEL_RETRY_DELAYS.get(retries) {
+                    Some(d) => *d,
+                    None => return Err(err),
+                },
+            };
+            if retries >= MODEL_RETRY_DELAYS.len() {
+                return Err(err);
             }
+            retries += 1;
+            tracing::warn!(task = %ctx.task.id, %err, delay, "worker.model_retry");
+            (self.sleep)(delay).await;
         }
-        Err(last.unwrap_or_else(|| ModelError::Upstream("模型调用没有产生结果".into())))
     }
 
     pub(crate) fn price(&self, tokens_in: u64, tokens_out: u64) -> f64 {

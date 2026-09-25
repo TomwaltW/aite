@@ -32,6 +32,7 @@ pub use deps::WorkerDeps;
 pub use r#loop::{
     AgentWorker, MAX_CONSECUTIVE_INVALID_ARGS, MAX_CONSECUTIVE_REPEATS,
     MAX_CONSECUTIVE_SANDBOX_ERRORS, MAX_TOOL_SUMMARY_CHARS, MODEL_RETRY_DELAYS, REPEAT_NUDGE_AT,
+    RETRY_AFTER_CAP_SEC, RetryClass, retry_class,
 };
 
 /// 单调钟（秒）。测试注入假钟，免得 500ms 卡片合并窗口与 max_wall_sec 要真等。

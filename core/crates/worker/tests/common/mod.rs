@@ -253,8 +253,28 @@ impl PlatformPort for FakePlatform {
 
 pub type OnCall = Arc<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// 按步脚本化的模型错误（CC3 ⑤；`ModelError` 不是 Clone，存种类）。
+#[derive(Debug, Clone)]
+pub enum FailWith {
+    Config(String),
+    Upstream(String),
+    BadResponse(String),
+}
+
+impl FailWith {
+    fn to_error(&self) -> ModelError {
+        match self {
+            FailWith::Config(s) => ModelError::Config(s.clone()),
+            FailWith::Upstream(s) => ModelError::Upstream(s.clone()),
+            FailWith::BadResponse(s) => ModelError::BadResponse(s.clone()),
+        }
+    }
+}
+
 struct ModelState {
     script: Vec<ModelTurn>,
+    /// 先于 `fail_times` 生效：前几次调用依次报这些错
+    failures: Vec<FailWith>,
     fail_times: u32,
     calls: Vec<Vec<Message>>,
     tool_catalogs: Vec<Vec<ToolSpec>>,
@@ -281,6 +301,7 @@ impl ScriptedModel {
             on_call: None,
             state: Mutex::new(ModelState {
                 script,
+                failures: Vec::new(),
                 fail_times: 0,
                 calls: Vec::new(),
                 tool_catalogs: Vec::new(),
@@ -307,6 +328,12 @@ impl ScriptedModel {
 
     pub fn with_fail_times(self, n: u32) -> Self {
         self.state.lock().expect("model").fail_times = n;
+        self
+    }
+
+    /// 前几次调用依次报这些错（CC3 ⑤），之后照脚本出牌。
+    pub fn with_failures(self, failures: Vec<FailWith>) -> Self {
+        self.state.lock().expect("model").failures = failures;
         self
     }
 
@@ -364,6 +391,10 @@ impl ModelPort for ScriptedModel {
             let mut st = self.state.lock().expect("model");
             st.calls.push(messages.to_vec());
             st.tool_catalogs.push(tools.to_vec());
+            if !st.failures.is_empty() {
+                let f = st.failures.remove(0);
+                return Err(f.to_error());
+            }
             if st.fail_times > 0 {
                 st.fail_times -= 1;
                 None
