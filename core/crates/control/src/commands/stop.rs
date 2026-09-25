@@ -6,6 +6,9 @@ use crate::plane::InProcessControlPlane;
 
 pub(crate) const ENABLED: bool = true;
 
+/// `!help` 里这一行（启用时才列出）。
+pub(crate) const HELP: &str = "!stop <任务号>　停止一个任务（本群只有一个活跃任务时可省略任务号）";
+
 pub const NO_SUCH_TASK_TEXT: &str = "没有这个任务";
 pub const NO_ACTIVE_TASK_TEXT: &str = "本群没有活跃任务";
 

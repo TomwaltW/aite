@@ -20,10 +20,8 @@ fn module_constants_are_byte_exact() {
     assert_eq!(NO_SUCH_TASK_TEXT, "没有这个任务");
     assert_eq!(NO_ACTIVE_TASK_TEXT, "本群没有活跃任务");
     assert_eq!(RESTART_EMPTY_TEXT, "已重开会话，请直接说要做什么。");
-    assert_eq!(
-        UNKNOWN_COMMAND_TEXT,
-        "未知命令，可用：!status !stop <任务号> !restart !new"
-    );
+    // CC2 ⑤ 翻转：原文「未知命令，可用：!status !stop <任务号> !restart !new」
+    assert_eq!(UNKNOWN_COMMAND_TEXT, "未知命令，发 !help 看全部命令");
     assert_eq!(ROUTE_NEW_TASK, "new_task");
     assert_eq!(ROUTE_STEER, "steer");
 }

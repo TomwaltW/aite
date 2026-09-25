@@ -6,6 +6,9 @@ use crate::plane::InProcessControlPlane;
 
 pub(crate) const ENABLED: bool = true;
 
+/// `!help` 里这一行（启用时才列出）。
+pub(crate) const HELP: &str = "!new [要做的事]　另起一个新话题";
+
 pub(crate) async fn run(
     plane: &InProcessControlPlane,
     ev: &NormalizedEvent,

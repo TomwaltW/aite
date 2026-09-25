@@ -36,22 +36,89 @@ pub use stop::{
     NO_ACTIVE_TASK_TEXT, NO_SUCH_TASK_TEXT, stop_needs_task_no_text, stop_while_delivering_text,
 };
 
-/// 未知命令的回帖原文（`inventory-core.md` §5，逐字不变）。
-pub const UNKNOWN_COMMAND_TEXT: &str = "未知命令，可用：!status !stop <任务号> !restart !new";
+/// 未知命令的回帖原文（CC2 ⑤ 解冻：原来逐条列四个命令，现在指路 `!help`，
+/// 因为可用的命令由注册表决定、会随各轨启用而变，写死在这一句里迟早对不上）。
+pub const UNKNOWN_COMMAND_TEXT: &str = "未知命令，发 !help 看全部命令";
 
-/// Python 里定义了但 plane 没用；这里照搬，语义同样是「文档用」。
-pub const KNOWN_COMMANDS: [&str; 4] = ["!status", "!stop", "!restart", "!new"];
+/// 中文别名 → 规范名（CC2 ⑤）。**只在带 `!` / `！` 时生效**：群里说一句「状态」不是命令。
+/// 计数器 key 用规范名（`commands!status`）。
+pub const ALIASES: [(&str, &str); 5] = [
+    ("状态", "!status"),
+    ("停止", "!stop"),
+    ("重开", "!restart"),
+    ("新话题", "!new"),
+    ("帮助", "!help"),
+];
+
+/// 注册表里的一条（CC2 ⑤）：`!help` 与分发都以各命令文件自己的 `ENABLED` 为准。
+pub(crate) struct CommandEntry {
+    pub(crate) name: &'static str,
+    pub(crate) enabled: bool,
+    pub(crate) help: &'static str,
+}
+
+/// 全部 20 条命令，`!help` 按这个顺序列出启用的那些。
+pub(crate) fn registry() -> [CommandEntry; 20] {
+    macro_rules! entry {
+        ($m:ident, $name:literal) => {
+            CommandEntry {
+                name: $name,
+                enabled: $m::ENABLED,
+                help: $m::HELP,
+            }
+        };
+    }
+    [
+        entry!(status, "!status"),
+        entry!(stop, "!stop"),
+        entry!(restart, "!restart"),
+        entry!(new, "!new"),
+        entry!(help, "!help"),
+        entry!(about, "!about"),
+        entry!(access, "!access"),
+        entry!(configure, "!configure"),
+        entry!(mute, "!mute"),
+        entry!(unmute, "!unmute"),
+        entry!(feedback, "!feedback"),
+        entry!(routines, "!routines"),
+        entry!(fork, "!fork"),
+        entry!(memory, "!memory"),
+        entry!(approve, "!approve"),
+        entry!(reject, "!reject"),
+        entry!(evidence, "!evidence"),
+        entry!(connect, "!connect"),
+        entry!(usage, "!usage"),
+        entry!(model, "!model"),
+    ]
+}
+
+/// 这条消息长得像不像命令（R5 的前半个条件）：去掉首尾空白后以 `!` 或全角 `！` 开头。
+pub fn is_command(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with('!') || text.starts_with('！')
+}
 
 /// `"!stop #A17"` → `("!stop", "#A17")`。命令名统一小写，参数原样 trim。
 ///
-/// 按**第一个空格**切（Python 的 `str.partition(" ")`）：`"!stop"` 之后要是跟了
-/// 制表符，Python 也不会把它当分隔符，所以这里同样只认 U+0020。
+/// CC2 ⑤ 起：认全角 `！`（U+FF01，与 ASCII `!` 等价）；按**第一个 Unicode 空白**切
+/// （`char::is_whitespace`：U+3000 全角空格、制表符都算），中文输入法下打出来的命令也认得；
+/// 名字命中 [`ALIASES`] 就换成规范名。
 pub fn parse_command(text: &str) -> (String, String) {
     let text = text.trim();
-    match text.split_once(' ') {
+    let text = match text.strip_prefix('！') {
+        Some(tail) => format!("!{tail}"),
+        None => text.to_string(),
+    };
+    let (head, rest) = match text.split_once(char::is_whitespace) {
         Some((head, rest)) => (head.to_lowercase(), rest.trim().to_string()),
         None => (text.to_lowercase(), String::new()),
-    }
+    };
+    let head = head
+        .strip_prefix('!')
+        .and_then(|bare| ALIASES.iter().find(|(alias, _)| *alias == bare))
+        .map(|(_, name)| (*name).to_string())
+        .unwrap_or(head);
+    (head, rest)
 }
 
 /// `"a17"` / `"A17"` / `"#a17"` 一律归成 `"#A17"`，对齐 `encode_task_no` 的输出形状。
@@ -259,12 +326,21 @@ mod tests {
         assert_eq!(normalize_task_no("   "), "");
     }
 
+    /// CC2 ⑤ 翻转：原来断言四个命令都写在未知命令那句里（`KNOWN_COMMANDS` 已由注册表取代）；
+    /// 现在那句只指路 `!help`，所以要钉的是「`!help` 在、而且是启用的」。
     #[test]
-    fn known_commands_are_all_reachable_from_the_unknown_text() {
-        for name in KNOWN_COMMANDS {
+    fn unknown_text_points_to_an_enabled_help() {
+        assert!(UNKNOWN_COMMAND_TEXT.contains("!help"));
+        assert!(registry().iter().any(|c| c.name == "!help" && c.enabled));
+    }
+
+    #[test]
+    fn registry_names_match_their_help_lines() {
+        for c in registry() {
             assert!(
-                UNKNOWN_COMMAND_TEXT.contains(name),
-                "{name} 该出现在未知命令的提示里"
+                c.help.starts_with(c.name),
+                "{} 的 HELP 该以命令名开头",
+                c.name
             );
         }
     }

@@ -9,6 +9,9 @@ use crate::plane::InProcessControlPlane;
 
 pub(crate) const ENABLED: bool = false;
 
+/// `!help` 里这一行（启用时才列出）。
+pub(crate) const HELP: &str = "!fork [群] <要做的事>　另开一条关联话题";
+
 pub(crate) async fn run(
     plane: &InProcessControlPlane,
     ev: &NormalizedEvent,

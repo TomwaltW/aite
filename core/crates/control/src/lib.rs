@@ -41,9 +41,9 @@ pub(crate) mod sessions;
 pub(crate) mod sessions_channel;
 
 pub use commands::{
-    NO_ACTIVE_TASK_TEXT, NO_SUCH_TASK_TEXT, RESTART_EMPTY_TEXT, UNKNOWN_COMMAND_TEXT,
-    normalize_task_no, parse_command, restart_while_delivering_text, stop_needs_task_no_text,
-    stop_while_delivering_text,
+    ALIASES, NO_ACTIVE_TASK_TEXT, NO_SUCH_TASK_TEXT, RESTART_EMPTY_TEXT, UNKNOWN_COMMAND_TEXT,
+    is_command, normalize_task_no, parse_command, restart_while_delivering_text,
+    stop_needs_task_no_text, stop_while_delivering_text,
 };
 pub use evidence_log::{ROUTE_NEW_TASK, ROUTE_STEER};
 pub use ingress::{Ingress, SLOW_CALLBACK_SEC};

@@ -24,7 +24,7 @@ use aite_contracts::{
     SenderKind, Session, Task, TurnRole,
 };
 
-use crate::commands::{NO_SUCH_TASK_TEXT, StopTarget, stop_while_delivering_text};
+use crate::commands::{NO_SUCH_TASK_TEXT, StopTarget, is_command, stop_while_delivering_text};
 use crate::dispatch::steer_target;
 use crate::evidence_log::steer_payload;
 use crate::lock;
@@ -168,7 +168,7 @@ impl InProcessControlPlane {
         }
 
         // R5：`!` 命令，先于 R6/R7 判定；只接受 @ 过的或已在话题内的消息
-        if text.starts_with('!') && (ev.mentioned || session.is_some()) {
+        if is_command(&text) && (ev.mentioned || session.is_some()) {
             return self.on_command(ev, session, &text).await;
         }
 

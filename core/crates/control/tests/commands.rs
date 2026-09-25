@@ -587,8 +587,8 @@ async fn unknown_command() {
         h.platform.last_text().expect("该回帖").text,
         UNKNOWN_COMMAND_TEXT
     );
-    assert!(UNKNOWN_COMMAND_TEXT.contains("!status"));
-    assert!(UNKNOWN_COMMAND_TEXT.contains("!restart"));
+    // CC2 ⑤ 翻转：原来断言这句里含 `!status` / `!restart`；现在它只指路 `!help`
+    assert!(UNKNOWN_COMMAND_TEXT.contains("!help"));
     assert_eq!(plane.counter("commands!oops"), 1);
 }
 

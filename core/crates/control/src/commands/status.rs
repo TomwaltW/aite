@@ -6,6 +6,9 @@ use crate::plane::InProcessControlPlane;
 
 pub(crate) const ENABLED: bool = true;
 
+/// `!help` 里这一行（启用时才列出）。
+pub(crate) const HELP: &str = "!status　列出本群的活跃任务";
+
 pub(crate) async fn run(
     plane: &InProcessControlPlane,
     ev: &NormalizedEvent,

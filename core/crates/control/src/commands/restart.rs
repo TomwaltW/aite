@@ -6,6 +6,9 @@ use crate::plane::InProcessControlPlane;
 
 pub(crate) const ENABLED: bool = true;
 
+/// `!help` 里这一行（启用时才列出）。
+pub(crate) const HELP: &str = "!restart [要做的事]　重开当前会话";
+
 pub const RESTART_EMPTY_TEXT: &str = "已重开会话，请直接说要做什么。";
 
 /// `!restart` 归档会话时撞上**正在交付**的任务那句话。

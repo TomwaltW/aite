@@ -9,6 +9,9 @@ use crate::plane::InProcessControlPlane;
 
 pub(crate) const ENABLED: bool = false;
 
+/// `!help` 里这一行（启用时才列出）。
+pub(crate) const HELP: &str = "!feedback <内容>　给我们提意见";
+
 pub(crate) async fn run(
     plane: &InProcessControlPlane,
     ev: &NormalizedEvent,
