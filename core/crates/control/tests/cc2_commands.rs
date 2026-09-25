@@ -253,3 +253,46 @@ async fn help_lists_enabled_commands() {
     assert_eq!(UNKNOWN_COMMAND_TEXT, "未知命令，发 !help 看全部命令");
     assert_eq!(plane.counter("commands!mute"), 1);
 }
+
+// ---- ⑧ `!new` 之后同话题的回复 --------------------------------------------
+
+/// 话题里 `!new 另起一件事` 之后，同话题一条无 @ 的回复（`thread` 仍是老 root）进新会话。
+///
+/// **不用固定时钟**：同一 `thread_id` 上此时挂着两个非归档会话，谁胜出看 `created_at`，
+/// 相等时按随机 uuid —— 这条路由的正确性依赖 `created_at` 严格递增。
+#[tokio::test]
+async fn new_in_thread_routes_followups_to_the_new_session() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("老话题").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let old = h
+        .store
+        .find_session_by_thread(CHAT, ROOT)
+        .await
+        .expect("查")
+        .expect("有");
+
+    cmd_in_thread(&plane, "!new 另起一件事", "om_5").await;
+    cmd_in_thread(&plane, "接着说另一件事", "om_6").await;
+
+    let fresh = h
+        .store
+        .find_session_by_thread(CHAT, ROOT)
+        .await
+        .expect("查")
+        .expect("有");
+    assert_ne!(fresh.id, old.id);
+    assert_eq!(
+        support::turn_texts(&h.store, &fresh.id).await,
+        vec!["另起一件事", "接着说另一件事"],
+        "回复进 `!new` 建的新会话"
+    );
+    assert_eq!(
+        support::turn_texts(&h.store, &old.id).await,
+        vec!["老话题"],
+        "老会话一个字没多"
+    );
+}

@@ -545,20 +545,26 @@ async fn new_forces_fresh_session_inside_existing_thread() {
 
     cmd_in_thread(&plane, "!new 另起一件事", "om_5").await;
 
-    let still = h
+    // CC2 ⑧ 翻转：原来断言「按 ROOT 查到的还是老会话」「`om_5` 成了新 root」。
+    // 现在话题内的 `!new` 把新会话挂在同一个话题上，按 ROOT 查到的是新会话；
+    // 老会话不归档、任务不动（下面两条断言照旧成立）。
+    let fresh = h
         .store
         .find_session_by_thread(CHAT, ROOT)
         .await
         .expect("查")
         .expect("有");
-    assert_eq!(still.id, old.id, "老话题没被动");
-    let fresh = h
-        .store
-        .find_session_by_thread(CHAT, "om_5")
-        .await
-        .expect("查")
-        .expect("本条消息成了新 root");
-    assert_ne!(fresh.id, old.id);
+    assert_ne!(fresh.id, old.id, "同一话题，新会话胜出");
+    assert!(
+        h.store
+            .find_session_by_thread(CHAT, "om_5")
+            .await
+            .expect("查")
+            .is_none(),
+        "`!new` 这条消息不再自己当 root"
+    );
+    let still = h.store.get_session(&old.id).await.expect("读").expect("有");
+    assert_eq!(still.status, SessionStatus::Active, "老会话没被归档");
 
     let tasks = active_tasks(&h.store, CHAT).await;
     let session_ids: std::collections::HashSet<String> =
