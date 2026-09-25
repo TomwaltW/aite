@@ -516,6 +516,8 @@ struct GatewayState {
 /// —— 跟 T17 里那个「工具成功、内容没用」的形状同构，T20 的用例正靠它。
 pub struct FakeGateway {
     results: HashMap<String, ToolResult>,
+    /// `catalog()` 的返回值（CC3 ②）；`None` = `gateway_tools()`
+    catalog: Option<Vec<ToolSpec>>,
     sandbox: Option<Arc<FakeSandbox>>,
     state: Mutex<GatewayState>,
 }
@@ -527,9 +529,16 @@ impl FakeGateway {
     pub fn new(sandbox: Option<Arc<FakeSandbox>>) -> Arc<Self> {
         Arc::new(Self {
             results: HashMap::new(),
+            catalog: None,
             sandbox,
             state: Mutex::new(GatewayState::default()),
         })
+    }
+
+    /// 让 `catalog()` 返回这一份（CC3 ②）。
+    pub fn with_catalog(mut self, catalog: Vec<ToolSpec>) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
 
     pub fn with_result(mut self, name: &str, result: ToolResult) -> Self {
@@ -568,7 +577,9 @@ impl FakeGateway {
 #[async_trait]
 impl ToolGateway for FakeGateway {
     fn catalog(&self, _ctx: &ToolContext) -> Vec<ToolSpec> {
-        gateway_tools().to_vec()
+        self.catalog
+            .clone()
+            .unwrap_or_else(|| gateway_tools().to_vec())
     }
 
     async fn call(&self, ctx: &ToolContext, req: &ToolCallRequest) -> ToolResult {

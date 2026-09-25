@@ -15,7 +15,8 @@ use std::sync::{Arc, Mutex};
 use aite_contracts::{
     AiteConfig, CardStatus, EvidenceKind, EvidenceWriter, Message, ModelError, ModelPort,
     ModelTurn, PlatformPort, Role, RunHooks, SandboxPort, Session, SessionStore, Task, TaskStatus,
-    ToolCallRequest, ToolContext, ToolErrorCode, ToolGateway, all_model_tools, final_tool,
+    ToolCallRequest, ToolContext, ToolErrorCode, ToolGateway, ToolSpec, checklist_tools,
+    final_tool, gateway_tools,
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -146,7 +147,7 @@ impl AgentWorker {
             }
 
             let step_index = ctx.task.steps;
-            let turn = match self.chat(&messages).await {
+            let turn = match self.chat(ctx, &messages).await {
                 Ok(turn) => turn,
                 Err(err) => {
                     tracing::error!(task = %ctx.task.id, %err, "worker.model_failed");
@@ -331,7 +332,26 @@ impl AgentWorker {
         Ok(assemble(&prompt, &turns, &history, &attachments, &blocks).await)
     }
 
-    pub(crate) async fn chat(&self, messages: &[Message]) -> Result<ModelTurn, ModelError> {
+    /// 进模型的工具目录（CC3 ②，全仓唯一的目录行）：本地的 checklist_* 与 final、启用的额外本地工具、
+    /// 再加 `gateway.catalog(ctx)`。没有 gateway 时退回契约里的 `gateway_tools()`（今天的 10 个）。
+    /// 顺序与 `all_model_tools()` 一致（checklist → final → gateway）。
+    pub(crate) fn tool_catalog(&self, ctx: &RunContext) -> Vec<ToolSpec> {
+        let mut tools: Vec<ToolSpec> = checklist_tools().to_vec();
+        tools.push(final_tool().clone());
+        tools.extend(local_tools::enabled_specs());
+        match &self.gateway {
+            Some(gateway) => tools.extend(gateway.catalog(&self.tool_context(ctx))),
+            None => tools.extend(gateway_tools().iter().cloned()),
+        }
+        tools
+    }
+
+    pub(crate) async fn chat(
+        &self,
+        ctx: &RunContext,
+        messages: &[Message],
+    ) -> Result<ModelTurn, ModelError> {
+        let tools = self.tool_catalog(ctx);
         let mut last: Option<ModelError> = None;
         for delay in [0.0, MODEL_RETRY_DELAYS[0], MODEL_RETRY_DELAYS[1]] {
             if delay > 0.0 {
@@ -341,7 +361,7 @@ impl AgentWorker {
                 .model
                 .chat(
                     messages,
-                    all_model_tools(),
+                    &tools,
                     self.config.model.max_tokens,
                     self.config.model.temperature,
                 )

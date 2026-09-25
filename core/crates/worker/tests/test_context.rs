@@ -2,7 +2,9 @@
 //! 移植自 `tests/worker/test_context.py`（8 条）。
 mod common;
 
-use aite_contracts::{Role, Turn, TurnRole, all_model_tools};
+use aite_contracts::{
+    Role, ToolSpec, Turn, TurnRole, all_model_tools, checklist_tools, final_tool, gateway_tools,
+};
 use aite_worker::context::{
     ATTACHMENT_HEADER, HISTORY_HEADER, load_system_prompt, transcript_messages,
 };
@@ -141,6 +143,40 @@ async fn model_gets_the_full_tool_catalog() {
     ] {
         assert!(names.contains(want), "工具目录里少了 {want}");
     }
+}
+
+/// CC3 ②：目录的 gateway 那一段来自 `gateway.catalog(ctx)`，不是写死的 `gateway_tools()`。
+#[tokio::test]
+async fn catalog_comes_from_gateway() {
+    let custom = vec![
+        ToolSpec {
+            name: "search_docs".into(),
+            description: "搜文档".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        },
+        gateway_tools()[0].clone(),
+    ];
+    let gateway = FakeGateway::new(None);
+    let gateway = std::sync::Arc::new(
+        std::sync::Arc::try_unwrap(gateway)
+            .ok()
+            .expect("刚建的 gateway 没有别的引用")
+            .with_catalog(custom.clone()),
+    );
+    let mut h = Harness::with_gateway(Some(gateway));
+    h.seed("帮我出个图", Vec::new()).await;
+    let model = std::sync::Arc::new(ScriptedModel::new(vec![final_turn("好")]));
+    h.run(model.clone()).await;
+
+    let mut want: Vec<ToolSpec> = checklist_tools().to_vec();
+    want.push(final_tool().clone());
+    want.extend(custom);
+    assert_eq!(want.len(), 4 + 1 + 2);
+    assert_eq!(
+        model.tool_catalog(0),
+        want,
+        "4 个 checklist + final + gateway 给的那一份，顺序固定"
+    );
 }
 
 // ---- W9 -----------------------------------------------------------------
