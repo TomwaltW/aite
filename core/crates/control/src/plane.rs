@@ -245,10 +245,9 @@ impl ControlPlane for InProcessControlPlane {
                 // `ingress.handle_failed`。** 写下这个指路是因为那份日志在另一个模块里，
                 // 而 `dropped_note()` 给用户的那句话也正是这么说的 —— 两处别再各说各的。
                 //
-                // ⚠️ `edge-client/src/ingress.rs` 里那条同名的 WARN（只有 `event_id` /
-                // `error`，没有 `kind`）**在当前接线下到不了**：`app.rs` 交给
-                // `platform.start()` 的是 `control::Ingress::handler()`，它无条件返回
-                // `Ok(())`，gRPC 那一层的 `Err` 分支永远不进。详见 BB1 回执的记账。
+                // `edge-client/src/ingress.rs` 里那条同名的 WARN（只有 `event_id` /
+                // `error`，没有 `kind`）CC2 ③ 起对存储 / 证据错误走得到了：
+                // `control::Ingress::handler()` 把这两类 `Err` 交回 gRPC 那一层（其余仍吞掉）。
                 self.shared.bump("events.dropped");
                 Err(e)
             }

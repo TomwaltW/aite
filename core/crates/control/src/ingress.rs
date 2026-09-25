@@ -8,14 +8,22 @@
 //!    「任何未捕获异常 → 进程不退出」。
 //! 2. **把慢回调叫出来**：超过 1s 就打 WARNING，免得哪天有人往路由里塞了重活还没人发现。
 //!
-//! gRPC 侧的 IngressService（R6）拿的是另一条路：它要把 `Err` 翻成 INTERNAL 让平台重推，
-//! 所以它直接调 `plane.handle_event`，不经过这里。
+//! **CC2 ③ 起有一类错误要传出去**：[`Ingress::handler`]（交给 `PlatformPort::start` 的那个回调）
+//! 对存储 / 证据错误（`IngressError::Store` / `::Evidence`）返回 `Err`，edge-client 的 gRPC 入口
+//! 把它翻成 INTERNAL（`proto/src/status.rs`：非 `Invalid` 一律 INTERNAL），edge 让平台重推。
+//! 其余错误（平台、非法事件、其它）照旧吞掉返回 `Ok`。计数器与 `ingress.handle_failed` 日志
+//! 两种情况都照打。[`Ingress::on_event`] 仍返回 `()`：直接调它的测试与旧用法不变。
+//!
+//! 边界：`seen_event` **之后**的失败，重推回来仍会被 R2 当重复吃掉（`ingress_failures.rs` 钉着）——
+//! 这里只负责「传出去」；让它真能救回来要撤销那条去重记录，`SessionStore` 没这个方法（契约缺口）。
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
-use aite_contracts::{ControlPlane, EventHandler, NormalizedEvent, PlatformError, PlatformPort};
+use aite_contracts::{
+    ControlPlane, EventHandler, IngressError, NormalizedEvent, PlatformError, PlatformPort,
+};
 
 use crate::lock;
 
@@ -41,11 +49,13 @@ impl IngressInner {
         *lock(&self.counters).entry(key.to_string()).or_insert(0) += 1;
     }
 
-    async fn on_event(&self, ev: NormalizedEvent) {
+    /// 处理一条事件；错误照旧计数、打日志，并**原样交回**给调用方去决定吞不吞。
+    async fn on_event(&self, ev: NormalizedEvent) -> Result<(), IngressError> {
         let t0 = (self.clock)();
         let event_id = ev.event_id.clone();
         let kind = ev.kind;
-        match self.plane.handle_event(ev).await {
+        let out = self.plane.handle_event(ev).await;
+        match &out {
             Ok(()) => self.bump("events.handled"),
             Err(e) => {
                 self.bump("ingress.errors");
@@ -68,6 +78,7 @@ impl IngressInner {
                 "ingress.slow_callback"
             );
         }
+        out
     }
 }
 
@@ -113,17 +124,22 @@ impl Ingress {
 
     /// 事件回调本体。**任何错误都在这里吞掉**，不往 adapter 抛。
     pub async fn on_event(&self, ev: NormalizedEvent) {
-        self.inner.on_event(ev).await;
+        let _ = self.inner.on_event(ev).await;
     }
 
     /// 交给 `PlatformPort::start` 的那个回调。
+    ///
+    /// 存储 / 证据错误返回 `Err`（gRPC 入口翻成 INTERNAL，平台重推）；其余错误吞掉返回 `Ok`，
+    /// 与 CC2 之前一样（平台抽风、非法事件重推也没用，只会让读循环反复撞同一条）。
     pub fn handler(&self) -> EventHandler {
         let inner = Arc::clone(&self.inner);
         Arc::new(move |ev: NormalizedEvent| {
             let inner = Arc::clone(&inner);
             Box::pin(async move {
-                inner.on_event(ev).await;
-                Ok(())
+                match inner.on_event(ev).await {
+                    Err(e @ (IngressError::Store(_) | IngressError::Evidence(_))) => Err(e),
+                    Ok(()) | Err(_) => Ok(()),
+                }
             })
         })
     }
