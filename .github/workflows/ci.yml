@@ -61,8 +61,11 @@ jobs:
       # B9 —— P1 场景（evals/p1）。与 scripts/check.sh 的 B9 同一个判空条件与判据：
       # 没场景就 skip（load_suite 对「目录不存在 / 没有 yaml」都报错，所以先判空）；
       # 有场景要求退出码 0 且末行 `passed k/k`（两数相等）。
+      # `set -o pipefail` 不能省：没写 `shell:` 时 run 用的是 `bash -e {0}`、**不带 pipefail**，
+      # `aite … | tee` 的退出码就成了 tee 的 —— 实测「打出 passed 1/1 却退 1」会被放行。
       - name: "B9 评测 evals/p1（有场景就要 passed k/k）"
         run: |
+          set -o pipefail
           if ls evals/p1/*.yaml >/dev/null 2>&1 || ls evals/p1/*.yml >/dev/null 2>&1; then
             core/target/debug/aite evals run evals/p1 --platform fake --model scripted | tee /tmp/b9.log
             tail -n 1 /tmp/b9.log | awk '$1 == "passed" && split($2, a, "/") == 2 && a[1] == a[2] {ok = 1} END {exit !ok}'

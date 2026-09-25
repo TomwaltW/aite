@@ -372,6 +372,20 @@ check exit=1
 
 探针删掉、`rmdir evals/p1` 之后回到 skip（终版两次即是）。
 
+CI 的 B9 步（自查补的一处）：第一版写的是 `aite … | tee /tmp/b9.log` 再判末行，而 GitHub 没写 `shell:` 时用 `bash -e {0}`、**不带 pipefail**，
+aite 的退出码会被 tee 吞掉。用一个「打出 `passed 1/1` 却退 1」的替身实测（`bash -e -c` 模拟 runner）：
+
+```
+#### 旧步骤（bash -e，无 pipefail）
+passed 1/1
+step exit=0
+#### 新步骤（先 set -o pipefail）
+passed 1/1
+step exit=1
+```
+
+所以那一步开头加了 `set -o pipefail`（与 B8 那格「退出码 0 **且**末行」的两条判据对齐）。check.sh 的 B9 是先捕获 `c=$?` 再判，没有这个问题。
+
 `.yml`：`load_suite`（`core/crates/evals/src/scenario.rs:520-525`）认 `.yaml` 与 `.yml`，所以 check.sh / Makefile / CI 三处的判空都是
 `ls evals/p1/*.yaml >/dev/null 2>&1 || ls evals/p1/*.yml >/dev/null 2>&1`，与它对齐。`make evals-p1`：无场景打 `B9 skip：evals/p1 尚无场景` 退 0；放探针后 `passed 1/1`。
 
