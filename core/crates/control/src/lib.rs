@@ -1,7 +1,8 @@
 //! aite-control —— ControlPlane：路由 R1–R8、命令、派发队列、steer、reaper、取消、Ingress。
 //!
 //! 对应的 Python 源码（规格，只读）：
-//! - `aite/control/plane.py` → [`plane`]（`InProcessControlPlane`）
+//! - `aite/control/plane.py` → [`plane`]（`InProcessControlPlane`；CC2 起按职责拆进
+//!   `routing/`、`sessions`、`dispatch`、`reaper`、`evidence_log`、`commands/`）
 //! - `aite/control/commands.py` → [`commands`]
 //! - `aite/ingress/handler.py` → [`ingress`]（`Ingress`）
 //! - `aite/worker/card.py` 的 `clip` / `render_card` → [`card`]（本 crate 私写一份：取消路径
@@ -20,19 +21,34 @@
 //! 除 `_turn_seq_lock` 外全是 `std::sync::Mutex`，临界区里不 await（§7.6）。
 use std::sync::{Mutex, MutexGuard};
 
+pub(crate) mod ambient;
+pub(crate) mod approvals;
 pub mod card;
 pub mod commands;
+pub(crate) mod dispatch;
+pub(crate) mod dm;
+pub(crate) mod evidence_log;
+pub(crate) mod gate;
 pub mod ingress;
+pub(crate) mod internal;
+pub(crate) mod intro;
+pub(crate) mod mute;
 pub mod plane;
 pub(crate) mod queue;
+pub(crate) mod reaper;
+pub(crate) mod routing;
+pub(crate) mod sessions;
+pub(crate) mod sessions_channel;
 
-pub use commands::{UNKNOWN_COMMAND_TEXT, normalize_task_no, parse_command};
-pub use ingress::{Ingress, SLOW_CALLBACK_SEC};
-pub use plane::{
-    ControlDeps, InProcessControlPlane, NO_ACTIVE_TASK_TEXT, NO_SUCH_TASK_TEXT, PlaneState,
-    REAPER_INTERVAL_SEC, RESTART_EMPTY_TEXT, ROUTE_NEW_TASK, ROUTE_STEER, SleepFn, WallClock,
-    restart_while_delivering_text, stop_needs_task_no_text, stop_while_delivering_text,
+pub use commands::{
+    NO_ACTIVE_TASK_TEXT, NO_SUCH_TASK_TEXT, RESTART_EMPTY_TEXT, UNKNOWN_COMMAND_TEXT,
+    normalize_task_no, parse_command, restart_while_delivering_text, stop_needs_task_no_text,
+    stop_while_delivering_text,
 };
+pub use evidence_log::{ROUTE_NEW_TASK, ROUTE_STEER};
+pub use ingress::{Ingress, SLOW_CALLBACK_SEC};
+pub use plane::{ControlDeps, InProcessControlPlane, PlaneState, SleepFn, WallClock};
+pub use reaper::REAPER_INTERVAL_SEC;
 
 /// 取锁，中毒也不 panic（§7.7：`unwrap/expect` 不落在运行期可失败的路径上）。
 ///
