@@ -354,7 +354,10 @@ goproxy.cn exit=56
 - 冷缓存分步计时（临时 GOMODCACHE / CARGO_HOME）：两个 `go install` 共 28s、`go version`（拉 go1.27.1）6s、`go mod download` 2s、`cargo fetch` 4s；
   加上 rustup 装 1.98.1（约 30–60s）与 protoc（约 5s），全程冷跑约 1.5–2 分钟。
 - Maven 二进制不带 include 时编一个 import 了 struct / timestamp 的 proto：`File not found` 失败；带上 raw 取回的 WKT：通过。
-- `bash -n` 通过；70 行；sha256 `a5cbae4002a2fe201362a91636f10711a497a3bd8eef74219d5d913090270657`（原版 53 行，`9c84412e3c356c48d0a9bbfd333195c33f0d2990bcf70af0b6bf6b40b0b19a76`）。
+- `bash -n` 通过；70 行；sha256 `ff643916f1c53de443899e32b0fbc4459d339a7b834ba7f2a649c13b476a7522`（原版 53 行，`9c84412e3c356c48d0a9bbfd333195c33f0d2990bcf70af0b6bf6b40b0b19a76`）。
+  （上一版 `a5cbae40…0657` 只差第 3 行头注释：可选项里还写着已去掉的「预编译」，已改成「codegen 插件、仓库预热、沙箱镜像」；改后回退路径重跑仍 `exit=0`、`libprotoc 31.1`。）
+- 换进计划的模拟（在计划副本上按字节替换两锚点之间）：`numstat` = `27 10`，806 → 823 行，改动全在 §4.1 代码块内，
+  `echo "cloud-setup 完成"` 落在第 357 行、下一行是代码块围栏；同一替换再跑一次字节不变（幂等）。
 - 没验证到的：setup 阶段 GitHub release 是否真的 403（会话里走 agent proxy 是 200，setup 阶段复现不了，所以两条路都备着）；setup 阶段的 cwd 是否在仓库里（不在就整段 ④ 跳过并告警，不出错）。
 
 派单 `review/paste-CC1.md` 工作项 1 里「脚本第 ④ 步有 `cargo test --workspace --no-run`，冷跑同样 10–15 分钟」一句会随之过时（派单是总管的文件，本轨不改；照修订版跑两次 cloud-setup 只会更快）。
@@ -364,7 +367,7 @@ goproxy.cn exit=56
 ```bash
 #!/usr/bin/env bash
 # Aite 云端环境安装脚本 —— 贴进 claude.ai/code 的环境设置（Setup script）。结果缓存约 7 天。
-# 必需的三件（protoc / Rust / Go）失败就退非 0；可选的（预编译、沙箱镜像、codegen 插件）失败只告警，
+# 必需的三件（protoc / Rust / Go）失败就退非 0；可选的（codegen 插件、仓库预热、沙箱镜像）失败只告警，
 # 免得一个镜像站抖一下就把整个环境的缓存搞坏。
 # 官方约束（code.claude.com/docs/en/cloud-environments「Script requirements」「GitHub proxy」）：非 0 退出 = 会话起不来；
 # 总时长压在约 5 分钟内环境缓存才建得成；setup 阶段下载「没附加到会话的仓库」的 GitHub release 会 403。
