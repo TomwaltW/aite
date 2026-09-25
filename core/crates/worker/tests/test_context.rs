@@ -3,7 +3,8 @@
 mod common;
 
 use aite_contracts::{
-    Role, ToolSpec, Turn, TurnRole, all_model_tools, checklist_tools, final_tool, gateway_tools,
+    Role, TaskWorker, ToolSpec, Turn, TurnRole, all_model_tools, checklist_tools, final_tool,
+    gateway_tools,
 };
 use aite_worker::context::{
     ATTACHMENT_HEADER, HISTORY_HEADER, load_system_prompt, transcript_messages,
@@ -235,6 +236,80 @@ async fn transcript_lines_are_attributed() {
     assert_eq!(task.title, "加上同比");
     // 存库的正文没被改
     assert_eq!(h.store.user_turn_texts(&h.session.id)[0], "按月画个图");
+}
+
+/// CC3 ⑦：小预算 + 三步大块工具结果 → 最后一次 `chat` 里最旧那条是占位、最新那条原样，
+/// 每条 tool 消息的 `tool_call_id` 都在（绝不删消息）。
+#[tokio::test]
+async fn context_budget_trims_oldest_tool_results() {
+    let big = "数".repeat(20_000);
+    let gateway = FakeGateway::new(None);
+    let gateway = std::sync::Arc::new(
+        std::sync::Arc::try_unwrap(gateway)
+            .ok()
+            .expect("刚建的 gateway 没有别的引用")
+            .with_result(
+                "read_document",
+                aite_contracts::ToolResult {
+                    call_id: String::new(),
+                    name: "read_document".into(),
+                    ok: true,
+                    content: big.clone(),
+                    data: None,
+                    error: None,
+                    duration_ms: 0,
+                    artifacts: Vec::new(),
+                },
+            ),
+    );
+    let mut h = Harness::with_gateway(Some(gateway));
+    h.seed("读三份文档", Vec::new()).await;
+    let model = std::sync::Arc::new(ScriptedModel::new(vec![
+        tool_turn(&[(
+            "read_document",
+            serde_json::json!({"url_or_token": "doc_1"}),
+        )]),
+        tool_turn(&[(
+            "read_document",
+            serde_json::json!({"url_or_token": "doc_2"}),
+        )]),
+        tool_turn(&[(
+            "read_document",
+            serde_json::json!({"url_or_token": "doc_3"}),
+        )]),
+        final_turn("读完了。"),
+    ]));
+    let task = h
+        .worker(model.clone())
+        .with_context_max_tokens(50_000)
+        .run(
+            h.task.clone(),
+            h.session.clone(),
+            Some("张三".into()),
+            h.hooks(),
+        )
+        .await;
+    assert_eq!(task.status, aite_contracts::TaskStatus::Delivered);
+
+    // 两条结果（约 44k）时还在预算内，一个字都不裁
+    let second = tool_messages(&model.call(2));
+    assert_eq!(second.len(), 2);
+    assert!(second.iter().all(|m| m.content.contains(&big)));
+
+    // 三条（约 64k）时裁最旧的那条，最新的原样
+    let last = tool_messages(&model.call(3));
+    assert_eq!(last.len(), 3, "绝不删消息");
+    assert!(
+        last.iter().all(|m| m.tool_call_id.is_some()),
+        "每条 tool 消息都还配着它的 call_id"
+    );
+    assert_eq!(
+        last[0].content,
+        aite_worker::texts::tool_result_trimmed(20_000)
+    );
+    assert!(last[1].content.contains(&big), "中间那条没被动");
+    assert!(last[2].content.contains(&big), "最新那条原样");
+    assert!(aite_worker::context::estimate_tokens(&model.call(3)) <= 50_000);
 }
 
 // ---- W9 -----------------------------------------------------------------

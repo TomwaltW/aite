@@ -23,7 +23,10 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::card::{CardCoalescer, MAX_TITLE_CHARS, clip};
-use crate::context::{BlockCtx, assemble, attributed_turns, load_system_prompt};
+use crate::context::{
+    BlockCtx, CONTEXT_MAX_TOKENS, assemble, attributed_turns, estimate_tokens, load_system_prompt,
+    trim_to_budget,
+};
 use crate::deps::WorkerDeps;
 use crate::local_tools::{self, parse_final};
 use crate::{Clock, RunError, Sleeper, budget, fingerprint, texts};
@@ -124,6 +127,8 @@ pub struct AgentWorker {
     pub(crate) sandbox: Option<Arc<dyn SandboxPort>>,
     pub(crate) clock: Clock,
     pub(crate) sleep: Sleeper,
+    /// 上下文预算（CC3 ⑦），见 `context::CONTEXT_MAX_TOKENS`
+    pub(crate) context_max_tokens: usize,
     /// 此刻在飞的任务（app 收尾时给硬取消的任务善终用）。每次 `_save` 刷新快照，
     /// 免得收尾拿到的是开跑那一刻的 steps=0。
     pub(crate) in_flight: Mutex<HashMap<String, (Task, Session)>>,
@@ -141,6 +146,7 @@ impl AgentWorker {
             sandbox: deps.sandbox,
             clock: crate::default_clock(),
             sleep: crate::default_sleeper(),
+            context_max_tokens: CONTEXT_MAX_TOKENS,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -148,6 +154,13 @@ impl AgentWorker {
     /// 测试注入：单调钟（秒）。卡片 500ms 窗口与 max_wall_sec 都读它。
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// 上下文预算（CC3 ⑦，估算的 token 数）。默认 [`CONTEXT_MAX_TOKENS`]；T0c 经它接
+    /// `WorkerConfig.context_max_tokens`。本轨是测试旋钮，不进 `WorkerDeps`。
+    pub fn with_context_max_tokens(mut self, n: usize) -> Self {
+        self.context_max_tokens = n;
         self
     }
 
@@ -208,6 +221,15 @@ impl AgentWorker {
             }
 
             let step_index = ctx.task.steps;
+            // CC3 ⑦：每次 chat 前压进预算（只裁旧的工具结果，不删消息）
+            if !trim_to_budget(&mut messages, self.context_max_tokens) {
+                tracing::warn!(
+                    task = %ctx.task.id,
+                    budget = self.context_max_tokens,
+                    estimate = estimate_tokens(&messages),
+                    "worker.context_over_budget 工具结果全裁完仍超预算，照跑"
+                );
+            }
             let turn = match self.chat(ctx, &messages).await {
                 Ok(turn) => turn,
                 Err(err) => {

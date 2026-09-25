@@ -34,6 +34,56 @@ pub use transcript::{
     HEAD_TURNS, MAX_TRANSCRIPT_TURNS, TAIL_TURNS, attributed_turns, transcript_messages,
 };
 
+/// 上下文预算（CC3 ⑦）的默认上限，单位是估算的 token。T0c 把 `WorkerConfig.context_max_tokens`
+/// 经 `AgentWorker::with_context_max_tokens` 接进来；DD4 在其上做更细的裁剪。
+pub const CONTEXT_MAX_TOKENS: usize = 96_000;
+
+/// 估算一组消息占多少 token：各消息正文 + tool_calls 参数序列化后的**字符数**，1 字符 ≈ 1 token。
+///
+/// 这个换算是保守的（中文一字大约 1 token 上下，英文几个字母才 1 token），宁可早裁不可超。
+pub fn estimate_tokens(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .map(|m| {
+            let calls: usize = m
+                .tool_calls
+                .iter()
+                .flatten()
+                .map(|c| {
+                    serde_json::to_string(&c.arguments)
+                        .map(|s| s.chars().count())
+                        .unwrap_or(0)
+                })
+                .sum();
+            m.content.chars().count() + calls
+        })
+        .sum()
+}
+
+/// 把上下文压进预算（CC3 ⑦）：超了就从**最旧的 `Role::Tool` 消息**起，把正文替换成占位文案（带原长），
+/// 直到不超。**绝不删消息**（保住 tool_call ↔ tool 的配对，与 ⑥ 同一条约束）；system / user / assistant
+/// 一个字不动。全裁完仍超就返回 `false`，调用方打日志照跑。
+pub fn trim_to_budget(messages: &mut [Message], budget: usize) -> bool {
+    let mut total = estimate_tokens(messages);
+    if total <= budget {
+        return true;
+    }
+    for m in messages.iter_mut().filter(|m| m.role == Role::Tool) {
+        if total <= budget {
+            break;
+        }
+        let len = m.content.chars().count();
+        let placeholder = crate::texts::tool_result_trimmed(len);
+        let new_len = placeholder.chars().count();
+        if new_len >= len {
+            continue; // 已经是占位（或本来就短），裁它省不了什么
+        }
+        m.content = placeholder;
+        total = total - len + new_len;
+    }
+    total <= budget
+}
+
 /// 预埋块能看到的材料（CC3：只放现成的；T0c 贯通 Services 时再加字段）。
 pub struct BlockCtx<'a> {
     pub session: &'a Session,

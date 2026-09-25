@@ -63,6 +63,11 @@ pub fn attributed_line(name: &str, text: &str) -> String {
     format!("[{name}] {text}")
 }
 
+/// 上下文超预算时，旧的工具结果被替换成这一句（CC3 ⑦）。带原长，模型知道那里原本有东西。
+pub fn tool_result_trimmed(original_chars: usize) -> String {
+    format!("[这条工具结果太长，已从上下文省略（原 {original_chars} 字）；需要的话重新调用工具]")
+}
+
 pub fn omitted_turns(omitted: usize) -> String {
     format!("[中间省略 {omitted} 轮]")
 }
