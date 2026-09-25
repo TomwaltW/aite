@@ -1272,6 +1272,8 @@ app 代码里没有 `use` 新 crate、没有建 `features/*.rs`。
   真判据交 CI 的 `sandbox-docker`（本 PR 上绿）。
 - **镜像参数的「默认值建绿」在云端用的是注入 CA 的副本**，不是仓库那份原样；仓库那份原样的默认路径由 CI 的 `compose-smoke` 判（本 PR 上绿）。
   国内镜像站（tuna / aliyun / ustc / goproxy.cn）在云端全被网络策略拒，**没有一个国内取值是实测过的**，runbook 里的国内取值都是文档值，待大陆实测。
+- 派单 §7 的 `git diff --name-only origin/main...HEAD`「全部落在 §3 可写面内」**差一个文件**：`review/p1/cc1-crates-patch.py` 不在原卡可写面里。
+  它是总管在会话里选「工作项 6 转成补丁脚本」之后才有的，位置照 `CLAUDE.md`「守卫」一节「在 `review/` 下写补丁脚本」的惯例；其余 9 个文件都在可写面内。
 - 派单 §7 的 `gh pr checks`：云端没有 `gh`，用 GitHub MCP 读 check runs：`checks`、`compose-smoke`、`sandbox-docker` 在推送过的 head 上都是 `success`
   （收尾推送之后的那次见 PR 页面）。
 
