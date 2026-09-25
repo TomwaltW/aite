@@ -305,7 +305,10 @@ async fn context_budget_trims_oldest_tool_results() {
     );
     assert_eq!(
         last[0].content,
-        aite_worker::texts::tool_result_trimmed(20_000)
+        // CC3 ⑩：进上下文的是包裹过的正文，原长按包裹后的算
+        aite_worker::texts::tool_result_trimmed(
+            aite_worker::texts::wrap_external(&big).chars().count()
+        )
     );
     assert!(last[1].content.contains(&big), "中间那条没被动");
     assert!(last[2].content.contains(&big), "最新那条原样");

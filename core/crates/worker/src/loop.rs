@@ -621,9 +621,11 @@ impl AgentWorker {
         {
             content = texts::tool_error_content(err.code.as_str(), &err.message);
         }
+        // CC3 ⑩：gateway 工具的结果是外部内容，按外部数据包裹再进上下文（证据的 hash / 摘要
+        // 上面已经对原文算过了）。本地工具的固定回执是 Aite 自己写的，不包。
         Ok(ToolOutcome {
             ok: result.ok,
-            content,
+            content: texts::wrap_external(&content),
             error_code: code,
         })
     }
