@@ -129,6 +129,15 @@ make compose-build APT_MIRROR=mirrors.tuna.tsinghua.edu.cn GOPROXY=https://gopro
 
 ### 抖动记录
 
-本会话 check.sh 一共全量 / `--quick` 跑了 9 次（自检 1、验证 6、终版 2），外加仓库副本上 1 次：列在 `CLAUDE.md`「已知时序抖动」里的
-`graceful_shutdown` / `startup_recovery` / `reconnect_replay` / `hold_spends_scheduler_ticks_not_wall_clock` / Go 的 `internal/ingress` 与 `cmd/aite-edge`（`-race`）
-**一次都没抖**。唯一的红是 §5 的 root 问题（确定性，不是抖动）。
+本会话 check.sh 一共全量 / `--quick` 跑了 9 次（自检 1、验证 6、终版 2），外加仓库副本上 1 次，「已知时序抖动」那几条在这 10 次里都没红；
+但**这不代表它们稳**：
+
+- **`aite --test reconnect_replay` 的 `a_root_and_its_thread_followup_replayed_together` 是真竞态，单跑约 1/5 红**。
+  CC1 的 PR 上 CI `checks` 红过一次（`transcript=["再按季度画一张", "按月画个图"]、events.ignored=0`）；
+  会话里在**未改动的 main 代码**上连跑 40 次，8 次红。病根在 `control/src/plane.rs` 的 `new_session`（R7）：
+  `create_session` 落库之后、root 那条 `append_turn` 之前隔着一次 `add_reaction` 的 await，同话题并发到达的追问这时已经能经
+  `find_session_by_thread` 命中 R6、先拿到 seq=0 —— transcript 顺序反了（没有丢东西，但测试判的就是顺序）。
+  在仓库副本上试过的修法（把 `create_session` 与 root 的 `append_turn` 放进同一段 `turn_seq_lock` 临界区、ack 挪到临界区外）：
+  连跑 40 次 0 红，`aite-control` / `aite` 全部测试绿。修法归 `control/**` 的主人（W1 是 CC2），见 CC1 回执第 8 节。
+- 其余几条（`graceful_shutdown` / `startup_recovery` / `hold_spends_scheduler_ticks_not_wall_clock` / Go 的 `internal/ingress` 与 `cmd/aite-edge`）本会话没见红，没专门连跑。
+- §5 的 root 问题是确定性的，不是抖动。

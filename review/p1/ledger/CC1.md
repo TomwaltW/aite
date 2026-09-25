@@ -726,7 +726,31 @@ WARN 的真实原因是 Docker Hub 429（日志里 `python:3.11-slim … 429 Too
 - 自检冷启动（旧 check.sh）：第 1.4 节，`real 7m30.350s`，890/7。
 - 终版第一次（清掉 `core/target` 后冷编）：`real 5m58.476s`，全部通过。
 - 终版第二次（热）：`real 0m42.042s`，全部通过。
-- 两次终版都没有时序抖动；本会话 9 次 check.sh + 1 次副本上的全量，「已知时序抖动」那几条一次都没红。
+- 两次终版都没有时序抖动；本会话 9 次 check.sh + 1 次副本上的全量，「已知时序抖动」那几条都没红——**但见 4.1：这不代表它们稳**。
+
+### 4.1 CI 上的 `reconnect_replay` 红（不是本 PR 的，是 R7 的真竞态）
+
+推到 `5301616` 之后 CI 的 `checks` 红在 `B cargo test（全量）`：
+
+```
+test a_root_and_its_thread_followup_replayed_together ... FAILED
+thread 'a_root_and_its_thread_followup_replayed_together' (6338) panicked at crates/app/tests/reconnect_replay.rs:784:9:
+并发重推只许落在两种结局上：追问并进同一份 transcript（ignored=0），或者它抢在 root 前面、按 R8 被丢掉并记一笔（ignored=1）。实际 transcript=["再按季度画一张", "按月画个图"]、events.ignored=0 —— 这是第三种：有东西静悄悄没了。计数器：{}
+test result: FAILED. 10 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+error: test failed, to rerun pass `-p aite --test reconnect_replay`
+```
+
+- **不是本 PR 的**：本 PR 一行 Rust 都没改；`checks` job 只多了 B9 一步，排在失败那步之后。同一份 Rust 代码在上一次 CI（`d915cf7`）上是绿的。
+- **在未改动的 main 代码上复现**：会话里 `cargo test -q -p aite --test reconnect_replay` 连跑 40 次，**8 次红**（都是这一条），32 次绿。
+- **病根**（`core/crates/control/src/plane.rs` 的 `new_session`，R7）：`self.store.create_session(&session)` 落库之后，先 `await` 一次
+  `platform.add_reaction`，才 `append_turn` root 那条。同话题并发到达的追问在这个窗口里 `find_session_by_thread` 已经命中 → R6
+  `continue_session` → 它的 `append_turn` 先拿到 seq=0，root 那条变成 seq=1。于是 transcript 是 `["再按季度画一张", "按月画个图"]`、
+  `ignored=0`——两句都在，顺序反了；测试只认「正序并进」或「按 R8 丢弃」两种形状。BB1 派单里记过「它想防的竞态是真会发生的」，这就是那个竞态。
+- **修法（在仓库副本上试过，没进本 PR）**：把 `create_session` 与 root 那条 `append_turn` 放进同一段 `turn_seq_lock` 临界区（拆出一个
+  「调用方已持锁」的 `append_turn_locked`），ack 挪到临界区之外（别让平台往返攥着全局锁）。副本上：`reconnect_replay` 连跑 **40 次 0 红**；
+  `cargo test -p aite-control`、`cargo test -p aite` 全绿；`clippy -p aite-control -D warnings` 绿；rustfmt 过。行为上唯一的变化：
+  ack 表情现在落在 root 的 turn 写完之后（写 turn 失败时不再先贴 ack）。diff 见第 8 节那一行。
+- `control/**` 在 W1 归 CC2（「`control/**` 这一波只有你一个主人」），所以本 PR 不改它；记账转给 CC2，并在 PR 上留了一条说明。
 
 终版第一次：
 
@@ -1277,6 +1301,59 @@ app 代码里没有 `use` 新 crate、没有建 `features/*.rs`。
 | EE5 解 tar.gz 归档需要的 crate 不在 workspace 依赖表里 | 新第三方依赖要先批 | H1 类审批（总管）；或 EE5 改走 GitLab 的 zip / 逐文件 API 绕开 |
 | 云端建不出沙箱镜像（TLS 拦截代理 + Docker Hub 429）；要在云端跑 docker 组，得让 docker 构建信任代理 CA（例如 cloud-setup 里给 dockerd 配 CA、或沙箱 Dockerfile 支持可选的额外 CA） | 改沙箱 Dockerfile 是 CC12 的面；改 setup 要贴回环境 | CC12（可选 CA 参数）/ 总管（环境设置）；否则一律以 CI `sandbox-docker` 为准 |
 | `apt-get update` 抓取失败不退非 0，`APT_MIRROR` 写错时 core builder 那层不红（整次构建仍红在运行层） | 改错误模式会改变默认路径的行为 | EE14 评估（离线包 / 多架构时一起） |
+| **R7 的竞态**：`reconnect_replay` 的 `a_root_and_its_thread_followup_replayed_together` 约 1/5 红（4.1），修法见下面的 diff（副本上 40/40 绿） | `core/crates/control/**` 不在本轨可写面；W1 归 CC2 | **CC2**（或总管另开一个小修复）；合并之前任何 PR 的 `checks` 都可能被它随机弄红 |
+
+R7 竞态的修法（在仓库副本上验过，未入库）：
+
+```diff
+--- a/core/crates/control/src/plane.rs
++++ b/core/crates/control/src/plane.rs
+@@ -1040,7 +1040,17 @@ impl InProcessControlPlane {
+             last_active_at: now,
+             archived_at: None,
+         };
+-        self.store.create_session(&session).await?;
++        // 建会话与写 root 那条 turn 在同一段 seq 临界区里：会话一落库，同话题并发到达的
++        // 追问就能经 find_session_by_thread 命中 R6；root 的 turn 若还没写，追问先拿到
++        // seq=0，transcript 顺序就反了。ack 挪到临界区之外，别让平台往返攥着全局的锁。
++        {
++            let _seq_guard = self.turn_seq_lock.lock().await;
++            self.store.create_session(&session).await?;
++            if !text.is_empty() {
++                self.append_turn_locked(&session, ev, TurnRole::User, text)
++                    .await?;
++            }
++        }
+         if react {
+             // ack 失败不影响建任务（Python 的 contextlib.suppress）
+             if let Err(e) = self
+@@ -1052,7 +1062,6 @@ impl InProcessControlPlane {
+             }
+         }
+         if !text.is_empty() {
+-            self.append_turn(&session, ev, TurnRole::User, text).await?;
+             self.start_task(&session, ev, Some(text)).await?;
+         }
+         Ok(session)
+@@ -1327,6 +1336,17 @@ impl InProcessControlPlane {
+         content: &str,
+     ) -> Result<(), IngressError> {
+         let _seq_guard = self.turn_seq_lock.lock().await;
++        self.append_turn_locked(session, ev, role, content).await
++    }
++
++    /// 同 [`Self::append_turn`]，但调用方已经持有 `turn_seq_lock`。
++    async fn append_turn_locked(
++        &self,
++        session: &Session,
++        ev: &NormalizedEvent,
++        role: TurnRole,
++        content: &str,
++    ) -> Result<(), IngressError> {
+         let recent = self.store.list_turns(&session.id, 1).await?;
+         let seq = recent.last().map(|t| t.seq + 1).unwrap_or(0);
+         self.store
+```
 
 ## 9. 没做的与原因
 
