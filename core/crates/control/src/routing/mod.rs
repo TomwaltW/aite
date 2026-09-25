@@ -20,8 +20,8 @@
 //!
 //! 不进链的：[`crate::internal`]（`submit_internal` 的落点，DD3）、[`crate::approvals`]（审批信箱，EE7）。
 use aite_contracts::{
-    CardActionKind, ChatType, ControlPlane, EventKind, EvidenceKind, IngressError, NormalizedEvent,
-    SenderKind, Session, Task, TurnRole,
+    CardActionKind, ChatType, EventKind, EvidenceKind, IngressError, NormalizedEvent, SenderKind,
+    Session, Task, TurnRole,
 };
 
 use crate::commands::{NO_SUCH_TASK_TEXT, StopTarget, is_command, stop_while_delivering_text};
@@ -239,12 +239,14 @@ impl InProcessControlPlane {
                         self.reply(ev, &stop_while_delivering_text(&task.task_no))
                             .await?
                     }
+                    // 卡片按钮不是命令，不写 `route=command`；点它的也是真人，记 `stopped_by`（CC2 ⑨）
                     StopTarget::Stoppable(task) => {
-                        self.cancel_task(
+                        self.cancel_task_by(
                             task,
                             Some(ev.anchor.message_id.clone()),
                             Some(ev.chat_id.clone()),
                             true,
+                            Some(ev.sender_id.clone()),
                         )
                         .await;
                     }
@@ -325,7 +327,7 @@ impl InProcessControlPlane {
             let stuck = stuck.clone();
             self.abandon_running(&stuck.id).await;
             let task_no = stuck.task_no.clone();
-            self.cancel_task_inner(stuck, None, None, false).await;
+            self.cancel_task_by(stuck, None, None, false, None).await;
             self.shared.bump("control.stuck_replaced");
             self.reply(
                 ev,

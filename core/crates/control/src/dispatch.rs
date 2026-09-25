@@ -1,6 +1,6 @@
 //! 任务派发（队列 → worker）、取消的收尾（证据、卡片、沙箱）、steer 目标判定。
 //! CC2 从 `plane.rs` 原样搬来；`ControlPlane::cancel_task` 的函数体搬成了
-//! [`InProcessControlPlane::cancel_task_inner`]，trait 方法留在 `plane.rs` 转调。
+//! [`InProcessControlPlane::cancel_task_by`]，trait 方法留在 `plane.rs` 转调（`issuer = None`）。
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -319,12 +319,18 @@ impl InProcessControlPlane {
 
 impl InProcessControlPlane {
     /// `ControlPlane::cancel_task` 的函数体（CC2 ① 原样搬来，trait 方法转调它）。
-    pub(crate) async fn cancel_task_inner(
+    ///
+    /// CC2 ⑨：多一个 `issuer`（谁停的）。`!stop` 与卡片 stop 按钮传发起人，写进 `cancelled`
+    /// 载荷的 `stopped_by`；trait 方法（收尾那条路）与 `!restart`、卡死替换传 `None`，
+    /// **这时整个不写这个键**（不写 `null`），载荷与 CC2 之前逐字节一致。
+    /// 在跑的任务的 `cancelled` 由 worker 写（CC3 的面），那一支靠命令证据记发起人。
+    pub(crate) async fn cancel_task_by(
         &self,
         task: Task,
         reply_to: Option<String>,
         chat_id: Option<String>,
         notify: bool,
+        issuer: Option<String>,
     ) -> Task {
         let mut task = task;
         // 与 dispatch_task 侧成对：抄 running 和落 cancelled 必须是同一个临界区，
@@ -434,6 +440,9 @@ impl InProcessControlPlane {
             let mut payload = Map::new();
             payload.insert("by".into(), Value::String("stop".into()));
             payload.insert("steps".into(), Value::from(task.steps));
+            if let Some(issuer) = issuer {
+                payload.insert("stopped_by".into(), Value::String(issuer));
+            }
             if let Err(e) = self
                 .evidence
                 .append(&task.id, EvidenceKind::Cancelled, payload)

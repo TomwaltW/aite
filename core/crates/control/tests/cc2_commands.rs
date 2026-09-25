@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 
-use aite_contracts::{ControlPlane, HistoryMessage, SessionStore, TurnRole};
-use aite_control::{InProcessControlPlane, UNKNOWN_COMMAND_TEXT, parse_command};
+use aite_contracts::{
+    CardActionKind, ControlPlane, EvidenceKind, HistoryMessage, SessionStore, TurnRole,
+};
+use aite_control::{InProcessControlPlane, ROUTE_COMMAND, UNKNOWN_COMMAND_TEXT, parse_command};
 use support::{CHAT, Harness, ROOT, ev};
 
 async fn cmd_in_thread(plane: &Arc<InProcessControlPlane>, text: &str, message_id: &str) {
@@ -294,5 +296,162 @@ async fn new_in_thread_routes_followups_to_the_new_session() {
         support::turn_texts(&h.store, &old.id).await,
         vec!["老话题"],
         "老会话一个字没多"
+    );
+}
+
+// ---- ⑨ `!stop` 记发起人；命令记 `route=command` ---------------------------
+
+/// 这个任务链上 `cancelled` 那条的载荷。
+fn cancelled_payload(h: &Harness, task_id: &str) -> serde_json::Map<String, serde_json::Value> {
+    h.evidence
+        .events(task_id)
+        .into_iter()
+        .find(|e| e.kind == EvidenceKind::Cancelled)
+        .and_then(|e| e.payload)
+        .expect("该有 cancelled")
+}
+
+#[tokio::test]
+async fn stop_records_issuer_and_command_evidence() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("跑个长活").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let task = support::active_tasks(&h.store, CHAT).await.remove(0);
+
+    plane
+        .handle_event(
+            ev().id("e2")
+                .text("!stop")
+                .mentioned(false)
+                .message_id("om_2")
+                .thread(ROOT)
+                .sender_id("ou_boss")
+                .build(),
+        )
+        .await
+        .expect("!stop");
+
+    assert_eq!(
+        h.evidence.kinds(&task.id),
+        vec![
+            EvidenceKind::TaskCreated,
+            EvidenceKind::EventReceived,
+            EvidenceKind::EventReceived,
+            EvidenceKind::Cancelled,
+        ],
+        "前两条照旧；命令证据在 cancelled 之前（finalize 之后不许再写）"
+    );
+    let command = h.evidence.received(&task.id).remove(1);
+    assert_eq!(
+        command.get("route").and_then(|v| v.as_str()),
+        Some(ROUTE_COMMAND)
+    );
+    assert_eq!(ROUTE_COMMAND, "command");
+    assert_eq!(
+        command.get("command").and_then(|v| v.as_str()),
+        Some("!stop")
+    );
+    assert_eq!(
+        command.get("sender_id").and_then(|v| v.as_str()),
+        Some("ou_boss")
+    );
+    let cancelled = cancelled_payload(&h, &task.id);
+    assert_eq!(cancelled.get("by").and_then(|v| v.as_str()), Some("stop"));
+    assert_eq!(
+        cancelled.get("stopped_by").and_then(|v| v.as_str()),
+        Some("ou_boss")
+    );
+    assert!(h.evidence.manifest(&task.id).is_some());
+}
+
+#[tokio::test]
+async fn card_stop_records_issuer_but_no_command_evidence() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("跑个长活").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let task = support::active_tasks(&h.store, CHAT).await.remove(0);
+
+    plane
+        .handle_event(
+            ev().id("e2")
+                .kind(aite_contracts::EventKind::CardAction)
+                .sender_id("ou_boss")
+                .card_action(support::card_action(
+                    "om_card",
+                    CardActionKind::Stop,
+                    Some(&task.id),
+                ))
+                .build(),
+        )
+        .await
+        .expect("卡片 stop");
+
+    assert!(
+        h.evidence
+            .received(&task.id)
+            .iter()
+            .all(|p| p.get("route").and_then(|v| v.as_str()) != Some(ROUTE_COMMAND)),
+        "卡片按钮不是命令"
+    );
+    assert_eq!(
+        cancelled_payload(&h, &task.id)
+            .get("stopped_by")
+            .and_then(|v| v.as_str()),
+        Some("ou_boss")
+    );
+}
+
+/// trait 方法（收尾那条路）传 `None`：`stopped_by` 整个不写，载荷与 CC2 之前一致。
+#[tokio::test]
+async fn trait_cancel_writes_no_stopped_by_key() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("跑个长活").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let task = support::active_tasks(&h.store, CHAT).await.remove(0);
+
+    plane.cancel_task(task.clone(), None, None, false).await;
+
+    let payload = cancelled_payload(&h, &task.id);
+    let keys: Vec<&str> = payload.keys().map(String::as_str).collect();
+    assert_eq!(keys, vec!["by", "steps"]);
+}
+
+#[tokio::test]
+async fn restart_writes_command_evidence_on_the_tasks_it_stops() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().id("e1").text("第一版方案").message_id(ROOT).build())
+        .await
+        .expect("建任务");
+    let task = support::active_tasks(&h.store, CHAT).await.remove(0);
+
+    cmd_in_thread(&plane, "!restart 换个思路重来", "om_2").await;
+
+    let command = h.evidence.received(&task.id).remove(1);
+    assert_eq!(
+        command.get("route").and_then(|v| v.as_str()),
+        Some(ROUTE_COMMAND)
+    );
+    assert_eq!(
+        command.get("command").and_then(|v| v.as_str()),
+        Some("!restart")
+    );
+    assert_eq!(
+        h.evidence.kinds(&task.id).last(),
+        Some(&EvidenceKind::Cancelled)
+    );
+    assert!(
+        cancelled_payload(&h, &task.id).get("stopped_by").is_none(),
+        "`!restart` 不记 stopped_by（只有 `!stop` 与卡片按钮记）"
     );
 }

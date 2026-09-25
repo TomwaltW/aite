@@ -316,7 +316,7 @@ impl ControlPlane for InProcessControlPlane {
         chat_id: Option<String>,
         notify: bool,
     ) -> Task {
-        self.cancel_task_inner(task, reply_to, chat_id, notify)
+        self.cancel_task_by(task, reply_to, chat_id, notify, None)
             .await
     }
 

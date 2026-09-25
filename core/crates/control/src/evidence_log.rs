@@ -9,6 +9,8 @@ use crate::card::{MAX_TITLE_CHARS, clip};
 pub const ROUTE_NEW_TASK: &str = "new_task";
 /// `event_received` 的 `route`：这条是**任务跑到一半**排进来的追问（R6 steer）。
 pub const ROUTE_STEER: &str = "steer";
+/// `event_received` 的 `route`：一条命令作用到了这个任务上（CC2 ⑨，另带 `command` 键）。
+pub const ROUTE_COMMAND: &str = "command";
 
 /// `event_received` 的 payload。
 ///

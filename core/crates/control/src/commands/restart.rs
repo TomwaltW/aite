@@ -76,6 +76,8 @@ impl InProcessControlPlane {
                 }
                 match StopTarget::of_existing(t) {
                     StopTarget::Stoppable(t) => {
+                        // CC2 ⑨：只给真会被 cancel 的写命令证据（Delivering 一律不写）
+                        self.record_command(ev, &t, "!restart").await;
                         self.cancel_task(t, None, None, false).await;
                         stopped += 1;
                     }

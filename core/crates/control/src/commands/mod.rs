@@ -5,7 +5,11 @@
 //! 停用的命令走「未知命令」那条路，计数器仍是 `commands!<名字>`。
 use std::collections::HashSet;
 
-use aite_contracts::{IngressError, NormalizedEvent, Session, Task};
+use serde_json::Value;
+
+use aite_contracts::{EvidenceKind, IngressError, NormalizedEvent, Session, Task};
+
+use crate::evidence_log::{ROUTE_COMMAND, event_payload};
 
 use crate::lock;
 use crate::plane::InProcessControlPlane;
@@ -206,6 +210,41 @@ impl StopTarget {
 }
 
 impl InProcessControlPlane {
+    /// 命令作用到一个具体任务时，在它的链上记一条 `event_received`（`route = "command"` +
+    /// `command`，CC2 ⑨），让「谁、用哪条命令停的」在证据里查得到。
+    ///
+    /// **只给真会走 `cancel_task` 的目标写**（`!stop` 的 `Stoppable`、`!restart` 计进 `stopped`
+    /// 的那些）；`Delivering` 一律不写 —— 它马上会 `finish()` 落 manifest，写在后面会让
+    /// manifest 的 `root_hash` / `event_count` 过期。调用方负责先写这条、再 `cancel_task`。
+    ///
+    /// 写之前按 id 重读：已是终态或已经 finalize（有 `evidence_root_hash`）就跳过。重读与追加
+    /// 之间在跑的任务仍可能恰好收尾 —— 这个残余窗口要动 worker 才修得掉（CC3 的面），这里不修。
+    /// 写失败只记日志：命令本身已经认了，不能因为一条证据写不进去就不停。
+    pub(crate) async fn record_command(&self, ev: &NormalizedEvent, task: &Task, command: &str) {
+        match self.store.get_task(&task.id).await {
+            Ok(Some(fresh))
+                if !fresh.status.is_terminal()
+                    && fresh
+                        .evidence_root_hash
+                        .as_deref()
+                        .is_none_or(|h| h.is_empty()) => {}
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(target: "aite.control", task = %task.id, error = %e, "control.command_evidence_reread_failed");
+                return;
+            }
+        }
+        let mut payload = event_payload(ev, ROUTE_COMMAND, None);
+        payload.insert("command".into(), Value::String(command.into()));
+        if let Err(e) = self
+            .evidence
+            .append(&task.id, EvidenceKind::EventReceived, payload)
+            .await
+        {
+            tracing::warn!(target: "aite.control", task = %task.id, error = %e, "control.command_evidence_failed");
+        }
+    }
+
     // ---- R5 --------------------------------------------------------------
 
     /// 分发（R5）。注册表：每条命令的 `ENABLED` 在它自己的文件里；停用的走「未知命令」。

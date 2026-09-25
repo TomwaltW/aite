@@ -1,5 +1,5 @@
 //! `!stop`。CC2 从 `plane.rs` 原样搬来（命令本体、找目标、那几句文案）。
-use aite_contracts::{ControlPlane, IngressError, NormalizedEvent, Session};
+use aite_contracts::{IngressError, NormalizedEvent, Session};
 
 use super::{StopTarget, normalize_task_no};
 use crate::plane::InProcessControlPlane;
@@ -66,11 +66,14 @@ impl InProcessControlPlane {
                     .await
             }
             StopTarget::Stoppable(task) => {
-                self.cancel_task(
+                // CC2 ⑨：先写命令证据、再取消（「不在跑」那一支会 finalize，写在后面 manifest 就对不上）
+                self.record_command(ev, &task, "!stop").await;
+                self.cancel_task_by(
                     task,
                     Some(ev.anchor.message_id.clone()),
                     Some(ev.chat_id.clone()),
                     true,
+                    Some(ev.sender_id.clone()),
                 )
                 .await;
                 Ok(())

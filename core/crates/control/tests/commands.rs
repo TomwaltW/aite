@@ -876,3 +876,25 @@ async fn restart_stops_what_it_can_and_names_what_it_cannot() {
         "两半各说各的，一句话里说清"
     );
 }
+
+/// CC2 ⑨：对交付中的任务发 `!stop`，**不写命令证据**（它马上会 `finish()` 落 manifest，
+/// 写在后面会让 manifest 过期）—— 链的长度不变，也没有 `route=command` 那条。
+#[tokio::test]
+async fn stop_on_an_answering_task_writes_no_command_evidence() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+    let before = h.evidence.events(&task.id).len();
+
+    cmd(&plane, &format!("!stop {}", task.task_no), "om_9").await;
+
+    assert_eq!(
+        h.evidence.events(&task.id).len(),
+        before,
+        "交付中任务的链不许动"
+    );
+    assert!(
+        h.evidence
+            .received(&task.id)
+            .iter()
+            .all(|p| p.get("route").and_then(|v| v.as_str()) != Some("command")),
+    );
+}
