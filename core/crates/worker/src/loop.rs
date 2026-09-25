@@ -24,8 +24,8 @@ use sha2::{Digest, Sha256};
 
 use crate::card::{CardCoalescer, MAX_TITLE_CHARS, clip};
 use crate::context::{
-    BlockCtx, CONTEXT_MAX_TOKENS, assemble, attributed_turns, estimate_tokens, load_system_prompt,
-    trim_to_budget,
+    BlockCtx, CONTEXT_MAX_TOKENS, assemble, attributed_turns, estimate_tokens, history_thread,
+    load_system_prompt, trim_to_budget,
 };
 use crate::deps::WorkerDeps;
 use crate::local_tools::{self, parse_final};
@@ -393,7 +393,7 @@ impl AgentWorker {
             .read_history(
                 &ctx.session.chat_id,
                 self.config.feishu.history_window,
-                None,
+                history_thread(&ctx.session),
             )
             .await
         {

@@ -29,7 +29,7 @@ pub mod skills;
 mod transcript;
 
 pub use attachments::{ATTACHMENT_HEADER, attachments_message};
-pub use history::{HISTORY_HEADER, history_message};
+pub use history::{HISTORY_HEADER, history_message, history_thread};
 pub use transcript::{
     HEAD_TURNS, MAX_TRANSCRIPT_TURNS, TAIL_TURNS, attributed_turns, transcript_messages,
 };

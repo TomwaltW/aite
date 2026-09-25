@@ -83,6 +83,8 @@ struct PlatformState {
     files: Vec<OutboundFile>,
     reactions: Vec<(String, ReactionKind)>,
     history: Vec<HistoryMessage>,
+    /// `read_history` 每次被问的 thread_id（CC3 ⑧）
+    history_threads: Vec<Option<String>>,
     downloads: Vec<(String, String)>,
     n: u64,
 }
@@ -96,6 +98,11 @@ pub struct FakePlatform {
 impl FakePlatform {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// `read_history` 每次被问的 thread_id，按先后（CC3 ⑧）。
+    pub fn history_threads(&self) -> Vec<Option<String>> {
+        self.state.lock().expect("platform").history_threads.clone()
     }
 
     pub fn set_history(&self, rows: Vec<HistoryMessage>) {
@@ -220,9 +227,10 @@ impl PlatformPort for FakePlatform {
         &self,
         _chat_id: &str,
         limit: u32,
-        _thread_id: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<Vec<HistoryMessage>, PlatformError> {
-        let st = self.state.lock().expect("platform");
+        let mut st = self.state.lock().expect("platform");
+        st.history_threads.push(thread_id.map(str::to_string));
         let start = st.history.len().saturating_sub(limit as usize);
         Ok(st.history[start..].to_vec())
     }

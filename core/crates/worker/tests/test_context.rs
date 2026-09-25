@@ -312,6 +312,27 @@ async fn context_budget_trims_oldest_tool_results() {
     assert!(aite_worker::context::estimate_tokens(&model.call(3)) <= 50_000);
 }
 
+/// CC3 ⑧：会话挂在话题上 → 读这个话题的历史；没有话题 → 仍读群窗口。
+#[tokio::test]
+async fn thread_history_window_used_in_thread() {
+    let mut h = Harness::new();
+    h.seed("帮我出个图", Vec::new()).await;
+    h.run(std::sync::Arc::new(ScriptedModel::new(vec![final_turn(
+        "好",
+    )])))
+    .await;
+    assert_eq!(h.platform.history_threads(), vec![Some(ROOT.to_string())]);
+
+    let mut h = Harness::new();
+    h.session.anchor.thread_id = None;
+    h.seed("帮我出个图", Vec::new()).await;
+    h.run(std::sync::Arc::new(ScriptedModel::new(vec![final_turn(
+        "好",
+    )])))
+    .await;
+    assert_eq!(h.platform.history_threads(), vec![None]);
+}
+
 // ---- W9 -----------------------------------------------------------------
 
 #[test]
