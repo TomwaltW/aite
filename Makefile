@@ -13,9 +13,24 @@ GO ?= go
 AITE := core/target/debug/aite
 SUITE ?= evals/p0
 
+# ---- 镜像构建参数（2026-09-25 CC1）：`make compose-build` 总是把这五个作为 --build-arg 传下去 ----
+# 默认值 = 上游，与两份 Dockerfile 的 ARG 默认值逐字一致，所以不传时建出来的东西与以前相同。
+# 国内取值（私有 / 内网镜像仓库、goproxy.cn、tuna / aliyun 的 apt、ustc 的 sparse 源、内网制品库里的 protoc）
+# 只写在 docs/p1/cloud-runbook.md，不当默认值。
+# 注意 make 会把**同名环境变量**读进来（`?=` 只在未定义时赋值）：shell 里 export 了 GOPROXY 的话，
+# compose-build 就用它 —— 这是有意的（本机已经配好的 Go 代理一并带进镜像）。
+# `docker compose --profile images build` 的全局 --build-arg 也会发给 sandbox-image（CC12 的沙箱
+# Dockerfile），所以 BASE_REGISTRY（默认 docker.io）/ APT_MIRROR（默认空 = 上游，非空 = 镜像主机名）
+# 的名字、默认值、语义与那边一致；那份 Dockerfile 没声明的参数 docker 只告警、不报错。
+BASE_REGISTRY ?= docker.io
+GOPROXY ?= https://proxy.golang.org,direct
+PROTOC_URL ?= https://github.com/protocolbuffers/protobuf/releases/download
+CARGO_REGISTRY ?=
+APT_MIRROR ?=
+
 .DEFAULT_GOAL := help
-.PHONY: help build test lint lock c2 evals evals-list proto-gen docker-image \
-        compose-config compose-build compose-up compose-down compose-ps compose-logs check clean
+.PHONY: help build test lint lock c2 evals evals-list evals-p1 proto-gen docker-image docker-test \
+        compose-config compose-build compose-up compose-down compose-ps compose-logs check clean cloud-setup
 
 help:  ## 列出所有 target
 	@grep -E '^[a-zA-Z0-9_ -]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -44,11 +59,29 @@ evals: build  ## B8 跑 P0 场景，最后一行 passed k/10
 evals-list: build  ## 列出场景名
 	$(AITE) evals run $(SUITE) --list
 
+# 与 scripts/check.sh 的 B9 同一个判空条件：load_suite 对「目录不存在 / 没有 yaml」都报错，
+# 所以先在 shell 里判，没场景就 skip 退 0。
+evals-p1: build  ## B9 跑 P1 场景（evals/p1 没场景就打 skip 退 0）
+	@if ls evals/p1/*.yaml >/dev/null 2>&1 || ls evals/p1/*.yml >/dev/null 2>&1; then \
+		$(AITE) evals run evals/p1 --platform fake --model scripted; \
+	else echo "B9 skip：evals/p1 尚无场景"; fi
+
 proto-gen:  ## 重生成 edge/gen/aitepb（只有 R0/RΩ 在 AITE_RELOCK=1 下跑；Rust 侧由 build.rs 自动生成）
 	protoc -I proto --go_out=edge --go_opt=module=aite/edge --go-grpc_out=edge --go-grpc_opt=module=aite/edge proto/aite/v1/*.proto
 
 docker-image:  ## 构建沙箱镜像（内容归 R2）
 	docker build -t aite-sandbox:p0 docker/sandbox
+
+# 真容器那组：与 scripts/check.sh --docker、CI 的 sandbox-docker job 同口径。
+# 测试红了也照样数遗留容器（两件事分开报），断言写法对齐 ci.yml「收干净」那一步。
+docker-test: docker-image  ## 真容器那组：-tags docker 的沙箱测试 + 不许留下 aite.task 容器
+	@cd edge && $(GO) test -tags docker ./internal/sandbox/... -count=1; c=$$?; \
+	n=$$(docker ps -a --filter label=aite.task -q | wc -l | tr -d ' '); \
+	echo "遗留 aite.task 容器：$$n"; \
+	test "$$c" = 0 && test "$$n" = 0
+
+cloud-setup:  ## 云端环境安装脚本（与 claude.ai/code 环境设置里贴的是同一份）
+	bash scripts/cloud-setup.sh
 
 # ---- compose：两个常驻进程的容器形态 -----------------------------------------
 # 密钥清单只写在这一处，下面三个 target 复用它。`docker compose config` 会把 ${VAR}
@@ -59,8 +92,13 @@ compose-config:  ## compose 编排可解析（与 .github/workflows/ci.yml 同�
 	$(COMPOSE_NOSECRET) docker compose config -q
 	@$(COMPOSE_NOSECRET) docker compose config --services | sort | tr '\n' ' '; echo
 
-compose-build:  ## 建三个镜像：core、edge、沙箱（沙箱在 images profile 里）
-	docker compose --profile images build
+compose-build:  ## 建三个镜像：core、edge、沙箱（沙箱在 images profile 里）；透传五个镜像参数
+	docker compose --profile images build \
+		--build-arg "BASE_REGISTRY=$(BASE_REGISTRY)" \
+		--build-arg "GOPROXY=$(GOPROXY)" \
+		--build-arg "PROTOC_URL=$(PROTOC_URL)" \
+		--build-arg "CARGO_REGISTRY=$(CARGO_REGISTRY)" \
+		--build-arg "APT_MIRROR=$(APT_MIRROR)"
 
 # 两个容器以非 root 跑（2026-09-13 AA1 降权），代价是起飞前**宿主机这一侧**要先备三件事。
 # 这一段与 .github/workflows/ci.yml 的「容器身份」那一步同源 —— 那边是 runner 版，这边是本机版。
