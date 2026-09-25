@@ -315,6 +315,22 @@ impl InProcessControlPlane {
             steer_target(&active, &owned, &running)
         };
 
+        // 卡死替换（CC2 ④）：追问撞上一个在跑、却很久没进展的任务 → 停掉它、按这条消息新开
+        if let Some(stuck) = target.as_ref().filter(|t| self.is_stuck(t)) {
+            let stuck = stuck.clone();
+            self.abandon_running(&stuck.id).await;
+            let task_no = stuck.task_no.clone();
+            self.cancel_task_inner(stuck, None, None, false).await;
+            self.shared.bump("control.stuck_replaced");
+            self.reply(
+                ev,
+                &stuck_task_replaced_text(&task_no, self.stuck_after.num_minutes()),
+            )
+            .await?;
+            self.start_task(&session, ev, None).await?;
+            return Ok(());
+        }
+
         if let Some(target) = target {
             // 先写证据再排队，和 `start_task` 一个顺序：证据链宁可少一条也不撒谎，
             // 不能出现「任务收到了这句追问，但链上查不到它是什么时候来的」。
@@ -338,4 +354,15 @@ impl InProcessControlPlane {
         self.start_task(&session, ev, None).await?;
         Ok(())
     }
+
+    /// 卡死 = 本进程正在跑它，而它的 `updated_at`（worker 每步落库时刷新）离现在超过阈值。
+    fn is_stuck(&self, task: &Task) -> bool {
+        lock(&self.shared.running).contains(&task.id)
+            && self.now() - task.updated_at > self.stuck_after
+    }
+}
+
+/// 卡死替换的那一句（CC2 ④）。
+pub fn stuck_task_replaced_text(task_no: &str, minutes: i64) -> String {
+    format!("任务 {task_no} 超过 {minutes} 分钟没有进展，已停止，按这条消息重新开始。")
 }

@@ -25,6 +25,12 @@ use crate::lock;
 use crate::queue::DispatchQueue;
 use crate::reaper::REAPER_INTERVAL_SEC;
 
+/// 在跑任务的 `updated_at`（worker 每步落库时刷新）离现在超过这么久，就算卡死（CC2 ④）。
+///
+/// 按模型单次调用超时的上界取：今天是 120s，CC6 要改成 600s；一步里还有工具调用，
+/// 所以给到 15 分钟，免得把一步慢一点的正常任务当成卡死。
+pub const STUCK_AFTER_SEC: i64 = 15 * 60;
+
 /// 墙钟。Python 用的是 `datetime.now(UTC)`，这里显式化成可注入，测试才能钉住时间。
 pub type WallClock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// 可注入的 sleep（reaper 的节奏）。Python 用 `asyncio.sleep`。
@@ -73,6 +79,9 @@ pub struct PlaneState {
 /// （cancelled → running）、`cancel_task` 的同序对偶（cancelled → running）、
 /// `continue_session` 的 steer 目标判定（owned → running）与 `FinishGuard::drop`
 /// （owned → steer）。加新的组合前先回来看这一行。
+///
+/// `abandon`（CC2 ④）**从不与别的锁同时持有**：登记、摘除、查表各自单独取一次锁，
+/// 所以它不进上面这条序，也不产生新的多锁组合。
 pub(crate) struct Shared {
     pub(crate) queue: DispatchQueue,
     /// 待合并的追问文本，只在内存（进程一换就没了，见 test_steer_routing ①）
@@ -84,6 +93,9 @@ pub(crate) struct Shared {
     /// 本进程接手过、还没收尾的（排队中 + 在跑）；孤儿判定靠它
     pub(crate) owned: Mutex<HashSet<String>>,
     pub(crate) counters: Mutex<BTreeMap<String, i64>>,
+    /// 在跑任务的「放弃」信号（CC2 ④）：卡死替换时 `notify_one`，`dispatch_task` 里的
+    /// `select!` 收到就丢掉 worker 的 future。只在任务开跑期间有条目。
+    pub(crate) abandon: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 impl Shared {
@@ -119,6 +131,8 @@ pub struct InProcessControlPlane {
     /// 派发并发上限（CC2 ②）。默认 1 = 全局串行，走原 `dispatch_loop` 一字不改；
     /// 大于 1 时同一会话仍串行、跨会话至多这么多个（见 `dispatch_loop_parallel`）。
     pub(crate) max_parallel: usize,
+    /// 在跑任务多久没进展算卡死（CC2 ④）。见 [`STUCK_AFTER_SEC`]。
+    pub(crate) stuck_after: chrono::Duration,
 }
 
 impl InProcessControlPlane {
@@ -146,9 +160,11 @@ impl InProcessControlPlane {
                 running: Mutex::new(HashSet::new()),
                 owned: Mutex::new(HashSet::new()),
                 counters: Mutex::new(BTreeMap::new()),
+                abandon: Mutex::new(HashMap::new()),
             }),
             turn_seq_lock: tokio::sync::Mutex::new(()),
             max_parallel: 1,
+            stuck_after: chrono::Duration::seconds(STUCK_AFTER_SEC),
         }
     }
 
@@ -176,6 +192,12 @@ impl InProcessControlPlane {
     /// T0c 把它接到 `WorkerConfig.max_parallel_tasks`（默认 4）。`run_pending` 不看它，始终串行。
     pub fn with_max_parallel(mut self, n: usize) -> Self {
         self.max_parallel = n.max(1);
+        self
+    }
+
+    /// 改卡死阈值（测试）。默认 [`STUCK_AFTER_SEC`]。
+    pub fn with_stuck_after_sec(mut self, secs: i64) -> Self {
+        self.stuck_after = chrono::Duration::seconds(secs.max(0));
         self
     }
 

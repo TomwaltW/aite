@@ -50,6 +50,19 @@ impl Drop for TaskDoneGuard<'_> {
     }
 }
 
+/// 放弃信号的登记（CC2 ④）。声明在 `RunningGuard` 之前，所以晚于它 drop：
+/// 先摘 `running`、再摘这张表，两把锁各取一次、不嵌套。
+pub(crate) struct AbandonGuard<'a> {
+    pub(crate) shared: &'a Shared,
+    pub(crate) task_id: &'a str,
+}
+
+impl Drop for AbandonGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.shared.abandon).remove(self.task_id);
+    }
+}
+
 /// `_dispatch_task` 那圈 `finally`。
 pub(crate) struct RunningGuard<'a> {
     pub(crate) shared: &'a Shared,
@@ -190,6 +203,13 @@ impl InProcessControlPlane {
         // 再排队，而 worker 的 `_build_messages` 是现在才去 list_turns。不清掉的话第一步
         // 开头会把同一句话再注入一遍，上下文里出现两条一样的用户发言。
         lock(&self.shared.steer).remove(task_id);
+        // 放弃信号：准入临界区之后单独取一次锁登记（不与 cancelled / running 嵌套）
+        let abandon = Arc::new(tokio::sync::Notify::new());
+        lock(&self.shared.abandon).insert(task_id.to_string(), Arc::clone(&abandon));
+        let _abandon = AbandonGuard {
+            shared: &self.shared,
+            task_id,
+        };
         let _running = RunningGuard {
             shared: &self.shared,
             task_id,
@@ -208,8 +228,34 @@ impl InProcessControlPlane {
                 Arc::new(move || lock(&shared.cancelled).contains(&id))
             },
         };
-        worker.run(task, session, Some(initiator), hooks).await;
+        // 卡死替换（CC2 ④）：信号不来时与直接 `.await` 可观测地完全一样；信号来了就丢掉
+        // worker 的 future，三个 guard 照原来的 drop 语义收尾，派发循环接着取下一个。
+        tokio::select! {
+            _ = worker.run(task, session, Some(initiator), hooks) => {}
+            _ = abandon.notified() => {
+                tracing::warn!(target: "aite.control", task = %task_id, "control.task_abandoned 卡死的任务被放弃");
+            }
+        }
         Ok(())
+    }
+
+    /// 把一个卡死的在跑任务从 worker 手上拿下来（CC2 ④）：发放弃信号，等它从 `running` 里消失。
+    ///
+    /// 查表得 `None` = 任务在判卡死和查表之间自己收了尾，不发信号（调用方随后的 `cancel_task`
+    /// 按 id 重读会处理终态）。等待有上限：万一 worker 的 future 迟迟不被丢掉，也不能把入口卡住。
+    pub(crate) async fn abandon_running(&self, task_id: &str) {
+        let signal = lock(&self.shared.abandon).get(task_id).cloned();
+        let Some(signal) = signal else {
+            return;
+        };
+        signal.notify_one();
+        for _ in 0..500 {
+            if !lock(&self.shared.running).contains(task_id) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tracing::warn!(target: "aite.control", task = %task_id, "control.abandon_timeout 放弃信号发出 5s 仍在跑");
     }
 
     // ---- 取消（!stop / 卡片 stop 按钮，§3.3）-----------------------------

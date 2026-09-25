@@ -216,6 +216,31 @@ impl TickingWallClock {
     }
 }
 
+/// 可以手动往前拨的墙钟（CC2 ④ 卡死判定要「过了 N 分钟」）。每次取也加 1 毫秒，理由同上。
+pub struct SettableWallClock {
+    next: Mutex<DateTime<Utc>>,
+}
+
+impl SettableWallClock {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            next: Mutex::new(Utc::now()),
+        })
+    }
+    pub fn advance_sec(&self, secs: i64) {
+        *lk(&self.next) += chrono::Duration::seconds(secs);
+    }
+    pub fn as_wall(self: &Arc<Self>) -> WallClock {
+        let me = Arc::clone(self);
+        Arc::new(move || {
+            let mut g = lk(&me.next);
+            let now = *g;
+            *g = now + chrono::Duration::milliseconds(1);
+            now
+        })
+    }
+}
+
 /// 替掉 reaper 的 `sleep`：前 `limit-1` 次立刻返回（让循环转起来），
 /// 第 `limit` 次永久挂住 —— 否则一个不 yield 的假 sleep 会把 reaper 变成空转。
 ///
@@ -1013,6 +1038,8 @@ pub enum WorkerAction {
     /// CC2 ②：任务已不在活跃口径里、却仍在 worker 手上 —— 这时同话题的追问会在**同一个会话**
     /// 里新建任务，用来验「同会话串行」。
     DeliverThenHold(String),
+    /// 卡死：永远不返回、也不看取消标志（CC2 ④ 的卡死替换靠丢掉这个 future 收场）。
+    Hang,
 }
 
 /// 按脚本出牌的 TaskWorker（真 AgentWorker 是 R5 的 crate）。
@@ -1148,6 +1175,7 @@ impl TaskWorker for ScriptedWorker {
                 }
                 task
             }
+            Some(WorkerAction::Hang) => std::future::pending().await,
             Some(WorkerAction::WaitForCancel) => {
                 loop {
                     let cancelled = (hooks.is_cancelled)();

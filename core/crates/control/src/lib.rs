@@ -47,8 +47,11 @@ pub use commands::{
 };
 pub use evidence_log::{ROUTE_NEW_TASK, ROUTE_STEER};
 pub use ingress::{Ingress, SLOW_CALLBACK_SEC};
-pub use plane::{ControlDeps, InProcessControlPlane, PlaneState, SleepFn, WallClock};
+pub use plane::{
+    ControlDeps, InProcessControlPlane, PlaneState, STUCK_AFTER_SEC, SleepFn, WallClock,
+};
 pub use reaper::REAPER_INTERVAL_SEC;
+pub use routing::stuck_task_replaced_text;
 
 /// 取锁，中毒也不 panic（§7.7：`unwrap/expect` 不落在运行期可失败的路径上）。
 ///
