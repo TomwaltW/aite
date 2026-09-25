@@ -6,9 +6,18 @@
 # edge 不需要 proto/：edge/gen/aitepb 是入库的生成码（Makefile 的 proto-gen 只有
 # R0/RΩ 在 AITE_RELOCK=1 下重生成）。所以这里只 COPY edge/。
 
+# ---- 镜像构建参数（2026-09-25 CC1；`make compose-build` 透传，国内取值见 docs/p1/cloud-runbook.md）----
+# 不传 = 上游、与加它们之前逐字等价（CI 的 `docker compose build` 那条路不变）。语义与
+# docker/core/Dockerfile 顶上那段同名参数逐字一致：
+#   BASE_REGISTRY  基础镜像仓库（默认 docker.io），只在 FROM 行里用 → 只要这一条全局声明。
+#   APT_MIRROR     空 = 不动 apt 源；非空 = 镜像主机名，运行层 FROM 之后重新声明。
+#   GOPROXY        就是下面 BB3 那个 ARG。
+# PROTOC_URL / CARGO_REGISTRY 只有 core 用；这里收到了 docker 只告警、不报错。
+ARG BASE_REGISTRY=docker.io
+
 # ---------------------------------------------------------------- builder
 ARG GO_VERSION=1.27.1
-FROM golang:${GO_VERSION}-trixie AS builder
+FROM ${BASE_REGISTRY}/library/golang:${GO_VERSION}-trixie AS builder
 
 # ---- 受限网络下怎么建（2026-09-15 BB3 加）------------------------------------
 # 下面两个 ARG **不传的话与加它们之前逐字等价**：取的就是 Go 自己的内置默认值
@@ -51,12 +60,17 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
     GOBIN=/out go install "github.com/grpc-ecosystem/grpc-health-probe@${HEALTH_PROBE_VERSION}"
 
 # ---------------------------------------------------------------- 运行层
-FROM debian:trixie-slim
+FROM ${BASE_REGISTRY}/library/debian:trixie-slim
+ARG APT_MIRROR=
 
 # ca-certificates 是硬要求：edge 这一侧才是发飞书 HTTPS 的那个（open.feishu.cn，
 # 出站 REST + 长连接握手）。Go 的 crypto/x509 读系统信任库，不装的话
 # M1 的第一条事件就死在 TLS 上，而 CI 冒烟（platform=fake，不连飞书）不会红。
-RUN apt-get update \
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      sed -i -e "s#deb\.debian\.org#${APT_MIRROR}#g" -e "s#security\.debian\.org#${APT_MIRROR}#g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi \
+ && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
