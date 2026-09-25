@@ -144,7 +144,9 @@ impl InProcessControlPlane {
             .await?;
 
         lock(&self.shared.owned).insert(task.id.clone());
-        self.shared.queue.put(task.id.clone());
+        self.shared
+            .queue
+            .put_keyed(task.id.clone(), session.id.clone());
         Ok(task)
     }
 

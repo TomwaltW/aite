@@ -116,6 +116,9 @@ pub struct InProcessControlPlane {
     pub(crate) shared: Arc<Shared>,
     /// 分配 turn.seq 的临界区。为什么要有它见 [`InProcessControlPlane::append_turn`]。
     pub(crate) turn_seq_lock: tokio::sync::Mutex<()>,
+    /// 派发并发上限（CC2 ②）。默认 1 = 全局串行，走原 `dispatch_loop` 一字不改；
+    /// 大于 1 时同一会话仍串行、跨会话至多这么多个（见 `dispatch_loop_parallel`）。
+    pub(crate) max_parallel: usize,
 }
 
 impl InProcessControlPlane {
@@ -145,6 +148,7 @@ impl InProcessControlPlane {
                 counters: Mutex::new(BTreeMap::new()),
             }),
             turn_seq_lock: tokio::sync::Mutex::new(()),
+            max_parallel: 1,
         }
     }
 
@@ -163,6 +167,15 @@ impl InProcessControlPlane {
     /// 改 reaper 的节奏（测试）。默认 [`REAPER_INTERVAL_SEC`]。
     pub fn with_reaper_interval_sec(mut self, secs: f64) -> Self {
         self.reaper_interval_sec = secs;
+        self
+    }
+
+    /// 派发并发上限（CC2 ②）：同一会话串行、跨会话至多 `n` 个；`0` 当 `1`。
+    ///
+    /// 默认 1 —— 与 CC2 之前逐字节一致（全局串行，走原来那条派发循环）。
+    /// T0c 把它接到 `WorkerConfig.max_parallel_tasks`（默认 4）。`run_pending` 不看它，始终串行。
+    pub fn with_max_parallel(mut self, n: usize) -> Self {
+        self.max_parallel = n.max(1);
         self
     }
 
@@ -244,11 +257,19 @@ impl ControlPlane for InProcessControlPlane {
 
     /// 派发队列里的任务给 worker，同时跑沙箱 reaper（W7）。
     ///
-    /// 派发**串行**：一次只跑一个任务（T24 的用例依赖这条）。reaper 和派发在同一个
-    /// future 里并行推进，整个 `run_forever` 被 drop / abort 时两条一起停 ——
-    /// 对齐 Python 那句 `finally: reaper.cancel()`。
+    /// 派发默认**串行**：一次只跑一个任务（T24 的用例依赖这条）。`with_max_parallel(n > 1)`
+    /// 时同一会话串行、跨会话至多 `n` 个，在飞的任务都是**这一个 future 里**的子 future
+    /// （不 `tokio::spawn`）。reaper 和派发在同一个 future 里并行推进，整个 `run_forever`
+    /// 被 drop / abort 时全部一起停 —— 对齐 Python 那句 `finally: reaper.cancel()`。
     async fn run_forever(&self) {
-        tokio::join!(self.reaper_loop(), self.dispatch_loop());
+        if self.max_parallel <= 1 {
+            tokio::join!(self.reaper_loop(), self.dispatch_loop());
+        } else {
+            tokio::join!(
+                self.reaper_loop(),
+                self.dispatch_loop_parallel(self.max_parallel)
+            );
+        }
     }
 
     /// 把当前排队的任务跑完就返回。给测试和一次性回放用，不起 reaper。

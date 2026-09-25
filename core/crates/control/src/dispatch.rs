@@ -2,7 +2,10 @@
 //! CC2 从 `plane.rs` 原样搬来；`ControlPlane::cancel_task` 的函数体搬成了
 //! [`InProcessControlPlane::cancel_task_inner`]，trait 方法留在 `plane.rs` 转调。
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 use serde_json::{Map, Value};
 
@@ -87,6 +90,47 @@ impl InProcessControlPlane {
         loop {
             let task_id = self.shared.queue.pop().await;
             self.run_one(&task_id).await;
+        }
+    }
+
+    /// `with_max_parallel(n > 1)` 的派发（CC2 ②）：同一会话串行、跨会话至多 `n` 个。
+    ///
+    /// **结构化并发**：`run_forever(&self)` 是冻结签名、拿不到 `'static`，而 `app` 收尾靠
+    /// `runner.abort()` 把在飞的全部丢掉 —— 所以在飞的任务不 `tokio::spawn`，而是这一个
+    /// future 自己轮询的一组子 future。abort 时它们跟着被 drop，三个 guard 照原来的 drop
+    /// 语义收尾（`task_done`、摘 `running`、清 `owned` / `steer`）。
+    ///
+    /// 挑任务用 `try_pop_where`：key（会话 id）正在飞的项跳过、原序留在队里，所以
+    /// `pending()` / `state().queued` 仍然只数「还没开跑的」，口径不变。
+    pub(crate) async fn dispatch_loop_parallel(&self, n: usize) {
+        type InFlight<'a> = (String, Pin<Box<dyn Future<Output = ()> + Send + 'a>>);
+        let mut in_flight: Vec<InFlight<'_>> = Vec::new();
+        loop {
+            // 先登记「有新任务入队」再去取：取空之后才 put 的那一下不会漏掉（同 `pop`）。
+            let arrived = self.shared.queue.item_notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+            while in_flight.len() < n {
+                let busy: HashSet<String> = in_flight.iter().map(|(k, _)| k.clone()).collect();
+                let Some((task_id, key)) = self.shared.queue.try_pop_where(|k| busy.contains(k))
+                else {
+                    break;
+                };
+                in_flight.push((key, Box::pin(async move { self.run_one(&task_id).await })));
+            }
+            // 等其一：有在飞的收尾（空出名额 / 会话不再忙），或者有新任务入队。
+            std::future::poll_fn(|cx| {
+                let before = in_flight.len();
+                in_flight.retain_mut(|(_, fut)| fut.as_mut().poll(cx).is_pending());
+                if in_flight.len() < before {
+                    return Poll::Ready(());
+                }
+                if arrived.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            })
+            .await;
         }
     }
 

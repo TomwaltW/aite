@@ -7,6 +7,10 @@
 //! `unfinished` 就是 `asyncio.Queue` 的那个计数：`put` 加一、`task_done` 减一，归零时
 //! 唤醒 `join`。所以 `join()` 等的是「排队的都跑完了」，不是「队列被取空了」——
 //! 取出来正在跑的那个也算数（T24 的串行派发依赖这条）。
+//!
+//! CC2 ②：每一项带一个 `key`（会话 id）。串行派发（默认）只用 `pop` / `try_pop`，key 不起作用；
+//! `with_max_parallel(n > 1)` 的派发用 [`DispatchQueue::try_pop_where`] 跳过「会话正忙」的项，
+//! 排在忙会话后面的任务因此不挡别的会话（无队头阻塞），而同一会话仍按入队顺序一个一个跑。
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
@@ -16,7 +20,8 @@ use crate::lock;
 
 #[derive(Default)]
 struct Inner {
-    items: VecDeque<String>,
+    /// `(task_id, key)`
+    items: VecDeque<(String, String)>,
     unfinished: usize,
 }
 
@@ -37,10 +42,18 @@ impl DispatchQueue {
         }
     }
 
+    /// 入队，`key` 取任务 id 本身（不参与会话串行判定）。
+    #[cfg(test)]
     pub(crate) fn put(&self, task_id: String) {
+        let key = task_id.clone();
+        self.put_keyed(task_id, key);
+    }
+
+    /// 入队并带上会话 key（`start_task` 用会话 id）。
+    pub(crate) fn put_keyed(&self, task_id: String, key: String) {
         {
             let mut g = lock(&self.inner);
-            g.items.push_back(task_id);
+            g.items.push_back((task_id, key));
             g.unfinished += 1;
         }
         // notify_one 会在没人等的时候存一个许可，所以「先 put 后 await」不会丢唤醒。
@@ -48,7 +61,19 @@ impl DispatchQueue {
     }
 
     pub(crate) fn try_pop(&self) -> Option<String> {
-        lock(&self.inner).items.pop_front()
+        lock(&self.inner).items.pop_front().map(|(id, _)| id)
+    }
+
+    /// 取第一个 `busy(key)` 为假的项，返回 `(task_id, key)`；没有就 `None`（不挂起）。
+    pub(crate) fn try_pop_where(&self, busy: impl Fn(&str) -> bool) -> Option<(String, String)> {
+        let mut g = lock(&self.inner);
+        let at = g.items.iter().position(|(_, key)| !busy(key))?;
+        g.items.remove(at)
+    }
+
+    /// 「有新任务入队」的通知。并发派发拿它和在飞任务一起等；`notify_one` 存许可，不丢唤醒。
+    pub(crate) fn item_notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.item.notified()
     }
 
     /// 取一个任务；队列空则挂起。
@@ -81,7 +106,11 @@ impl DispatchQueue {
     }
 
     pub(crate) fn queued_ids(&self) -> Vec<String> {
-        lock(&self.inner).items.iter().cloned().collect()
+        lock(&self.inner)
+            .items
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// 等到入队的任务全部 `task_done`。
@@ -113,6 +142,25 @@ mod tests {
         assert_eq!(q.pop().await, "a");
         assert_eq!(q.pop().await, "b");
         assert_eq!(q.len(), 0);
+    }
+
+    #[test]
+    fn try_pop_where_skips_busy_keys_without_reordering_the_rest() {
+        let q = DispatchQueue::new();
+        q.put_keyed("a1".into(), "s_a".into());
+        q.put_keyed("a2".into(), "s_a".into());
+        q.put_keyed("b1".into(), "s_b".into());
+        // s_a 正忙：跳过 a1 / a2，取到 b1；a1 / a2 原序留着
+        assert_eq!(
+            q.try_pop_where(|k| k == "s_a"),
+            Some(("b1".to_string(), "s_b".to_string()))
+        );
+        assert_eq!(q.queued_ids(), vec!["a1".to_string(), "a2".to_string()]);
+        assert_eq!(q.try_pop_where(|k| k == "s_a"), None);
+        assert_eq!(
+            q.try_pop_where(|_| false),
+            Some(("a1".to_string(), "s_a".to_string()))
+        );
     }
 
     #[tokio::test]

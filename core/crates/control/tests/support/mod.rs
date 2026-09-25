@@ -988,6 +988,10 @@ pub enum WorkerAction {
     /// 一直等到 `is_cancelled()` 变真，再把状态落成 cancelled。
     /// 用来把任务**按在 worker 手上**，好去验 `cancel_task` 的「在跑」分支。
     WaitForCancel,
+    /// 先照 Deliver 交付（库里落 `delivered`、回帖），再一直占着 worker，等 `is_cancelled()` 变真才返回。
+    /// CC2 ②：任务已不在活跃口径里、却仍在 worker 手上 —— 这时同话题的追问会在**同一个会话**
+    /// 里新建任务，用来验「同会话串行」。
+    DeliverThenHold(String),
 }
 
 /// 按脚本出牌的 TaskWorker（真 AgentWorker 是 R5 的 crate）。
@@ -1116,6 +1120,13 @@ impl TaskWorker for ScriptedWorker {
                     self.deliver(task, &session, reply).await
                 }
             }
+            Some(WorkerAction::DeliverThenHold(reply)) => {
+                let task = self.deliver(task, &session, reply).await;
+                while !(hooks.is_cancelled)() {
+                    tokio::task::yield_now().await;
+                }
+                task
+            }
             Some(WorkerAction::WaitForCancel) => {
                 loop {
                     let cancelled = (hooks.is_cancelled)();
@@ -1209,6 +1220,7 @@ impl Harness {
             sleep: never_sleep(),
             clock: None,
             model_name: "scripted".into(),
+            max_parallel: None,
         }
     }
 
@@ -1229,6 +1241,7 @@ pub struct PlaneBuilder {
     sleep: SleepFn,
     clock: Option<WallClock>,
     model_name: String,
+    max_parallel: Option<usize>,
 }
 
 impl PlaneBuilder {
@@ -1264,6 +1277,11 @@ impl PlaneBuilder {
         self.model_name = name.into();
         self
     }
+    /// 调 `with_max_parallel(n)`（CC2 ②）。不调就是默认（1）。
+    pub fn max_parallel(mut self, n: usize) -> Self {
+        self.max_parallel = Some(n);
+        self
+    }
 
     pub fn build(self) -> Arc<InProcessControlPlane> {
         let mut plane = InProcessControlPlane::new(ControlDeps {
@@ -1279,6 +1297,9 @@ impl PlaneBuilder {
         .with_sleep(self.sleep);
         if let Some(clock) = self.clock {
             plane = plane.with_clock(clock);
+        }
+        if let Some(n) = self.max_parallel {
+            plane = plane.with_max_parallel(n);
         }
         Arc::new(plane)
     }
