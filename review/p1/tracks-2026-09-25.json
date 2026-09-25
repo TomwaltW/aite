@@ -1,0 +1,2035 @@
+{
+ "name": "Aite -> Claude Tag parity (China): contract-first waves with a locked-files-only T0 applied on a branch + cloud companion T0c, opt-in behaviour flips with named app-test owners, executed as Claude Code cloud sessions",
+ "rationale": "BASE: contract-first (majority winner, judges 1 and 2), with the must_fix items of all three judges applied and the grafts listed in changes_vs_winner. SHAPE. Wave 1 is contract-free and dispatchable today at B0 = 98e4460 + one human docs/hygiene commit D0 (the cloud cannot see untracked files, so D0 is unavoidable). It splits the hotspots (plane.rs 1710 lines, agent.rs 1107, the Feishu package) and pre-seeds every stub file later waves own (control commands/routing/gate/mute/..., worker context/local_tools/budget/snapshot/label, gateway policy/tools, app features/<x>.rs, admin pages, skeleton crates with their deps pre-declared). It fixes the team blockers: assistant turns on, bounded parallel dispatch built but default 1. It also builds DingTalk, WeCom, the egress proxy and the sandbox image as unwired packages. T0 authors the single p1.0 contract batch in parallel. CONTRACT MECHANICS (graft from platform-first). The T0 patch writes ONLY proto/aite/v1/**, core/crates/contracts/**, core/crates/proto (convert.rs + tests), the ContractVersion line of edge/internal/server/server.go and config/aite.example.yaml. No cloud track can or may edit those files, so anchors cannot drift, there is no freeze/rebase step, and nothing depends on a cloud session surviving for days. The human applies the patch on branch contract/p1.0 after wave 1 and P0-CLOSE are on main. They run make proto-gen locally (committed headers pin protoc v7.36.1; cloud protoc 31.x output is never committed) and relock with an aite binary built BEFORE the patch (lock.rs only hashes proto/aite/v1 and core/crates/contracts on disk, verified). They check only the contracts + proto-crate tests, lock --check = OK 26 files, and go build. Companion track T0c (wave 2a, alone) checks out that branch and makes the workspace compile: literal sites; the five literal p0.2 pins outside the lock (main_test.go:202, evidence/tests/manifest.rs:65, evals_runner.rs:111, protocol_probe.rs:523, cli_smoke.rs:481, all verified); Services threading; Go optional interfaces; the Reaction counter-only R4 arm; and the parallel-dispatch flip. Relock budget: #1 P0-CLOSE (AA4+BB2 together, one relock, MISMATCH 4 files), #2 T0, #3 only if the T0.1 errata admission rule fires. CONTRACT CONTENT: the contract-first T0 draft with these changes. Per-model filing numbers (ModelConfig.display_name/filing_no) replace the single ComplianceConfig.model_filing_no. OAuth RPCs let the admin console log in on any platform while platform secrets stay in edge. Also added: UserInfo.is_guest and ToolContext.initiator_external for NEW08, AmbientConfig.max_consecutive_bot_turns for the bot-loop guard, AdminConfig.bootstrap_token_env, DocWrite.aigc_banner, and wecom_v1 reactions_in (feedback_event). ACTIVE_TASK_STATUSES is left untouched and OPEN_TASK_STATUSES is added (the store binds ACTIVE[0..2] at store/src/lib.rs:419-421 and :481-483). No new EvidenceKind (op/route values instead); all_model_tools stays 10 (new tools go through the gateway registry); Task is unchanged; one IM platform per deployment. BEHAVIOUR FLIPS AND APP-TEST OWNERSHIP (must_fix). Assistant turns: CC3, default on; it owns reconnect_replay.rs and sqlite_cross_process.rs (crash_recovery is unaffected, verified). Parallel dispatch: CC2 ships with_max_parallel(1); T0c flips it from WorkerConfig.max_parallel_tasks=4 and owns app/**. Per-thread sandbox: DD6 flips it and owns cold_start_to_delivery.rs:661-665 and graceful_shutdown.rs:279 (after BB2, which also edits cold_start), and !stop/cancel still releases immediately (p0/07 release min:1). AIGC label: DD5 builds it default-off, because it would change the exact reply pinned at cold_start_to_delivery.rs:517. EE12 flips it in wave 3 through a FeatureCtx worker_options entry and owns that file then. The label always goes inside the same send_text/card, because p0 pins send_text counts. B8 INVARIANTS in every paste: 01/03/04/05/06/10 send_text == 1 and 02 == 2; a top-level @ creates exactly one Task session (01 sessions_equals 1); !stop releases the sandbox (07 release min:1); 09 add_reaction == 0; evals/p0/*.yaml is untouchable; a track that turns B8 red stops and reports. PASTE CONVENTIONS: pastes are in Chinese with sections 背景/必读/工作区/开场自检/工作项/规则/验收/回执, live at review/paste-<ID>.md per the user's convention, and are launched as claude --cloud \"读 review/paste-<ID>.md 并照做\". The opening self-check is: HEAD == pinned base (git reset --hard if nothing is committed); a Read of .claude/hooks/guard_bash.py is BLOCKED (hooks fail open silently); check.sh rows equal the base rows. Never type in Bash: AITE_RELOCK=1, guard-named paths (edge/go.mod, edge/go.sum, .contracts.lock, .claude/settings.json, guard_bash.py, proto/ paths, core/crates/proto), or $(...) around them. Never pipe check.sh into tail. The Go-module no-change check is done by the reviewer. Use python3 only. Run rustfmt --edition 2024 per file, never cargo fmt --all. Every behaviour change gets a regression test and a mutation check (restore without cp -p, because of the mtime trap). Explain pass-count increases test by test. Receipts go to review/p1/ledger/<ID>.md, because cloud PRs cannot splice a shared ledger. One draft PR per track. Stop and report on any locked/R0/new-dependency need. Docker tests are hermetic (no public hosts from containers). Cloud-generated edge/gen is never committed. Live model keys never go into the cloud environment. CI runs only on PRs, main pushes and manual dispatch. Known timing flakes (graceful_shutdown, startup_recovery, reconnect_replay, edge cmd/aite-edge under -race) are rerun singly before being called regressions. FREEZES LIFTED (each by the named track, with a regression test and mutation check): strictly serial dispatch (CC2 builds, T0c flips); UNKNOWN_COMMAND_TEXT / KNOWN_COMMANDS wording pins (CC2; docs/dev-spec:742 superseded, not edited); worker full-catalog/order pins and all_model_tools fed to the model (CC3); assistant turns never persisted (CC3); retry-everything (CC3); evidence tool args unredacted (CC3); additive evidence payload keys (CC2, CC3); CONTRACT_VERSION p0.2 and 'platform: dingtalk rejected' (T0, DD8 for the Go pin); SandboxNetwork none-only (T0, DD8); sandbox per task released at finish (DD6); card text hint instead of buttons (CC8 flag, DD10 default after the click test); reply wording gains the AIGC label (DD5 builds, EE12 flips); platform.md live baseline (DD4, FF10); preflight 'seven groups' count (FF5). Kept frozen: evals/p0, shutdown order, the evidence hash formula beyond BB2, FakeToolGateway formatting, journal_mode=delete, ACTIVE_TASK_STATUSES. NEW ITEMS. Copied or adapted: NEW01-06, NEW08, NEW10-12, NEW15, NEW16 (RMB presets ¥3,500/¥7,000/¥17,500/¥35,000/不限/自定义), NEW18-23, NEW24 (bot-user MR author), NEW25 (DingTalk/WeCom), and NEW13 adapted as content-vs-audit retention. NEW07 holds by construction (1:1 DMs only). NEW09 is deferred to HH1. Not copied: NEW14, NEW17. OWNER DEFAULTS ASSUMED (H1): single-tenant private/hybrid first; SQLite + migrations; memory files, no vector DB; Rust axum admin; GitLab/极狐 first; Feishu docx as hosted page; Bocha/Zhipu search; DingTalk bot-only (DWS deferred to HH3); qwen3.7-plus primary + deepseek-v4-pro/deepseek-flash fallback + deepseek-flash fast; card buttons only after the click test, else !approve/!reject text commands; one IM platform per deployment. SURFACE VERIFICATION (mechanical, against the 98e4460 tree): tracks within every wave are pairwise disjoint; every dependency points to an earlier wave; all of CT01-CT30 are covered; every NEW item except the deliberately uncopied NEW14/NEW17 is covered; no acceptance command names a guard-protected path or the relock variable. The 237 surface entries that do not exist yet are all deliberate new paths. Each is either created by the owning track (new Go packages, new crates, new files such as search.go/oauth.go/docs.go/listener.go/cardkit.go, evals/p1 scenarios, review/p1/ledger receipts, docs/p1 docs) or pre-seeded by an earlier track: CC1 (skeleton crates admin/search/githost/routines/memory); CC2 (control routing/, sessions.rs, dispatch.rs, internal.rs, gate.rs, mute.rs, intro.rs, ambient.rs, sessions_channel.rs, dm.rs, approvals.rs, commands/<name>.rs); CC3 (worker loop.rs, deliver.rs, deps.rs, budget.rs, snapshot.rs, label.rs, local_tools/, context/); CC4 (gateway policy.rs and tool stubs, app features/<x>.rs); CC8 (feishu reads/outbound/events/capabilities layout); DD12 (admin page stubs).",
+ "contract_batches": [
+  {
+   "id": "P0-CLOSE",
+   "authored_by": "Already in the repo: review/aa4-proto-patch.py (AA4), review/bb2-created-at-chain-patch.py (BB2), review/bb4-guard-patch.py (BB4). The HUMAN applies them locally in ~/Documents/Projects/Aite during wave 1 (H6). The command chains in review-findings-2026-09-12-vmerge.md point at the dead ~/Documents/Aite path and carry stale counts (853/873/874), so H6 replaces them.",
+   "contents": [
+    "AA4: rewrites the EdgeStatusService leading comment in edge.proto (line 151) and the statusSource comment in edge/cmd/aite-edge/main.go, then runs make proto-gen with the local pinned toolchain (committed headers: protoc v7.36.1, protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2).",
+    "BB2: adds chain_hash_at(prev, payload_hash, created_at) in contracts evidence.rs; the evidence writer and verify/cli use it; +2 contract tests and +2 evidence tests; also edits app tests evidence_on_disk.rs and cold_start_to_delivery.rs. First step: mv data/evidence data/evidence-p0.1-legacy (old dirs verify red by design).",
+    "ONE relock covers AA4+BB2; BB2's docstring states the two are order-independent with disjoint anchors. Before the relock, lock --check prints MISMATCH naming 4 files: proto/aite/v1/edge.proto plus BB2's 3 contracts files. BB2's own script prints 3 because it only counts itself, so the chain must quote 4. Between patch and relock, a workspace test run shows cli_smoke contracts_lock_check_is_ok_on_a_clean_tree red by construction, so check.sh runs only after the relock. Expected afterwards: cargo passed=901 failed=0 (897+2+2, any other delta explained by test name), contracts passed=27 failed=0, OK 25 files, passed 10/10, go 9 packages ok.",
+    "BB4: guard_bash.py patch (cd-equivalents); no relock; cd core && cargo test -p aite --test guard -> 21 passed.",
+    "CONTRACT_VERSION stays p0.2.",
+    "[REVISION 2026-09-25] The complete P0-CLOSE diff vs 98e4460 is exactly these 14 paths: proto/aite/v1/edge.proto, edge/cmd/aite-edge/main.go, edge/gen/aitepb/edge_grpc.pb.go, core/crates/contracts/src/evidence.rs, core/crates/contracts/src/lib.rs, core/crates/contracts/tests/evidence_vectors.rs, core/crates/evidence/src/writer.rs, core/crates/evidence/src/cli.rs, core/crates/evidence/tests/chain.rs, core/crates/app/tests/evidence_on_disk.rs, core/crates/app/tests/cold_start_to_delivery.rs, .contracts.lock, .claude/hooks/guard_bash.py, core/crates/app/tests/guard.rs"
+   ],
+   "companion_edits": [
+    "edge/gen/aitepb/** is regenerated by the human's make proto-gen, never by a cloud session: cloud protoc 31.x would rewrite the v7.36.1 headers",
+    "core/crates/evidence/src/** and core/crates/evidence/tests/** (inside the BB2 script)",
+    "core/crates/app/tests/evidence_on_disk.rs and core/crates/app/tests/cold_start_to_delivery.rs (inside the BB2 script; this is why no wave-1 track may touch those two files)",
+    "core/crates/app/tests/guard.rs (inside the BB4 script)"
+   ],
+   "unblocks": [
+    "M1-M6 real-Feishu acceptance from zero (BB2 voids any earlier partial run)",
+    "T0 apply (T0 is authored against a scratch copy of B0+AA4+BB2+BB4 and applied on top of main after P0-CLOSE)",
+    "DD6 and EE12 edits to core/crates/app/tests/cold_start_to_delivery.rs",
+    "EE12 (core/crates/evidence/** becomes writable)",
+    "DD8 (edge/cmd/aite-edge/main.go becomes writable after AA4)"
+   ]
+  },
+  {
+   "id": "T0-p1.0",
+   "authored_by": "Cloud track T0 (wave 1) writes review/t0/p1-contract-patch.py (exact-once anchors, all-or-nothing, --check, --root DIR, --self-test, --codegen; refuses the real tree unless the human sets AITE_RELOCK=1; validity gates: protoc parse, rustfmt --edition 2024 --check and gofmt -l on touched files). It also writes the data files (flattened names without protected substrings, e.g. review/t0/data/contracts_src_domain.rs.txt), review/t0/APPLY.md (the human chain with the expected output of every step) and docs/p1/contract-p1.md (the design, the Go optional-interface signatures and the checklist_op/event_received op registry). The HUMAN applies it on branch contract/p1.0 once wave 1 is merged and P0-CLOSE is on main (H11). The compile-making companion is cloud track T0c (wave 2a). Scope rule: the patch writes ONLY files that no cloud track can or may edit (locked, guard-prefix-protected, or R0 with no owner before T0), so its anchors cannot drift between authoring and apply, and no session has to stay alive for a freeze/rebase step.",
+   "contents": [
+    "Patch file scope, exhaustive: proto/aite/v1/*.proto; core/crates/contracts/** (src, tests, NEW src/domain.rs); core/crates/proto/src/convert.rs + core/crates/proto/tests/convert.rs (guard-blocked through the proto/ prefix); edge/internal/server/server.go (the ContractVersion const line only); config/aite.example.yaml. The example yaml must be in the patch because contracts tests/config.rs reads it and pins example == defaults, so cargo test -p aite-contracts would otherwise fail on the branch. Nothing else.",
+    "lib.rs: CONTRACT_VERSION p0.2 -> p1.0; pub mod domain; re-export every new public item. The lock covers 26 files (new core/crates/contracts/src/domain.rs); expected after relock: OK 26 files.",
+    "config.rs platforms: PlatformChoice += Dingtalk \"dingtalk\", Wecom \"wecom\" (one IM platform per deployment; EdgeConfig stays single). FeishuConfig += api_base \"https://open.feishu.cn\", card_buttons false, service_user_token_env \"\". New DingtalkConfig {client_id_env DINGTALK_CLIENT_ID, client_secret_env DINGTALK_CLIENT_SECRET, robot_code_env DINGTALK_ROBOT_CODE, card_template_id_env DINGTALK_CARD_TEMPLATE_ID, api_base https://api.dingtalk.com, bot_name Aite}. New WecomConfig {bot_id_env WECOM_BOT_ID, bot_secret_env WECOM_BOT_SECRET, ws_url wss://openws.work.weixin.qq.com, corp_id_env \"\", app_secret_env \"\", bot_name Aite}.",
+    "config.rs models: str_enum ModelVendor {generic, deepseek, qwen, glm, kimi, doubao, minimax}; str_enum ThinkingMode {auto, on, off}. ModelConfig += name \"primary\", display_name \"\" (= model id; card footer and !about), filing_no \"\" (备案号/上线编号 of THIS model service; every catalog entry carries its own), vendor generic, thinking auto, timeout_sec 600, stream false, price_cached_in_per_mtok 0.0, price_cache_write_per_mtok 0.0, offpeak_price_multiplier 1.0. New ModelsConfig {fallback \"\", fast \"\", catalog: Vec<ModelConfig> []} referencing catalog entries by name.",
+    "config.rs other sections (all deny_unknown_fields + serde default). SandboxConfig += network_default none, proxy_url \"\", trusted_preset \"china\", extra_trusted_hosts [], allow_full false, linger_sec 600. WorkerConfig += max_parallel_tasks 4, context_max_tokens 96000, approval_timeout_sec 1800. EdgeConfig += http_listen \"\", webhook_secret_env AITE_WEBHOOK_SECRET. SearchConfig {provider none|bocha|zhipu|baidu = none, api_key_env AITE_SEARCH_API_KEY, endpoint \"\", max_results 5, timeout_sec 15}. GitConfig {provider none|gitlab|gitee|codeup|gitea|github = none, base_url \"\", token_env AITE_GIT_TOKEN, bot_name aite-bot, draft_prefix \"Draft: \", webhook_secret_env AITE_GIT_WEBHOOK_SECRET}. PagesConfig {provider none|platform_doc = none, folder_token_env \"\"}. MemoryConfig {enabled true, max_entries_per_scope 200, auto_extract false}. RoutinesConfig {enabled true, max_per_chat 20, min_interval_min 15, default_tz Asia/Shanghai, default_tz_offset_min 480, tick_sec 30}. AmbientConfig {respond_automatically_default false, daily_cap_per_chat 20, stop_reading_after_msgs 100, channel_session_idle_min 60, channel_session_max_age_h 24, stalled_followup_h 24, max_consecutive_bot_turns 3}. AccessConfig {dm_enabled true, external_chat_mode restrict, allow_chats [], block_chats [], member_allowlist [], search_scope joined_chats, require_setup false}. BudgetConfig {org_monthly_limit_cny 0.0 (0 = unlimited), channel_monthly_limit_cny 0.0, task_limit_cny 0.0, warn_ratio 0.8, month_start_day 1}. ComplianceConfig {aigc_label true, label_text \"内容由 AI 生成\", implicit_metadata true, producer Aite, service_filing_no \"\" (Aite's own service record, if any; model numbers live on ModelConfig), audit_retention_days 190, content_retention_days 0}. AdminConfig {listen \"\", public_base_url \"\", owner_ids [], session_secret_env AITE_ADMIN_SECRET, bootstrap_token_env AITE_ADMIN_BOOTSTRAP_TOKEN}. AiteConfig += dingtalk, wecom, models, search, git, pages, memory, routines, ambient, access, budget, compliance, admin.",
+    "events.rs + events.proto: EventKind += Reaction (EVENT_KIND_REACTION = 7), External (= 8). CardActionKind += Approve (3), Reject (4), Submit (5). New Quote {message_id: Option, sender_id: Option, text}, ReactionEvent {message_id, emoji, thumbs_down: bool, added: bool}, ExternalEvent {source, topic, subject, url: Option, summary, payload: Map}. NormalizedEvent += quote (proto 19), reaction (20), external (21), sender_external: bool (22), all serde(default). Anchor is unchanged; the task_no doc changes from '只展示不路由' to 'edge parses #A from own text or quoted content; core routes by it'.",
+    "outbound.rs + outbound.proto: ReactionKind += Muted (4). New CardLink {label, url}, ApprovalPrompt {approval_id, summary, detail: Option}. ChecklistCard += links (10), approval (11). OutboundText += mentions (5), dedupe_key: Option (6). HistoryMessage += updated_at: Option (8), deleted (9), reply_to: Option (10). New UserInfo {user_id, name, is_external, is_guest}, ChatInfo {chat_id, name, chat_type, is_public: Option, is_external, member_count: Option}, SearchQuery {query, chat_ids, limit, since: Option}, SearchHit {chat_id, message: HistoryMessage, url: Option}, DocWrite {doc_id: Option, title, markdown, share_chat_id: Option, aigc_banner: bool}, DocRef {doc_id, url, title}, OAuthStart {redirect_uri, state}, OAuthUrl {url}, OAuthCode {code, redirect_uri}.",
+    "capabilities.rs + capabilities.proto (fields 10-23): supports_reactions_in, supports_recall_event, supports_edit_event, supports_pins, supports_message_search, supports_docs, supports_dm, supports_quote_id, requires_visible_anchor (bool); stream_max_sec, card_action_deadline_ms, max_card_bytes, max_text_chars (u32); max_upload_bytes (u64). feishu_p0() keeps every P0 value and sets: reactions/recall/pins/docs/dm/quote_id true; edit false (Feishu has no edit event, so edits are pulled); message_search false (needs a service-user token); visible_anchor false; card deadline 3000; max_card_bytes 30720; max_upload 31457280. New dingtalk_v1(): thread/history/passive/quote_id false, reactions false, visible_anchor true, card deadline 2000, inbound_file_in_group false. New wecom_v1(): card_edit false, reactions_in true (feedback_event thumbs only), proactive_requires_prior_message true, stream_max_sec 600, card deadline 5000, visible_anchor true, max_upload 20 MB.",
+    "sandbox.rs + sandbox.proto: SandboxNetwork += Trusted, Custom, Full (proto stays a string); ExecLanguage += Bash. New CredentialBinding {host, header, scheme, secret_ref} (secret_ref names a secret held by edge; values never cross gRPC) and EgressPolicy {level, allow_hosts, credentials, audit_tag}. edge.proto AcquireRequest += EgressPolicy egress = 3.",
+    "protocol.rs: Message += provider_extra: Map (serde default, skipped if empty; carries reasoning_content / encrypted_content / reasoning_details verbatim). Usage += cache_write_tokens: u64. all_model_tools() / gateway_tools() / local_tool_names() stay UNCHANGED: catalog_is_frozen stays 10, and new tools go through the CC4 gateway registry.",
+    "session.rs: Turn += message_id: Option, provider_extra: Map; Session += meta: Map (muted, page_id, forked_from, channel counters); const OPEN_TASK_STATUSES = [Created, Planning, Answering, Working, AwaitingApproval]. ACTIVE_TASK_STATUSES stays UNTOUCHED: the store binds indices [0..2] at store/src/lib.rs:419-421 and :481-483, and orphan recovery must never catch awaiting_approval. Task is UNCHANGED.",
+    "gateway.rs: ToolContext += initiator_id: Option, chat_type: Option, initiator_external: bool. errors.rs: ModelError += RateLimited {retry_after_ms: Option, message}, Auth(String), BadRequest(String).",
+    "ports.rs PlatformPort gains new methods whose default body is Err(PlatformError 'unimplemented', retryable false): edit_text, send_dm, get_user, get_chat, is_member, list_chats, list_pins, search_messages, write_doc, oauth_authorize_url(&OAuthStart) -> OAuthUrl, oauth_exchange(&OAuthCode) -> UserInfo. Platform secrets stay in edge; the admin console logs in through the two OAuth methods on Feishu, DingTalk or WeCom. SandboxPort += acquire_scoped(scope_id, &SandboxSpec, &EgressPolicy); its default is acquire() when level == None, else Err(Unavailable).",
+    "ports.rs SessionStore gains new methods whose default body is Err(StoreError::Other('unimplemented: <name>')): find_task_by_no (incl. delivered), list_open_tasks, index_message, find_session_by_message, recent_sessions_by_sender, find_open_session, list_sessions_inactive_since, get_turn_by_message, update_turn, list_tasks(&TaskQuery), purge_chat_content -> u64, prune_seen_events -> u64. RunHooks += take_decision: Arc<dyn Fn() -> Option<ApprovalDecision> + Send + Sync> (none() returns None). ControlPlane += submit_internal(&InternalRequest) -> Result<Option<String>, IngressError>, default Err(Other('unimplemented')).",
+    "ports.rs new traits (async_trait, no defaults, implemented from wave 2): ScopeStore, MemoryStore, RoutineStore, UsageLedger, AuditLog. Method sets are as in docs/p1/contract-p1.md, unchanged from the contract-first draft.",
+    "domain.rs (NEW, the one new locked file): ScopeKind, ScopeRef, ExternalChatMode, SearchScope, ConnectionRef, RepoGrant, Skill, AccessBundle, ScopeSettings, EffectiveSettings (incl. snapshot_hash), MemoryScope, MemoryEntry, ScheduleKind, Schedule (tz_name + tz_offset_min), RoutineTrigger, RoutineOutput, Routine, BudgetScope, UsageRecord, UsageGroupBy, UsageSummary, AuditCategory, AuditEvent, AuditQuery, NetworkEvent (the JSONL shape the Go proxy writes), ApprovalDecision, Services {scope, memory, routines, usage, audit: Option<Arc<dyn …>>}, TaskOrigin, InternalRequest, TaskQuery. Services is Clone + Default with a manual Debug; it is the one handle bundle threaded through control/worker/gateway.",
+    "edge.proto PlatformService += EditText, SendDirect, GetUser, GetChat, CheckMember, ListChats, ListPins, SearchMessages, WriteDoc, OAuthAuthorizeUrl, OAuthExchange. EdgeStatus += egress_ok = 7, http_ingress_ok = 8. IngressService unchanged. server.go ContractVersion = p1.0 (in the patch). services.go already embeds pb.Unimplemented*Server, so the new RPCs compile before any handler exists.",
+    "core/crates/proto convert.rs + tests/convert.rs (in the patch): domain <-> pb for every new field/enum/message; network accepts none|trusted|custom|full, language python|bash; UNSPECIFIED rejection kept.",
+    "config/aite.example.yaml (in the patch): every new section written out with its defaults. Checked: edge/internal/config uses lenient yaml.Unmarshal, and config_test.go compares only the Go-known fields of the example against Default(), so the new sections keep the Go test green. The Go dingtalk/wecom platform flip stays DD8's.",
+    "Contract tests (locked, inside the patch). frozen_values.rs: p1.0, new enum string forms and ALL lengths, OPEN_TASK_STATUSES, feishu_p0/dingtalk_v1/wecom_v1 values. config.rs: dingtalk/wecom accepted, slack still rejected, every new default pinned, example == defaults. roundtrip.rs: new types' JSON shapes, AND old JSON without the new fields still deserialises, because P0 SQLite rows must load. protocol_tools.rs unchanged. layout.rs += domain.rs. Expected contracts passed = 27 + K (APPLY.md names each new test).",
+    "Human chain (H11), one line, in ~/Documents/Projects/Aite on main after wave 1 + P0-CLOSE: build aite and copy it to /tmp/aite-prelock (lock.rs only hashes proto/aite/v1 and core/crates/contracts on disk, so a pre-patch binary relocks correctly); git checkout -b contract/p1.0; AITE_RELOCK=1 python3 review/t0/p1-contract-patch.py --check; the real run; make proto-gen; (cd core && cargo test -p aite-contracts -p aite-proto) -> contracts passed=27+K failed=0; AITE_RELOCK=1 /tmp/aite-prelock contracts lock --write; /tmp/aite-prelock contracts lock --check -> OK 26 files; (cd edge && go build ./... && go vet ./...) -> exit 0; commit 'contract(p1.0): T0'; git push origin contract/p1.0. The rest of the workspace is EXPECTED not to compile until T0c lands, and CI does not run on the branch until T0c opens its PR.",
+    "[REVISION 2026-09-25] Contract additions: PlatformPort::delete_doc + edge.proto PlatformService.DeleteDoc (delete an app-created doc or at least revoke the openchat share; needed by FF6 for NEW23 / PIPL purge); ModelVendor += selfhost (customer vLLM/SGLang/MindIE; no cloud-vendor-specific params); ModelConfig += allow_overseas_endpoint (default false: overseas endpoints are a config error). The P0-CLOSE set a scratch copy shows is 14 paths: proto/aite/v1/edge.proto, edge/cmd/aite-edge/main.go, edge/gen/aitepb/edge_grpc.pb.go, core/crates/contracts/src/evidence.rs, core/crates/contracts/src/lib.rs, core/crates/contracts/tests/evidence_vectors.rs, core/crates/evidence/src/writer.rs, core/crates/evidence/src/cli.rs, core/crates/evidence/tests/chain.rs, core/crates/app/tests/evidence_on_disk.rs, core/crates/app/tests/cold_start_to_delivery.rs, .contracts.lock, .claude/hooks/guard_bash.py, core/crates/app/tests/guard.rs.",
+    "[REVISION 2026-09-25b] ComplianceConfig += registration_scope_confirmed false, content_safety_filter false (plan D25: EE8 may leave external_chat_mode=restrict only when both are true)."
+   ],
+   "companion_edits": [
+    "Owned by cloud track T0c (wave 2a) on top of origin/contract/p1.0, never by the patch:",
+    "Struct-literal sites and exhaustive matches for Message, Turn, Session, NormalizedEvent, ChecklistCard, OutboundText, HistoryMessage, PlatformCapabilities, ToolContext, Usage, ModelConfig, RunHooks, EventKind, CardActionKind, ModelError, SandboxNetwork, ExecLanguage, ReactionKind across core/crates/{control,worker,gateway,models,store,testing,evals,edge-client,app}/{src,tests}. The exact list is whatever cargo check --workspace --all-targets reports on the branch; T0 records its scratch estimate in review/t0/companion-todo.md.",
+    "The five literal p0.2 pins outside the lock: edge/cmd/aite-edge/main_test.go:202, core/crates/evidence/tests/manifest.rs:65, core/crates/evals/tests/evals_runner.rs:111, core/crates/evals/tests/protocol_probe.rs:523, core/crates/app/tests/cli_smoke.rs:481",
+    "Control: EventKind::Reaction goes to R4 (on_non_message) as a counter-only arm BEFORE R5/R6; otherwise a reaction in an active thread would be steered into the running task. New CardActionKind arms log + drop until EE7.",
+    "Services threading: WorkerDeps and ControlDeps gain services: Services; the gateway gets with_services(); app/src/features/mod.rs FeatureCtx.services is filled by features and passed into all three. In the same pass over every WorkerDeps literal (app.rs, wiring.rs, worker tests/common, evals deps), WorkerDeps gains aigc_label: Option<LabelConfig> (struct defined in worker/src/label.rs, default None), so DD5 never edits a WorkerDeps literal.",
+    "edge/internal/server/ports_p1.go + services_p1.go (new files): one optional Go interface per new RPC (TextEditor, DirectSender, UserLookup, ChatLookup, MemberChecker, ChatLister, PinReader, MessageSearcher, DocWriter, OAuthProvider). Handlers are methods on the existing server structs; they type-assert the adapter and otherwise return UNIMPLEMENTED.",
+    "core/crates/evals/src/scenario.rs EventSpec += quote, reaction, external, sender_external",
+    "Parallel-dispatch flip: WorkerConfig.max_parallel_tasks (default 4) wired into CC2's with_max_parallel; T0c fixes any app/evals test that pinned serial order",
+    "edge/gen/** is never regenerated by T0c (the human's commit on contract/p1.0 carries it)"
+   ],
+   "unblocks": [
+    "T0c",
+    "all of waves 2-4 (through T0c)"
+   ]
+  },
+  {
+   "id": "T0.1-errata (reserve, empty by default)",
+   "authored_by": "A short cloud session T01, started only if needed, writes review/t01/p1_1-contract-patch.py in the same pattern and with the same file scope as T0. The human applies it on branch contract/p1.1 (relock #3), and a companion session T01c makes the workspace compile.",
+   "contents": [
+    "Admission rule: a wave-2/3 receipt shows, with a failing test or a compile error, that a p1.0 shape blocks a CT and that no open-path workaround exists (open maps Session.meta, ExternalEvent.payload, AuditEvent.detail, provider_extra; default trait methods; the gateway registry).",
+    "Gaps are batched, never applied one by one; CONTRACT_VERSION p1.0 -> p1.1; applied once, at the wave 3 -> wave 4 boundary.",
+    "The re-anchor never depends on a long-lived session: any fresh session can rebuild the script from the committed design doc and a pinned base sha."
+   ],
+   "companion_edits": [
+    "Same as T0: T01c handles the five-plus literal version pins (now p1.0), literal sites and match arms on branch contract/p1.1; config/aite.example.yaml goes inside the patch"
+   ],
+   "unblocks": [
+    "Wave-4 tracks that reported the gap"
+   ]
+  }
+ ],
+ "waves": [
+  {
+   "name": "Wave 1 - contract-free foundations, dispatchable today (base B0 = 98e4460 + docs/hygiene commit D0)",
+   "start_gate": "The human has pushed D0 on top of 98e4460 (H2: plan docs, a repo CLAUDE.md with cloud rules, the untracked review files, review/paste-<ID>.md for T0 and CC1-CC12, and the hygiene untracking of .venv/aite.egg-info/top-level dev-spec) and recorded that sha as B0 in every paste. The claude.ai/code environment is configured (H3). No wave-1 track edits a locked, guard-protected or T0-patch file. No wave-1 track touches the P0-CLOSE files (proto/aite/v1/edge.proto, edge/cmd/aite-edge/main.go, core/crates/contracts/src/evidence.rs, core/crates/evidence/**, core/crates/app/tests/evidence_on_disk.rs, core/crates/app/tests/cold_start_to_delivery.rs, .claude/**, core/crates/app/tests/guard.rs) or the T0 patch files (config/aite.example.yaml, edge/internal/server/server.go, core/crates/proto/**), so the human can apply P0-CLOSE while wave 1 runs. Launch CC1 alone first. Launch T0 and CC2-CC12 only after CC1's opening self-check shows scripts/check.sh green in the cloud AND a Read of .claude/hooks/guard_bash.py BLOCKED; a failed hook fails open silently, and project hooks run only in single-repo sessions. Every session's opening self-check: (1) HEAD == B0; if not and nothing is committed yet, git reset --hard <B0>; alternatively, if HEAD differs from B0 only by the P0-CLOSE commits, keep it, use the post-P0-CLOSE row 901/27/OK 25, and record which. (2) The Read of guard_bash.py is BLOCKED. (3) Baseline rows at B0 are cargo passed=897 failed=0 / contracts passed=25 failed=0 / OK 25 files / passed 10/10 / go 9 packages ok. Count the Go packages with grep: check.sh tails the Go output at 8 lines, so edge/cmd/aite-edge is hidden until CC1's summary row lands. B8 invariants in every paste's 规则: exact send_text counts per p0 scenario (01/03/04/05/06/10 equal 1, 02 equals 2); a top-level @ creates exactly one Task session (01 sessions_equals 1); !stop still releases the sandbox (07 release min:1); bots get no reaction (09 add_reaction == 0). A track that turns B8 red stops and reports. CI runs only on PRs, pushes to main and manual dispatch, so a track gets CI once its draft PR is open. [REVISION 2026-09-25] Opening self-check step 1 is the plan §4.4 diff (git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD with excludes review/docs/CLAUDE.md/.gitignore): empty = case A; exactly the 14 P0-CLOSE paths = case B. No B0 sha is pinned.",
+   "tracks": [
+    {
+     "id": "T0",
+     "title": "Contract p1.0 patch author (locked-files-only patch, human applies on a branch)",
+     "goal": "Deliver batch T0-p1.0 as ONE all-or-nothing patch script whose file scope is exactly: proto/aite/v1/*.proto, core/crates/contracts/**, core/crates/proto/src/convert.rs + tests/convert.rs, the ContractVersion line of edge/internal/server/server.go, and config/aite.example.yaml. No struct-literal sites, no Services threading, no Go interfaces (all of that is T0c). The script's --self-test does all protected work itself, so no Bash command text names a protected path. It: makes a scratch copy with git clone --local (so .git exists for guard.rs and the hook's git rev-parse); applies AA4, BB2 and BB4 through their own --root modes; builds the aite binary on that copy BEFORE applying T0 (the prelock pattern); applies T0 with --root; runs the contracts and proto-crate tests; runs its --codegen mode (protoc + pinned plugins invoked by the script; generated files stay in the scratch copy and are never committed); runs go build/vet on the scratch edge tree; runs the prebuilt binary's lock --check; and prints one report. Outputs: review/t0/p1-contract-patch.py; review/t0/data/*.txt (flattened names); review/t0/APPLY.md (the H11 chain with every expected line, incl. the exact MISMATCH list); review/t0/companion-todo.md (optional: the compile-error list from a throwaway companion attempt on the scratch copy, which T0c uses as a starting estimate; never committed as code); docs/p1/contract-p1.md. The design doc covers every type/field/default/RPC with CT mapping, the Go optional-interface signatures for T0c, and the checklist_op/event_received op registry that replaces new EvidenceKinds (approval_requested, approval_decided, reply_sent, budget_stop, memory_op, routine_fired, command, policy_denied). It is committed with the script, so any fresh session can re-anchor from a pinned sha if P0-CLOSE differs from its scripts; there is no freeze step and no long-lived session. Never set AITE_RELOCK and never write a protected path in the real tree. If the guard blocks running the AA4/BB2 scripts even in --root mode, quote the block verbatim in the receipt and mark those self-test steps 'human measures locally'. [REVISION 2026-09-25] Contract additions: PlatformPort::delete_doc + edge.proto PlatformService.DeleteDoc (delete an app-created doc or at least revoke the openchat share; needed by FF6 for NEW23 / PIPL purge); ModelVendor += selfhost (customer vLLM/SGLang/MindIE; no cloud-vendor-specific params); ModelConfig += allow_overseas_endpoint (default false: overseas endpoints are a config error). The P0-CLOSE set a scratch copy shows is 14 paths: proto/aite/v1/edge.proto, edge/cmd/aite-edge/main.go, edge/gen/aitepb/edge_grpc.pb.go, core/crates/contracts/src/evidence.rs, core/crates/contracts/src/lib.rs, core/crates/contracts/tests/evidence_vectors.rs, core/crates/evidence/src/writer.rs, core/crates/evidence/src/cli.rs, core/crates/evidence/tests/chain.rs, core/crates/app/tests/evidence_on_disk.rs, core/crates/app/tests/cold_start_to_delivery.rs, .contracts.lock, .claude/hooks/guard_bash.py, core/crates/app/tests/guard.rs. [REVISION 2026-09-25b] ComplianceConfig += registration_scope_confirmed false, content_safety_filter false (plan D25: EE8 may leave external_chat_mode=restrict only when both are true).",
+     "ct_ids": [
+      "CT02",
+      "CT06",
+      "CT07",
+      "CT08",
+      "CT09",
+      "CT12",
+      "CT13",
+      "CT14",
+      "CT16",
+      "CT17",
+      "CT18",
+      "CT20",
+      "CT21",
+      "CT22",
+      "CT23",
+      "CT26",
+      "CT27",
+      "CT28",
+      "CT30",
+      "NEW02",
+      "NEW08",
+      "NEW10",
+      "NEW11",
+      "NEW16",
+      "NEW21",
+      "CT15"
+     ],
+     "writable_surface": [
+      "review/t0/**",
+      "docs/p1/contract-p1.md",
+      "review/p1/ledger/T0.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "python3 review/t0/p1-contract-patch.py --self-test -> exit 0; the report shows AA4+BB2+BB4+T0 applied to the scratch copy with 0 anchor misses",
+      "same report: contracts tests passed=27+K failed=0 (K named test by test in review/p1/ledger/T0.md); proto-crate convert tests 0 failed",
+      "same report: codegen on the scratch copy ok; go build ./... and go vet ./... on the scratch edge tree exit 0 (go test is NOT claimed: the edge/cmd/aite-edge version pin is T0c's)",
+      "same report: the prebuilt (pre-T0) aite binary's lock --check on the scratch copy prints MISMATCH naming exactly the 4 P0-CLOSE files (the scratch lock is never relocked) plus the T0 set incl. the NEW domain.rs; APPLY.md states that the human's real run after the P0-CLOSE relock shows only the T0 set",
+      "python3 review/t0/p1-contract-patch.py --root <same scratch> (second apply) -> refuses (already applied), exit != 0, nothing written; python3 review/t0/p1-contract-patch.py --check without --root on the real tree -> refuses with exit 2",
+      "no claim about the full workspace: it is expected not to compile until T0c",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "XL",
+     "human_steps": [
+      "H11: review docs/p1/contract-p1.md, then apply per review/t0/APPLY.md on branch contract/p1.0"
+     ],
+     "touches_r0_or_locked": [
+      "authors (never applies) a patch for proto/aite/v1/**, core/crates/contracts/**, core/crates/proto/**, edge/internal/server/server.go (ContractVersion line), config/aite.example.yaml"
+     ]
+    },
+    {
+     "id": "CC1",
+     "title": "Cloud bootstrap, baseline, infra R0 owner, mirror build args, skeleton crates",
+     "goal": "(1) Commit scripts/cloud-setup.sh (idempotent; its text is what the human pasted into the environment in H3). It installs protoc v31.1 from GitHub releases into /usr/local (core/crates/proto/build.rs needs protoc on every build); rustup 1.98.1 + clippy/rustfmt; Go >= 1.27 via GOTOOLCHAIN=auto; protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2 (self-tests only). It warms up with cargo fetch + cargo test --workspace --no-run and go mod download. It builds aite-sandbox:p0 as best effort: a failed apt fetch prints a warning and never fails the script, so one bad mirror cannot break the cached environment. Verify and record which of deb.debian.org, security.debian.org, auth.docker.io, production.cloudflare.docker.com, pypi.org and goproxy.cn are reachable. (2) scripts/check.sh: print 'go packages ok=N fail=M' plus failing package names (the tail-8 cut hides edge/cmd/aite-edge today); an optional B9 gate that runs evals/p1 when it holds *.yaml and requires the last line 'passed k/k'; a --docker flag for docker-tagged Go tests; B8 unchanged. (3) Makefile targets cloud-setup, docker-test, evals-p1. (4) CI: a sandbox-docker job (build the image, go test -tags docker ./internal/sandbox/..., assert no aite.task containers left) and an evals-p1 step. (5) Mainland mirror build ARGs for docker/core and docker/edge (PROTOC_URL, CARGO_REGISTRY sparse mirror, GOPROXY, APT_MIRROR; defaults upstream, China values documented), passed through by compose-build (closes the BB3 GOPROXY knob). (6) Create EMPTY skeleton crates core/crates/{admin,search,githost,routines,memory}. Each Cargo.toml pre-declares every dependency the crate will need, from EXISTING workspace deps only (aite-contracts, async-trait, serde, serde_json, tokio, chrono, thiserror, tracing, reqwest, rusqlite as relevant); lib.rs holds a doc comment only. Add aite-* path entries to [workspace.dependencies] and to core/crates/app/Cargo.toml, so no wave-3 track has to touch core/Cargo.toml, app/Cargo.toml or Cargo.lock. No new third-party dependency (axum belongs to DD12, after H1 approval). (7) Verify D0 hygiene (git ls-files .venv aite.egg-info -> 0) and keep .gitignore right. (8) Run check.sh twice in the cloud; record wall times, counts and flaky reruns in docs/p1/cloud-runbook.md and in a 'cloud baseline' section of CLAUDE.md, incl. the post-P0-CLOSE row (901/27/OK 25). [REVISION 2026-09-25] Skeleton crates memory/routines/search/githost also pre-declare aite-gateway (CC4 puts the public GatewayTool trait there); edit the core/Cargo.toml comment that only allows depending on contracts/proto/testing so these four may depend on aite-gateway. docker/core and docker/edge get ARG BASE_REGISTRY=docker.io used by every FROM (mainland builds never hit Docker Hub directly). scripts/cloud-setup.sh = the revised plan §4.1 text (installs unzip if missing, strict protoc 31.x check with hash -r, symlinks protoc-gen-go/protoc-gen-go-grpc into /usr/local/bin). Measure whether a session's first cargo build is still cold (setup vs session checkout).",
+     "ct_ids": [
+      "CT10",
+      "CT18",
+      "CT25"
+     ],
+     "writable_surface": [
+      "scripts/cloud-setup.sh",
+      "scripts/check.sh",
+      "Makefile",
+      ".github/**",
+      ".gitignore",
+      "docker/core/**",
+      "docker/edge/**",
+      "docker-compose.yml",
+      "docs/p1/cloud-runbook.md",
+      "CLAUDE.md",
+      "core/Cargo.toml",
+      "core/Cargo.lock",
+      "core/crates/app/Cargo.toml",
+      "core/crates/admin/**",
+      "core/crates/search/**",
+      "core/crates/githost/**",
+      "core/crates/routines/**",
+      "core/crates/memory/**",
+      "review/p1/ledger/CC1.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "bash scripts/cloud-setup.sh; bash scripts/cloud-setup.sh -> both exit 0 (idempotent); protoc --version -> libprotoc 31.x; (cd core && rustc --version) -> 1.98.1; (cd edge && go version) -> go1.27 or newer",
+      "scripts/check.sh -> last line 全部通过; rows: cargo passed=897 failed=0 (unchanged: empty crates add no tests), contracts passed=25 failed=0, OK 25 files, go packages ok=9 fail=0, passed 10/10, B9 skip (no evals/p1 yet)",
+      "git ls-files .venv aite.egg-info | wc -l -> 0; git ls-files '*.md' | grep -v / -> README.md and CLAUDE.md only (D0 hygiene verified)",
+      "make docker-test -> exit 0; docker ps -a --filter label=aite.task -q | wc -l -> 0",
+      "cd core && cargo metadata --no-deps --format-version 1 | python3 -c \"import json,sys;print(sorted(p['name'] for p in json.load(sys.stdin)['packages']))\" -> includes aite-admin, aite-githost, aite-memory, aite-routines, aite-search",
+      "the Cargo.lock diff adds only the five aite-* package entries (no third-party package added or moved)",
+      "make -n compose-build -> shows the GOPROXY/PROTOC_URL/CARGO_REGISTRY/APT_MIRROR build args",
+      "PR CI: checks + compose-smoke + sandbox-docker all green",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "human_steps": [
+      "Paste any change to scripts/cloud-setup.sh back into the environment settings (it invalidates the ~7-day cache)"
+     ],
+     "touches_r0_or_locked": [
+      "scripts/check.sh",
+      "Makefile",
+      ".github/workflows/ci.yml",
+      "core/Cargo.toml",
+      "core/Cargo.lock",
+      "docker-compose.yml",
+      "docker/core/**",
+      "docker/edge/**"
+     ]
+    },
+    {
+     "id": "CC2",
+     "title": "Control plane: module split with pre-seeded stubs, opt-in bounded parallel dispatch, robustness, command registry",
+     "goal": "(1) Split plane.rs (1710 lines) with zero behaviour change into routing/ (rule chain R1-R8), sessions.rs, dispatch.rs, reaper.rs, evidence_log.rs, commands/<name>.rs; commit the split first, with identical per-file test counts. Pre-seed, as Pass/None stubs wired into the rule chain, every module a later wave owns: routing/{resolver,card_actions,external,edits}.rs, gate.rs, mute.rs, internal.rs, approvals.rs, intro.rs, ambient.rs, sessions_channel.rs, dm.rs, and disabled command stubs commands/{about,access,configure,help,mute,unmute,feedback,routines,fork,memory,approve,reject,evidence,connect,usage,model}.rs. Each command is enabled by a const in its own file, so later tracks never edit the registry. (2) Dispatch: one task at a time per session, at most N globally, behind a builder with_max_parallel(n) whose DEFAULT IS 1. That is today's strictly serial behaviour, byte-identical for every other crate's tests. Cancel, stranded-task and shutdown order are preserved; T0c flips the default from WorkerConfig.max_parallel_tasks. (3) Ingress propagates store/evidence failures (IngressError -> INTERNAL -> platform re-push). (4) !restart seeds the new session from platform.read_history(thread); a stuck in-process task (no step progress for N min) is replaced on the next message, with a notice. (5) Command parser: full-width ！, U+3000 and other whitespace; Chinese aliases 状态/停止/重开/新话题/帮助; !help lists the registry; the unknown-command text becomes generic ('未知命令，发 !help 看全部命令'), lifting the wording.rs pin. (6) Consume capabilities: R6 routes by supports_thread instead of the ChatType::Group hardcode; p2p messages go to the disabled DM stub. (7) Ack reaction on R6 follow-ups, for humans only (09 stays add_reaction == 0 for bots). (8) Fix routing of topic replies after !new-in-topic. (9) Record the !stop issuer in the cancelled payload, and record commands as event_received route=command (additive keys). B8: 07 still sees '#A1' in the !status reply and a sandbox release after !stop. [REVISION 2026-09-25] !help is built and ENABLED by CC2 (not a disabled stub); EE8 only adds entries for new commands. [REVISION 2026-09-25b] New item: plane append_turn retries on StoreError::DuplicateTurn inside turn_seq_lock (max 3), test plane_append_turn_retries_duplicate_turn; merge CC2 before CC3 (H10).",
+     "ct_ids": [
+      "CT01",
+      "CT04",
+      "CT05",
+      "CT13",
+      "NEW01"
+     ],
+     "writable_surface": [
+      "core/crates/control/src/**",
+      "core/crates/control/tests/**",
+      "core/crates/app/src/run.rs",
+      "core/crates/app/tests/cc2_*.rs",
+      "review/p1/ledger/CC2.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-control -> 0 failed; the split commit alone shows identical per-test-file counts to B0 (both listings pasted in the receipt)",
+      "new tests pass and are mutation-checked (revert the change -> red, output pasted): default_max_parallel_is_strictly_serial, two_chats_dispatch_concurrently_with_max_parallel_2, same_session_stays_serial, ingress_store_failure_returns_internal, fullwidth_bang_and_ideographic_space_parse, chinese_alias_status, help_lists_enabled_commands, restart_seeds_thread_history, r6_followup_gets_ack",
+      "cd core && cargo test -p aite --test reconnect_replay --test graceful_shutdown --test startup_recovery -> 0 failed (read only; on a flake rerun that target alone and quote both runs)",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC3",
+     "title": "Worker: module split with pre-seeded stubs, assistant turns, attribution, retry classes, catalog seam, redaction",
+     "goal": "(1) Split agent.rs (1107 lines) with zero behaviour change into loop.rs, deliver.rs, local_tools/ (checklist, final, and unadvertised stubs post_update and request_approval), context/ (transcript, history, attachments, plus stub blocks memory, pins, skills, quote returning None), card.rs, deps.rs (WorkerDeps), budget.rs (no-op before_step/after_model_call hooks), and snapshot.rs and label.rs (stubs for DD4/DD5). Each local tool is enabled by an ENABLED const in its own file. (2) Sole owner of the model catalog line: checklist_tools() + final_tool() + gateway.catalog(ctx), identical to today's 10 tools. (3) deliver() appends a TurnRole::Assistant turn (reply text + artifact titles; retry on DuplicateTurn), so follow-ups see Aite's earlier answers (CT02). Default ON: this track owns the two app tests that pin the old transcript (reconnect_replay.rs:762/856-860, and sqlite_cross_process.rs:95-102 contents AND seq [0,1]); crash_recovery.rs is unaffected (its task is still Working). (4) Attribute the sender in transcript and steer lines ('[<name or id>] text'). (5) Retry classes: Config is never retried; Upstream 'HTTP 400/401/403' is never retried; 429 backs off using 'retry-after-ms=N' (text format agreed with CC6; typed variants arrive with T0). (6) Every tool_call gets a tool reply, even when an invalid final appears mid-batch. (7) Trim context to a token budget (chars approximation; oldest tool results first; const 96k until T0c wires config). (8) Thread-scoped history window when anchor.thread_id is set (CT07). (9) Redact tool_call arguments and content_summary on write (api_key/token/password/secret keys, sk-*, Bearer *). (10) Tool results sent back to the model are wrapped as external data (CT29). evals/p0 stays 10/10. [REVISION 2026-09-25] Writable surface is worker/src/** and worker/tests/** (NOT prompts/platform.md, which DD4 owns in W2). [REVISION 2026-09-25b] Never retry Upstream \"HTTP 4xx\" except 429 (all 4xx, not only 400/401/403); http_4xx_not_retried covers 400/401/403/404/422.",
+     "ct_ids": [
+      "CT02",
+      "CT04",
+      "CT07",
+      "CT29",
+      "CT30"
+     ],
+     "writable_surface": [
+      "core/crates/worker/src/**",
+      "core/crates/worker/tests/**",
+      "core/crates/app/tests/reconnect_replay.rs",
+      "core/crates/app/tests/sqlite_cross_process.rs",
+      "review/p1/ledger/CC3.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-worker -> 0 failed (lifted pins, e.g. test_context full-catalog/order, listed)",
+      "new tests pass and are mutation-checked: assistant_turn_persisted_after_delivery, followup_context_contains_previous_answer, config_error_not_retried, http_429_backs_off_with_retry_after, every_tool_call_gets_a_reply, context_budget_trims_oldest_tool_results, thread_history_window_used_in_thread, redaction_masks_bearer_and_keys, catalog_comes_from_gateway, tool_result_wrapped_as_external",
+      "cd core && cargo test -p aite --test reconnect_replay --test sqlite_cross_process --test crash_recovery -> 0 failed (the first two updated to include the assistant turn; crash_recovery untouched)",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC4",
+     "title": "Gateway plug-in registry + policy hook + app feature seam",
+     "goal": "Add a public GatewayTool trait and a ToolRegistry, so crates outside the gateway register a tool (ToolSpec + impl + enabled(ctx) predicate) at wiring time. catalog(ctx) = registered tools filtered by predicate; today that is exactly the 5 P0 tools (the catalog.rs verbatim test stays green). Pre-seed gateway/src/policy.rs with before_call(ctx, req) -> Allow|Deny(reason) (default Allow), a SandboxKey abstraction (Task today; DD6 adds Session behind a builder flag), and unregistered stub files tools/{pages,connections,shell,access}.rs. Create core/crates/app/src/features/mod.rs (declared in app/src/lib.rs) with FeatureCtx and two-phase wiring. wire_all(&mut FeatureCtx) runs before build: tool registrations, a model override slot, store handles, and two ordered mutation slots that wiring.rs applies before build, gateway_options: Vec<Box<dyn FnOnce(GatewayBuilder) -> GatewayBuilder>> and worker_options: Vec<Box<dyn FnOnce(&mut WorkerDeps)>>. With these, a later feature file such as features/sandbox.rs or features/compliance.rs can flip a builder option without editing wiring.rs or app.rs. start_all(&StartCtx{plane, platform}) runs after build (background loops). Add no-op files features/{stores,models,admin,memory,routines,search,git,pages,budget,audit,retention,purge,connections,approvals,compliance,sandbox,egress,personal}.rs, so each later feature owns exactly one file and never edits mod.rs. Zero behaviour change.",
+     "ct_ids": [
+      "CT25",
+      "CT16"
+     ],
+     "writable_surface": [
+      "core/crates/gateway/**",
+      "core/crates/app/src/app.rs",
+      "core/crates/app/src/wiring.rs",
+      "core/crates/app/src/lib.rs",
+      "core/crates/app/src/features/**",
+      "core/crates/app/tests/build_app_contract.rs",
+      "review/p1/ledger/CC4.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-gateway -> 0 failed (catalog.rs five frozen names unchanged)",
+      "cd core && cargo test -p aite --test build_app_contract --test cold_start_to_delivery -> 0 failed (the second is read only)",
+      "new tests, each mutation-checked: registry_accepts_external_tool, disabled_tool_hidden_and_call_returns_not_found, policy_hook_deny_returns_denied, features_wire_all_is_noop_by_default, feature_worker_option_applied_before_build, feature_gateway_option_applied_before_build",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC5",
+     "title": "Store: migration mechanism, P0 hygiene, Answering orphan recovery",
+     "goal": "Add a schema_version table plus an ordered, transactional migration runner that refuses newer schemas. Migration 1 = the current schema. Migration 2: seen_events.seen_at + inherent prune_seen_events_before(); query columns tasks.chat_id/cost/tokens backfilled from the data JSON, with an index; a messages index table (chat_id, message_id -> session_id, task_id, outbound) with inherent methods that DD1 exposes through the T0 trait defaults. recover_orphan_tasks also recovers 'answering' tasks, by binding an explicit status list in SQL (ACTIVE_TASK_STATUSES stays locked and untouched). awaiting_approval is deliberately NOT an orphan; EE7 owns what happens to it at startup. journal_mode=delete and busy_timeout 5000 stay. No trait change.",
+     "ct_ids": [
+      "CT02",
+      "CT05",
+      "CT26"
+     ],
+     "writable_surface": [
+      "core/crates/store/**",
+      "core/crates/app/tests/startup_recovery.rs",
+      "core/crates/app/tests/crash_recovery.rs",
+      "review/p1/ledger/CC5.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-store -> 0 failed",
+      "new tests, mutation-checked: migrates_p0_db_in_place (fixture built with the P0 schema), migration_idempotent, refuses_newer_schema_version, answering_task_recovered_as_orphan, awaiting_approval_not_recovered_as_orphan, seen_events_prune, message_index_roundtrip",
+      "cd core && cargo test -p aite --test startup_recovery --test crash_recovery --test sqlite_cross_process -> 0 failed",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC6",
+     "title": "Models: domestic-vendor hardening + in-process reasoning-echo cache (no contract change)",
+     "goal": "Infer the vendor from the model-id prefix first (this catches Bailian-hosted Kimi/GLM/DeepSeek), then from base_url (api.deepseek.com, *.maas.aliyuncs.com / dashscope, open.bigmodel.cn, api.moonshot.cn, ark.cn-beijing.volces.com, api.minimax.cn); explicit ModelConfig.vendor arrives with T0. Quirks: omit temperature for Kimi; parallel_tool_calls=true for Qwen; tool_choice auto only for GLM; strip <think> for MiniMax; accept object-typed arguments. Reasoning echo before T0: a bounded per-client cache keyed by tool_call_id re-attaches reasoning_content / encrypted_content / reasoning_details to the matching assistant message on the next request inside a task's tool loop. It also mirrors them into ModelTurn.raw['provider_extra'] for DD4's persisted round-trip. Parse cache usage from prompt_cache_hit_tokens, prompt_tokens_details.cached_tokens or usage.cached_tokens into Usage.cached_tokens. Request timeout 600 s. Error text 'HTTP <status>: <detail>' plus 'retry-after-ms=<n>' on 429 (agreed with CC3). Recorded-fixture tests for 6 vendors use the existing in-test mini HTTP server; one live test is ignored unless AITE_LIVE_MODEL=1 (keys stay local). Encode today's probe: deepseek-chat is accepted and routed to deepseek-flash; GET /models lists deepseek-flash and deepseek-v4-pro; the thinking-mode 400-without-echo did not reproduce.",
+     "ct_ids": [
+      "CT30",
+      "CT26"
+     ],
+     "writable_surface": [
+      "core/crates/models/**",
+      "review/p1/ledger/CC6.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-models -> 0 failed (existing key-redaction tests still green)",
+      "new tests, mutation-checked: deepseek_thinking_tool_roundtrip_reattaches_reasoning, kimi_request_omits_temperature, qwen_sets_parallel_tool_calls, glm_tool_choice_auto_only, minimax_think_stripped, cache_hit_field_variants, reasoning_captured_in_raw, http_status_and_retry_after_in_error_text",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": [],
+     "human_steps": [
+      "Optional, local with real keys: AITE_LIVE_MODEL=1 cargo test -p aite-models live -- --ignored; log the response model field"
+     ]
+    },
+    {
+     "id": "CC7",
+     "title": "Evals/testing: P1 harness (new suite, check kinds, fake knobs, catalog-aware probe)",
+     "goal": "Create the evals/p1/ suite (evals/p0 stays frozen), seeded with 3 scenarios that pass on B0: injection text in history does not trigger a tool; two chats are handled independently; a capability override (supports_thread=false) leaves current behaviour visible. New check kinds: evidence_ops (kind + payload key/value), model_saw (FakeModel optionally records message contents; substring present/absent), outbound_text_matches (regex_mini), task_cost_max, offered_tools. Add EventSpec.platform and a platform-fixture 'capabilities' override (FakePlatform::with_capabilities). ProtocolProbe's known-tool set becomes the tools actually offered in each call, so registry tools are never reported as unknown_tools. Add a scenario-level worker-options knob (e.g. label on) that DD2 extends. evals/tests/dispatch_timing.rs stays unchanged, because dispatch is still serial by default in wave 1. Wave-2+ tracks add scenarios only as evals/p1/<ID>_*.yaml.",
+     "ct_ids": [
+      "CT29",
+      "CT07",
+      "CT27"
+     ],
+     "writable_surface": [
+      "core/crates/evals/**",
+      "core/crates/testing/**",
+      "evals/p1/**",
+      "evals/README.md",
+      "review/p1/ledger/CC7.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-evals -p aite-testing -> 0 failed (FakeToolGateway formatting tests untouched)",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> last line passed 3/3",
+      "core/target/debug/aite evals run evals/p0 --platform fake --model scripted -> last line passed 10/10",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC8",
+     "title": "Feishu adapter: file layout, new events, card-button flag + frame logging, thread/user reads, pacing",
+     "goal": "(1) Reorganise edge/internal/feishu by concern with zero behaviour change: api.go, platform.go, reads.go, outbound.go, cards.go, events.go, normalize.go, capabilities.go. events.go gets a handler table that other files can register into, so EE11's external.go needs no events.go edit. Tests are *_test.go with the same prefix; testdata subdirs read/, write/, events/. (2) Subscribe im.message.recalled_v1 -> MESSAGE_DELETED, im.chat.member.bot.added_v1 -> BOT_ADDED, im.chat.member.user.added_v1/deleted_v1 -> MEMBER_CHANGED. Parse im.message.reaction.created_v1/deleted_v1 into an internal struct and drop it with a debug log until T0/DD9. (3) Card buttons render Stop/Evidence only when AITE_FEISHU_CARD_BUTTONS=1 (default off; the text hint stays). INFO-log the header type of card frames. Keep TestGoSDKDropsCardFramesOnTheWire (legacy type=card frames), and add a test that card.action.trigger arrives as a type=event frame through OnP2CardActionTrigger. (4) Thread history resolves the omt_ id from the root and lists with container_id_type=thread, falling back to today's filter on a permission error. (5) sender_name via the contact API with an LRU cache and a 300 ms timeout, degrading gracefully. (6) Env flags read inside the package (main.go untouched): AITE_FEISHU_PASSIVE_LISTEN=1, AITE_FEISHU_API_BASE. (7) Per-chat 5 QPS pacing on top of the global bucket; a uuid on send for idempotent retries.",
+     "ct_ids": [
+      "CT04",
+      "CT06",
+      "CT07",
+      "CT13"
+     ],
+     "writable_surface": [
+      "edge/internal/feishu/**",
+      "review/p1/ledger/CC8.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0",
+      "cd edge && go test -race ./internal/feishu/... -count=1 -> ok (fixtures testdata/events/recalled*.json, bot_added*.json, member*.json -> expected; TestCardActionTriggerArrivesAsEventFrame; TestGoSDKDropsCardFramesOnTheWire still passes; TestButtonsOnlyWithFlag; TestThreadHistoryUsesThreadContainer; TestPerChatPacing)",
+      "cd edge && go test -race ./... -count=1 2>&1 | grep -c '^ok' -> 9, and 0 FAIL lines",
+      "scripts/check.sh -> last line 全部通过, exit 0; rows: cargo passed=897+Δ failed=0 (Δ named test by test; lifted pins listed), contracts passed=25 failed=0, OK 25 files, passed 10/10, go 9 packages ok",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [],
+     "human_steps": [
+      "H8 alternative: if the Day-0 API-Explorer click test was inconclusive, build edge from this branch locally with AITE_FEISHU_CARD_BUTTONS=1, click Stop once and read the logged frame type"
+     ]
+    },
+    {
+     "id": "CC9",
+     "title": "DingTalk Stream adapter package (not wired)",
+     "goal": "New package edge/internal/dingtalk implementing server.PlatformPort plus Start/Connected/ReconnectCount with the same signatures as *feishu.Platform; the constructor mirrors feishu.New(cfg, Options, EventSink). Stream client over the already-pinned gorilla/websocket + stdlib (no Go module change): POST /v1.0/gateway/connections/open (EVENT * + CALLBACK /v1.0/im/bot/messages/get + /v1.0/card/instances/callback) -> wss endpoint?ticket; ACK every frame echoing messageId; reconnect with a fresh single-use ticket. Normalize text/richText/picture and isInAtList; conversationType 1/2; senderStaffId. Parse the undocumented text.isReplyMsg/repliedMsg from the raw JSON. The #A anchor from own text or quoted content goes into Anchor.task_no (the primary routing key). repliedMsg.msgId goes into Anchor.thread_id only as a hint, because whether it matches any id Aite stores stays open until the H9 probe. Outbound: sessionWebhook text/markdown, robot oToMessages/groupMessages, AI card createAndDeliver + PUT /v1.0/card/streaming (<= 1 KB per call, full markdown each time); UpdateCard = card instance update; card callback Stop -> CARD_ACTION within 2 s. DownloadFile via downloadCode (1:1 only). ReadHistory/ReadDocument -> UNIMPLEMENTED. Access-token cache. Capabilities use today's pb fields.",
+     "ct_ids": [
+      "NEW25",
+      "CT01",
+      "CT02",
+      "CT13"
+     ],
+     "writable_surface": [
+      "edge/internal/dingtalk/**",
+      "docs/p1/dingtalk.md",
+      "review/p1/ledger/CC9.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/dingtalk/... -count=1 -> ok (fake gateway + ws server: open -> connect -> CALLBACK -> ACK echo; ticket-expiry reconnect; normalize fixtures text/richText/picture/quote -> expected; card streaming chunks <= 1 KB; callback answered within 2 s)",
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0",
+      "cd edge && go test -race ./... -count=1 2>&1 | grep -c '^ok' -> 10 (9 + this package), 0 FAIL lines",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC10",
+     "title": "WeCom aibot WebSocket adapter package (not wired)",
+     "goal": "New package edge/internal/wecom with the same port and lifecycle shape as CC9: a hand-written client of about 500 lines over gorilla/websocket, against the aibot protocol. Protocol: aibot_subscribe; ping every 30 s; aibot_msg_callback; aibot_event_callback. Events handled: enter_chat; template_card_event; feedback_event, parsed into an internal struct for DD11's thumbs-down mapping; disconnected_event -> standby, since there is one connection per bot. Replies: aibot_respond_msg streaming on one stream.id, auto-finished at 9 min with a '进度见 #A..' pointer; aibot_respond_welcome_msg; aibot_respond_update_msg (template card, 5 s); aibot_send_msg (proactive, only to conversations that messaged first; 30/min per conversation). Chunked upload of 512 KB x at most 100; media download + AES-256-CBC decrypt with aeskey. Quote parsing is content-only (there is no msgid), so #A goes into Anchor.task_no. Group messages: @ text/mixed/quote only.",
+     "ct_ids": [
+      "NEW25",
+      "CT01",
+      "CT02",
+      "CT13"
+     ],
+     "writable_surface": [
+      "edge/internal/wecom/**",
+      "docs/p1/wecom.md",
+      "review/p1/ledger/CC10.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/wecom/... -count=1 -> ok (fake ws: subscribe/ping/callback; disconnected_event -> standby; stream auto-finish at 9 min with an injected clock; AES-256-CBC vector; chunked upload 512 KB; quote -> #A anchor; feedback_event parsed)",
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC11",
+     "title": "Egress proxy package (not wired)",
+     "goal": "New package edge/internal/egress, stdlib only: an HTTP CONNECT + absolute-URI forward proxy. Exported API for DD8: New(Config) *Proxy; (*Proxy).Serve(ctx, net.Listener) error; Register(token, Policy); Unregister(token). A client is identified by the token in Proxy-Authorization (one per sandbox). Policy{Level none|trusted|custom|full, AllowHosts, AuditTag}; host matching is exact or *.suffix, on ports 80/443 by default. The china-trusted preset is a constant list: pypi tuna/aliyun/tencent/huawei, npmmirror, goproxy.cn, rsproxy.cn, ustc crates, apt mirrors, hf-mirror, modelscope. IM/API hosts (open.feishu.cn, api.dingtalk.com, mcp.dingtalk.com, qyapi.weixin.qq.com) are NEVER in any anonymous preset; they are reachable only as credential-bound connection hosts (EE10). Default deny returns 403 with a reason. Audit is JSONL, one NetworkEvent per request, in hourly files data/audit/network/YYYYMMDDHH.jsonl. Credential bindings are rejected as unsupported until EE10. All tests are hermetic (httptest servers only, never public hosts). [REVISION 2026-09-25] china-trusted preset: list ustc crates; add rsproxy.cn only after a mainland reachability check; modelscope.cn primary, hf-mirror.com secondary (volunteer, no SLA).",
+     "ct_ids": [
+      "CT17",
+      "CT18",
+      "CT27",
+      "NEW11",
+      "NEW12"
+     ],
+     "writable_surface": [
+      "edge/internal/egress/**",
+      "docs/p1/egress.md",
+      "review/p1/ledger/CC11.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/egress/... -count=1 -> ok (allow exact, allow *.suffix, deny default 403, missing/unknown token denied, IM API hosts not in the trusted preset, CONNECT tunnel to an httptest TLS server moves bytes, audit line schema, hourly rotation with an injected clock)",
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "CC12",
+     "title": "Sandbox image China edition + AIGC implicit labeler",
+     "goal": "Add build args APT_MIRROR and PIP_INDEX_URL (defaults upstream; mainland values documented). Add git, curl, jq, unzip, ca-certificates and bash (approved in H1). Bake in runtime mirror configs that stay inert under network none: pip.conf -> tuna/aliyun, .npmrc -> npmmirror, GOPROXY=goproxy.cn, cargo config -> rsproxy. /opt/aite/aite_label.py writes implicit AIGC metadata (Label, ContentProducer, ProduceID, ContentPropagator, PropagateID): PNG tEXt/iTXt; JPEG EXIF/XMP via pillow; DOCX/XLSX/PPTX docProps/custom.xml via zipfile; Markdown front-matter; PDF Info via pypdf only if H1 approved it, otherwise PDF is skipped and the script says so. Optional visible 'AI生成' image watermark. A unittest suite at /opt/aite/tests. Keep uid 1000 and the CJK fonts; TestImageHasNoNetworkEgress still passes. All tests are hermetic. [REVISION 2026-09-25] docker/sandbox FROM python:3.11-slim goes through ARG BASE_REGISTRY as well. [REVISION 2026-09-25b] cargo config points to ustc (sparse+https://mirrors.ustc.edu.cn/crates.io-index/), rsproxy only as a comment (switch after a mainland check, EE10); test_cargo_config_points_to_ustc.",
+     "ct_ids": [
+      "CT10",
+      "CT11",
+      "CT18"
+     ],
+     "writable_surface": [
+      "docker/sandbox/**",
+      "edge/internal/sandbox/docker_test.go",
+      "review/p1/ledger/CC12.md"
+     ],
+     "depends_on": [],
+     "acceptance_cloud": [
+      "docker build -t aite-sandbox:p0 docker/sandbox -> ok",
+      "docker run --rm --network none aite-sandbox:p0 python -m unittest discover -s /opt/aite/tests -v -> OK",
+      "docker run --rm --network none aite-sandbox:p0 sh -c 'git --version && jq --version' -> exit 0",
+      "cd edge && go test -tags docker ./internal/sandbox/... -count=1 -> ok; docker ps -a --filter label=aite.task -q | wc -l -> 0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer, not the agent, also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": []
+    }
+   ]
+  },
+  {
+   "name": "Wave 2a - T0 companion (alone; base = origin/contract/p1.0 pushed by the human)",
+   "start_gate": "All wave-1 PRs merged (CC1 first). P0-CLOSE on main (cargo 901, contracts 27, OK 25 files). The human ran H11: branch contract/p1.0 = main + T0 patch + make proto-gen + relock with the pre-patch binary. On that branch lock --check prints OK 26 files, the contracts and proto-crate tests pass, and go build ./... passes. The rest of the workspace is expected to be red until this track lands.",
+   "tracks": [
+    {
+     "id": "T0c",
+     "title": "T0 companion: make the workspace compile, pins, Services threading, Go optional interfaces, parallel-dispatch flip",
+     "goal": "Start with: git fetch origin contract/p1.0 && git checkout -B <session-branch> origin/contract/p1.0. Apply exactly the T0-p1.0 companion_edits list: (1) struct-literal sites and exhaustive match arms in every crate; (2) the five literal p0.2 pins (edge/cmd/aite-edge/main_test.go:202, core/crates/evidence/tests/manifest.rs:65, core/crates/evals/tests/evals_runner.rs:111, core/crates/evals/tests/protocol_probe.rs:523, core/crates/app/tests/cli_smoke.rs:481); (3) EventKind::Reaction as a counter-only R4 arm before R5/R6, with a regression test that a reaction inside an active thread creates no turn and no steer; (4) new CardActionKind arms that log + drop; (5) Services threading (WorkerDeps, ControlDeps, gateway with_services, FeatureCtx.services) plus the WorkerDeps.aigc_label: Option<LabelConfig> slot (LabelConfig in worker/src/label.rs, default None) at every WorkerDeps literal, so DD5 only consumes it; (6) evals EventSpec new fields; (7) Go optional interfaces in new files edge/internal/server/ports_p1.go + services_p1.go (+ test) with an UNIMPLEMENTED fallback; (8) WorkerConfig.max_parallel_tasks (default 4) and context_max_tokens wired into CC2's with_max_parallel and CC3's budget, fixing any app/evals test that pinned strictly serial order (stop and report if a genuine race appears). No feature behaviour beyond this plumbing. Never regenerate edge/gen. Record the B1 baseline rows in CLAUDE.md. Open the PR to main; it carries the human's contract commit. [REVISION 2026-09-25] May regenerate core/Cargo.lock only if a companion edit forces it.",
+     "ct_ids": [
+      "CT01",
+      "CT02",
+      "CT04",
+      "CT26"
+     ],
+     "writable_surface": [
+      "core/crates/control/**",
+      "core/crates/gateway/**",
+      "core/crates/models/**",
+      "core/crates/store/**",
+      "core/crates/testing/**",
+      "core/crates/evals/**",
+      "core/crates/edge-client/**",
+      "core/crates/app/**",
+      "core/crates/evidence/**",
+      "edge/internal/server/ports_p1.go",
+      "edge/internal/server/services_p1.go",
+      "edge/internal/server/services_p1_test.go",
+      "edge/cmd/aite-edge/main_test.go",
+      "CLAUDE.md",
+      "review/p1/ledger/T0c.md",
+      "core/crates/worker/src/**",
+      "core/crates/worker/tests/**",
+      "core/Cargo.lock"
+     ],
+     "depends_on": [
+      "T0",
+      "CC1",
+      "CC2",
+      "CC3",
+      "CC4",
+      "CC5",
+      "CC6",
+      "CC7",
+      "CC8",
+      "CC9",
+      "CC10",
+      "CC11",
+      "CC12"
+     ],
+     "acceptance_cloud": [
+      "scripts/check.sh -> 全部通过; OK 26 files; contracts passed=27+K failed=0; cargo passed=<main after wave 1 + P0-CLOSE>+K+Δ failed=0 (Δ itemized per test file); passed 10/10; B9 passed 3/3; go packages ok=12 fail=0 (incl. cmd/aite-edge with the p1.0 pin)",
+      "new tests: reaction_in_active_thread_creates_no_turn_and_no_steer, new_card_action_kinds_logged_and_dropped, two_chats_run_in_parallel_with_default_config, services_threaded_into_worker_and_control, TestOptionalInterfaceUnimplemented (Go)",
+      "git diff --name-only origin/contract/p1.0...HEAD -> only paths in this surface (no locked or generated file)",
+      "PR CI (opened against main): checks + compose-smoke + sandbox-docker green"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [
+      "builds on the human's locked commit; writes none of it",
+      "core/crates/app/src/app.rs, wiring.rs, run.rs (R0 for this wave)",
+      "edge/internal/server/** (new files only)"
+     ],
+     "human_steps": [
+      "Merge the T0c PR (it contains the contract/p1.0 commit), delete contract/p1.0, refresh the B1 sha and counts in every wave-2 paste (H12)"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Wave 2 - foundations on p1.0 (base B1 = main after T0c)",
+   "start_gate": "T0c merged (CONTRACT_VERSION p1.0 on both sides, OK 26 files, check.sh green). B1 rows are copied from the T0c receipt into every wave-2 paste. Rules for this wave: only DD6 (cold_start_to_delivery.rs, graceful_shutdown.rs) and DD12 (cli_smoke.rs) edit existing core/crates/app/tests files; any other behaviour change that would alter an existing app test ships default-off and is listed in the receipt; new integration tests go to core/crates/app/tests/<ID>_*.rs; eval scenarios go only to evals/p1/<ID>_*.yaml. Tracks do not wait for DD2's fakes: each writes private doubles under its own tests/<ID>_support.rs. DD10 and DD12 read the H8 click-test result and the H1 axum approval.",
+   "tracks": [
+    {
+     "id": "DD1",
+     "title": "Store P1: SessionStore P1 methods + five domain stores (SQLite)",
+     "goal": "Implement every T0 SessionStore default method: find_task_by_no (incl. delivered), list_open_tasks, index_message/find_session_by_message on CC5's table, recent_sessions_by_sender, find_open_session, list_sessions_inactive_since, get_turn_by_message, update_turn, list_tasks, purge_chat_content (a tombstone that keeps audit metadata), prune_seen_events. Implement the five domain stores as migrations 3+ in store/src/{session_p1,scope,memory,routine,usage,audit}.rs: ScopeStore (org -> workspace -> channel/dm inheritance, snapshot_hash); MemoryStore (tombstone, purge); RoutineStore (due() indexed by next_run_at); UsageLedger (spent by scope/key/since; summary by chat/user/model; DM usage keyed to the user); AuditLog (append-only; purge_before only for rows older than 190 days). Wire them in core/crates/app/src/features/stores.rs by filling FeatureCtx.services.",
+     "ct_ids": [
+      "CT02",
+      "CT05",
+      "CT16",
+      "CT21",
+      "CT22",
+      "CT26",
+      "CT27",
+      "NEW10",
+      "NEW23"
+     ],
+     "writable_surface": [
+      "core/crates/store/**",
+      "core/crates/app/src/features/stores.rs",
+      "review/p1/ledger/DD1.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC5"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-store -> 0 failed; new, mutation-checked: scope_channel_overrides_org, memory_private_chat_reads_workspace_readonly, routine_due_ordering, usage_spent_by_channel_month, dm_usage_attributed_to_user, audit_purge_keeps_190_days, find_task_by_no_includes_delivered, purge_chat_content_tombstones_turns",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "XL",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD2",
+     "title": "Edge-client P1 RPCs + fakes for all new ports + eval fixtures",
+     "goal": "EdgeClient overrides every new PlatformPort method with the new RPCs (incl. oauth_authorize_url/oauth_exchange) and acquire_scoped with AcquireRequest.egress, and refreshes the capabilities cache on reconnect. testing: FakeScopeStore, FakeMemoryStore, FakeRoutineStore, FakeUsageLedger, FakeAuditLog (new files); FakePlatform implements the new methods with fixtures and the dingtalk_v1/wecom_v1 capability profiles; FakeSandbox implements acquire_scoped. evals: PlatformFixture gains pins, search_hits, users, chats and docs; Deps wires the new fakes; the scenario worker-options knob can switch on the AIGC label and the session sandbox, so DD5/DD6 scenarios can exercise default-off behaviour.",
+     "ct_ids": [
+      "CT07",
+      "CT08",
+      "CT14",
+      "CT16",
+      "CT20"
+     ],
+     "writable_surface": [
+      "core/crates/edge-client/**",
+      "core/crates/testing/**",
+      "core/crates/evals/src/scenario.rs",
+      "core/crates/evals/src/deps.rs",
+      "core/crates/evals/tests/**",
+      "evals/p1/DD2_*.yaml",
+      "review/p1/ledger/DD2.md"
+     ],
+     "depends_on": [
+      "T0c"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-edge-client -p aite-testing -p aite-evals -> 0 failed (new: each RPC round-trip through the in-test gRPC edge; UNIMPLEMENTED maps to PlatformError code unimplemented)",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD3",
+     "title": "Control P1 routing: anchor resolver, capability routing, DM sessions, edit/delete semantics, submit_internal",
+     "goal": "Resolve a follow-up content-first (im.md §5.2), trying in order: #A in the message's own text; #A in the quote text; a quote/message-id hit in the message index; the same initiator within 30 min when that sender has exactly one open task. Otherwise start a new task and say so. When requires_visible_anchor is set, every control reply gets a visible '#A..' prefix, in_thread degrades to a quote, and outbound message ids are indexed. p2p -> SessionKind::Dm, 1:1 only (NEW07 holds by construction), subject to access.dm_enabled. Edit semantics: a MessageEdited event adds a before/after system note via Turn.message_id and never starts a task. Document that no platform emits this event today: Feishu has no edit event, and EE13 does pull-based edits. A deleted reply is kept; a deleted root with replies continues, and without replies it archives. ControlPlane::submit_internal starts a task in a chat or thread (origin routine/followup/ambient/fork/external/admin) through the same dispatch. dispatch.rs wires RunHooks.take_decision to a per-task ApprovalDecision mailbox on the plane with a pub(crate) send_decision(task_id, decision), so EE7 only writes into it from approvals.rs / routing/card_actions.rs. !status: checklist snapshot, queue position, and awaiting_approval tasks via OPEN_TASK_STATUSES. A top-level @ still creates exactly one Task session. Approve/Reject/Submit card actions stay in the routing/card_actions.rs stub (EE7).",
+     "ct_ids": [
+      "CT02",
+      "CT04",
+      "CT05",
+      "CT06",
+      "CT13",
+      "CT20",
+      "NEW07"
+     ],
+     "writable_surface": [
+      "core/crates/control/src/routing/mod.rs",
+      "core/crates/control/src/routing/resolver.rs",
+      "core/crates/control/src/sessions.rs",
+      "core/crates/control/src/dispatch.rs",
+      "core/crates/control/src/internal.rs",
+      "core/crates/control/src/commands/status.rs",
+      "core/crates/control/src/commands/restart.rs",
+      "core/crates/control/tests/dd3_*.rs",
+      "core/crates/control/tests/routing.rs",
+      "core/crates/control/tests/commands.rs",
+      "evals/p1/DD3_*.yaml",
+      "review/p1/ledger/DD3.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC2"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-control -> 0 failed; new, mutation-checked: resolver_task_no_in_text, resolver_task_no_in_quote, resolver_message_index_hit, resolver_30min_single_open_task, resolver_ambiguous_starts_new_and_says_so, visible_anchor_prefix_on_no_thread_platform, p2p_creates_dm_session, edit_writes_before_after_note, root_deleted_without_replies_archives, submit_internal_dispatches, take_decision_reads_the_task_mailbox, top_level_mention_still_one_task_session",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k (incl. DD3_dingtalk_anchor.yaml with the dingtalk_v1 capability override)",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD4",
+     "title": "Worker loop P1: provider_extra round-trip, typed retries, post_update, CT09 snapshot, attachment limits",
+     "goal": "Carry reasoning end to end: ModelTurn provider_extra -> Turn.provider_extra on assistant turns -> replayed into Message.provider_extra in context. It is never carried across a model/vendor change (after !restart or a model switch). Retry on typed ModelError: RateLimited uses retry_after; Auth and BadRequest fail fast with fixed texts. post_update local tool: an interim thread message, at most 1 per 30 s, advertised in the catalog ('how is it going', 'blocked' notices). CT09 lock: the first task of a session resolves EffectiveSettings (deps.services.scope) and writes skills, instructions, model and snapshot_hash into Session.config_snapshot; later tasks reuse it, while connections and domains stay per request (DD6). The context budget comes from WorkerConfig.context_max_tokens. NEW04: at most 5 attachments per message, with size caps from capabilities (Tag's images ~3.75 MB / PDFs 5 MB / others 100 MB as defaults where the platform allows); the ignored ones are named. Update platform.md with post_update guidance (new live baseline, recorded).",
+     "ct_ids": [
+      "CT02",
+      "CT04",
+      "CT09",
+      "CT13",
+      "CT30",
+      "NEW04"
+     ],
+     "writable_surface": [
+      "core/crates/worker/src/loop.rs",
+      "core/crates/worker/src/local_tools/mod.rs",
+      "core/crates/worker/src/local_tools/post_update.rs",
+      "core/crates/worker/src/context/mod.rs",
+      "core/crates/worker/src/context/transcript.rs",
+      "core/crates/worker/src/context/attachments.rs",
+      "core/crates/worker/src/snapshot.rs",
+      "core/crates/worker/prompts/platform.md",
+      "core/crates/worker/tests/common/**",
+      "core/crates/worker/tests/test_context.rs",
+      "core/crates/worker/tests/test_limits.rs",
+      "core/crates/worker/tests/test_steer.rs",
+      "core/crates/worker/tests/test_prompts_checklist.rs",
+      "core/crates/worker/tests/dd4_*.rs",
+      "evals/p1/DD4_*.yaml",
+      "review/p1/ledger/DD4.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC3",
+      "CC6"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-worker -> 0 failed; new, mutation-checked: provider_extra_replayed_on_followup, provider_extra_dropped_on_model_switch, rate_limited_uses_retry_after, auth_error_fails_fast, post_update_posts_and_is_rate_limited, snapshot_locked_at_first_task, sixth_attachment_ignored_and_named",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD5",
+     "title": "Worker output P1: AIGC label machinery (default off), card links, model footer, visible anchor, card repost",
+     "goal": "Explicit AIGC label behind the WorkerDeps.aigc_label: Option<LabelConfig> slot that T0c added; this track fills LabelConfig in label.rs and consumes it. Default None; EE12 turns it on from compliance.aigc_label in wave 3. It renders a card footer '内容由 AI 生成 · <display_name>' and puts the label INSIDE the same send_text, never in a second message, because p0 pins send_text counts. Implicit label behind the same option: run python /opt/aite/aite_label.py <path> in the task sandbox before fetch_artifact (CC12 image). Card links: Configure -> <admin.public_base_url>/chats/<chat>, absent in DMs and external chats (NEW19); MR and page links are appended by features. The footer names the model display_name (CT30). Visible '#A..' on replies and cards when capabilities.requires_visible_anchor is set. Busy-thread repost: after more than 20 messages below the card, repost it at the bottom, at most once every 15 min (CT13). Index outbound message ids. p1 scenarios switch the label on through the DD2 worker-options knob.",
+     "ct_ids": [
+      "CT13",
+      "CT14",
+      "CT30",
+      "NEW19"
+     ],
+     "writable_surface": [
+      "core/crates/worker/src/deliver.rs",
+      "core/crates/worker/src/card.rs",
+      "core/crates/worker/src/texts.rs",
+      "core/crates/worker/src/label.rs",
+      "core/crates/worker/tests/test_final.rs",
+      "core/crates/worker/tests/test_checklist.rs",
+      "core/crates/worker/tests/test_card_evidence.rs",
+      "core/crates/worker/tests/dd5_*.rs",
+      "evals/p1/DD5_*.yaml",
+      "review/p1/ledger/DD5.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC3",
+      "CC12"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-worker -> 0 failed; new, mutation-checked: label_off_by_default_reply_unchanged, footer_has_aigc_label_and_display_name, label_inside_same_send_text, label_script_runs_before_fetch_when_enabled, configure_link_absent_in_dm, visible_anchor_on_dingtalk_profile, card_reposted_after_busy_thread",
+      "core/target/debug/aite evals run evals/p0 --platform fake --model scripted -> passed 10/10 (label off)",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD6",
+     "title": "Gateway policy: scope-filtered catalog, egress policy, per-thread sandbox (owns the pinned app tests), run_shell, describe_access",
+     "goal": "Each call resolves EffectiveSettings (services.scope). The catalog is filtered by bundle.tools and feature predicates. policy.rs denies approval_required_tools with 'needs approval' until EE7 turns that into a pause. Egress: settings.network + bundle domains + connections -> EgressPolicy -> SandboxPort::acquire_scoped. Per-thread sandbox (CT10): key = session_id; release_task revokes only the token; the sandbox lingers until the reaper reaps it after sandbox.linger_sec idle; the next task in the thread reuses /work. EXCEPTION kept for B8 07 and for runaway execs: a cancelled task (!stop) releases its sandbox immediately, and shutdown still releases everything (close_all). This track flips the feature on (features/sandbox.rs pushes a gateway_options entry when sandbox.linger_sec > 0). It owns the app tests that pin per-task release: cold_start_to_delivery.rs:661-665 (after BB2, which also edits that file) and graceful_shutdown.rs:279. New tools through the CC4 registry: run_shell (ExecLanguage::Bash) and describe_access ('what can you access from this channel'). An is_member check guards cross-chat tools (CT29 confused deputy). Lifts W7 'sandbox released at task end'.",
+     "ct_ids": [
+      "CT09",
+      "CT10",
+      "CT16",
+      "CT17",
+      "CT18",
+      "CT29",
+      "NEW11"
+     ],
+     "writable_surface": [
+      "core/crates/gateway/**",
+      "core/crates/worker/tests/test_sandbox_handoff.rs",
+      "core/crates/app/src/features/sandbox.rs",
+      "core/crates/app/tests/cold_start_to_delivery.rs",
+      "core/crates/app/tests/graceful_shutdown.rs",
+      "core/crates/app/tests/dd6_*.rs",
+      "evals/p1/DD6_*.yaml",
+      "review/p1/ledger/DD6.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC4"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-gateway -p aite-worker -> 0 failed; new, mutation-checked: catalog_filtered_by_bundle, approval_required_tool_denied_until_approved, egress_policy_from_settings, second_task_in_thread_reuses_sandbox, sandbox_released_after_linger, cancel_releases_sandbox_immediately, run_shell_uses_bash, describe_access_lists_bundle, cross_chat_read_requires_membership",
+      "cd core && cargo test -p aite --test cold_start_to_delivery --test graceful_shutdown -> 0 failed (release assertions moved to the linger/cancel semantics)",
+      "core/target/debug/aite evals run evals/p0 --platform fake --model scripted -> passed 10/10 (07 release min:1 via the cancel path)",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD7",
+     "title": "Models P1: vendor profiles, reasoning echo, streaming/timeouts, tiered pricing, ModelRouter",
+     "goal": "Profiles are selected by ModelConfig.vendor, falling back to CC6's inference. Thinking shapes: deepseek thinking/reasoning_effort; qwen enable_thinking + preserve_thinking; glm thinking + clear_thinking=false; kimi thinking keep, never temperature, max_tokens >= 16000; doubao thinking.type with encrypted_content echo; minimax reasoning_split. Echo Message.provider_extra verbatim; CC6's in-process cache remains the fallback inside a task. SSE streaming when stream=true (chunked reads, no new crate features); timeout_sec from config. Map ModelError::RateLimited/Auth/BadRequest. Cost = input + cached-hit + cache-write + output, with the DeepSeek off-peak multiplier (outside weekdays 9-12 and 14-18 Beijing). ModelRouter implements ModelPort: primary, fallback on RateLimited/5xx, fast, and named catalog entries for per-scope/per-thread selection. Warn on overseas endpoints (dashscope-intl, api.moonshot.ai, api.z.ai, api.minimax.io). Wire it in app/src/features/models.rs via the FeatureCtx model override slot. [REVISION 2026-09-25] selfhost profile (explicit vendor always beats CC6 prefix inference; no cloud-vendor params; thinking toggle via chat_template_kwargs). Overseas endpoints are REJECTED at construction (Config error) unless allow_overseas_endpoint=true, then warned.",
+     "ct_ids": [
+      "CT30",
+      "CT26"
+     ],
+     "writable_surface": [
+      "core/crates/models/**",
+      "core/crates/app/src/features/models.rs",
+      "review/p1/ledger/DD7.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC6"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-models -> 0 failed; new fixtures, mutation-checked: deepseek_thinking_echoes_reasoning, glm_clear_thinking_false_echo, kimi_no_temperature_min_tokens, doubao_encrypted_content_echo, sse_stream_assembles_tool_calls, cost_with_cache_hit_and_write, offpeak_multiplier_applied, router_falls_back_on_429, overseas_endpoint_warned",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [],
+     "human_steps": [
+      "Locally with real keys (never in the cloud env): AITE_LIVE_MODEL=1 cargo test -p aite-models live -- --ignored for deepseek-flash, qwen3.7-plus via the Bailian workspace endpoint, glm-5.3; log the response model field"
+     ]
+    },
+    {
+     "id": "DD8",
+     "title": "Edge wiring (Go R0 owner): platform factory, egress proxy + sandbox networks, HTTP ingress listener, config mirror",
+     "goal": "main.go (after AA4): a platform factory feishu|dingtalk|wecom|fake over a lifecycle interface (Start/Connected/ReconnectCount), mapping config sections to adapter Options. Start the CC11 proxy on the sandbox internal network and set EdgeStatus.egress_ok. Start the HTTP ingress listener when edge.http_listen is set, and set http_ingress_ok; routes are mounted by edge/internal/webhook (EE11), so here only the listener and a health route. sandbox/docker.go: network none -> NetworkMode none as today. Other levels -> internal network aite-sandbox-net + HTTP(S)_PROXY with a per-sandbox token registered with the proxy policy from AcquireRequest.egress. Validate the network string (today it passes any string to Docker); Full requires sandbox.allow_full. config.go mirrors the new edge-read sections and accepts dingtalk/wecom (flip config_test.go's rejection pin). docker-compose.yml: the internal network, with edge attached. Docker tests are hermetic: a local test HTTP server on the allowlist, never a public host. [REVISION 2026-09-25] listener.go pre-seeds a route registry Register(path, func(Deps) http.Handler); main.go passes the ingress sink and config as Deps, so EE11 only adds gitlab.go.",
+     "ct_ids": [
+      "CT17",
+      "CT18",
+      "CT22",
+      "NEW25"
+     ],
+     "writable_surface": [
+      "edge/cmd/aite-edge/**",
+      "edge/internal/server/**",
+      "edge/internal/config/**",
+      "edge/internal/aiteerr/**",
+      "edge/internal/sandbox/**",
+      "edge/internal/webhook/listener.go",
+      "edge/internal/webhook/listener_test.go",
+      "docker-compose.yml",
+      "review/p1/ledger/DD8.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC9",
+      "CC10",
+      "CC11"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./... -count=1 -> every package ok, 0 FAIL (new: TestFactorySelectsPlatform, TestDingtalkConfigAccepted, TestNetworkTrustedAttachesInternalNetAndProxyEnv, TestFullRequiresAllowFull, TestEgressOkInStatus)",
+      "make docker-image && cd edge && go test -tags docker ./internal/sandbox/... -count=1 -> ok (TestImageHasNoNetworkEgress for none; new: a trusted sandbox reaches an allowlisted LOCAL test host through the proxy and a non-allowlisted local host gets 403); docker ps -a --filter label=aite.task -q | wc -l -> 0",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0; PR CI compose-smoke green",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [
+      "edge/cmd/aite-edge/main.go",
+      "edge/internal/server/**",
+      "edge/internal/config/**",
+      "edge/internal/aiteerr/**",
+      "docker-compose.yml"
+     ]
+    },
+    {
+     "id": "DD9",
+     "title": "Feishu reads P1: pins, message search, users/chats/membership, reactions, history fields, OAuth, capabilities",
+     "goal": "Implement the T0c optional interfaces in the feishu package: PinReader (GET /im/v1/pins); MessageSearcher (POST /im/v1/messages/search with the service-user user_access_token from feishu.service_user_token_env, refreshed with offline_access; UNIMPLEMENTED when unset); UserLookup (is_external/is_guest from tenant_key); ChatLookup (external/public mode); MemberChecker; ChatLister; OAuthProvider (admin login: authorize URL + code exchange; secrets stay in edge). Reaction events -> EventKind::Reaction (thumbs_down normalised), only for reactions on Aite's own messages. Quote: the parent message content goes into NormalizedEvent.quote. HistoryMessage updated_at/deleted/reply_to come from the list API (CT06 pull-based edits). sender_external comes from tenant_key. Set the new capability values (api_base from config).",
+     "ct_ids": [
+      "CT06",
+      "CT07",
+      "CT08",
+      "CT20",
+      "CT24",
+      "CT28",
+      "NEW02",
+      "NEW06",
+      "NEW08"
+     ],
+     "writable_surface": [
+      "edge/internal/feishu/reads.go",
+      "edge/internal/feishu/reads_test.go",
+      "edge/internal/feishu/search.go",
+      "edge/internal/feishu/search_test.go",
+      "edge/internal/feishu/users.go",
+      "edge/internal/feishu/users_test.go",
+      "edge/internal/feishu/chats.go",
+      "edge/internal/feishu/chats_test.go",
+      "edge/internal/feishu/oauth.go",
+      "edge/internal/feishu/oauth_test.go",
+      "edge/internal/feishu/events.go",
+      "edge/internal/feishu/events_test.go",
+      "edge/internal/feishu/normalize.go",
+      "edge/internal/feishu/normalize_test.go",
+      "edge/internal/feishu/capabilities.go",
+      "edge/internal/feishu/capabilities_test.go",
+      "edge/internal/feishu/platform.go",
+      "edge/internal/feishu/api.go",
+      "edge/internal/feishu/testdata/read/**",
+      "edge/internal/feishu/testdata/events/**",
+      "review/p1/ledger/DD9.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC8"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/feishu/... -count=1 -> ok (fixtures: pins list, search with user token, search without token -> UNIMPLEMENTED, chat external flag, user guest flag, reaction thumbs_down on an Aite message -> REACTION event, reaction on a non-Aite message ignored, quote parent -> quote, OAuth code exchange request shape, tokens never logged)",
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0; scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": []
+    },
+    {
+     "id": "DD10",
+     "title": "Feishu writes P1: docx hosted pages with AIGC banner, edit_text, DM, card links/approval buttons, mentions, dedupe",
+     "goal": "DocWriter: docx create/update via blocks from markdown, shared with the chat through the permission-member API with member_type=openchat, using the tenant token. An explicit AIGC banner block ('本页内容由人工智能生成') goes at the top whenever DocWrite.aigc_banner is set. TextEditor: edit the bot's own text/post (max 20 edits). DirectSender. Cards render CardLink URL buttons and an ApprovalPrompt with Approve/Reject buttons, live only when feishu.card_buttons is set. The default flips to true only if the H8 click test passed; otherwise the text hint '!approve #A.. / !reject #A..' is shown. OutboundText.mentions -> <at user_id>. dedupe_key -> uuid (1 h dedupe).",
+     "ct_ids": [
+      "CT13",
+      "CT14",
+      "CT20",
+      "CT23",
+      "NEW05"
+     ],
+     "writable_surface": [
+      "edge/internal/feishu/outbound.go",
+      "edge/internal/feishu/outbound_test.go",
+      "edge/internal/feishu/cards.go",
+      "edge/internal/feishu/cards_test.go",
+      "edge/internal/feishu/docs.go",
+      "edge/internal/feishu/docs_test.go",
+      "edge/internal/feishu/dm.go",
+      "edge/internal/feishu/dm_test.go",
+      "edge/internal/feishu/testdata/write/**",
+      "review/p1/ledger/DD10.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC8"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/feishu/... -count=1 -> ok (docx create + openchat share request shapes; AIGC banner block present; edit_text on own message; approval buttons only with card_buttons; links rendered; mentions -> at tags; uuid set from dedupe_key)",
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0; scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [],
+     "human_steps": [
+      "Real-tenant smoke once merged: publish a doc into a test group and check that only group members can open it and the banner shows"
+     ]
+    },
+    {
+     "id": "DD11",
+     "title": "DingTalk + WeCom adapters P1 completion",
+     "goal": "Set the dingtalk_v1/wecom_v1 capability values, with a table test against the contracts values. Card callbacks Approve/Reject/Submit: DingTalk within 2 s; WeCom template_card_event -> aibot_respond_update_msg within 5 s. WeCom feedback_event (negative) -> EventKind::Reaction{thumbs_down:true}, so NEW02 mute works on WeCom. WeCom limits: at most 3 in-flight replies per user, the 24 h reply window, 30/min proactive per conversation. Mentions: DingTalk createAndDeliver atUserIds; WeCom stays unmentioned (documented). DirectSender: DingTalk oToMessages; WeCom aibot_send_msg to a single chat. dedupe_key idempotency on retries. OAuthProvider for DingTalk (and WeCom where the app type allows), so the admin console can log in on those deployments; the bootstrap token (DD12) covers the rest. Both adapters implement TextEditor as UNIMPLEMENTED. Anchors stay content-first (#A); DingTalk repliedMsg.msgId is used only once the H9 probe confirms it matches a stored id.",
+     "ct_ids": [
+      "NEW25",
+      "NEW02",
+      "CT13",
+      "CT20",
+      "CT23",
+      "CT24"
+     ],
+     "writable_surface": [
+      "edge/internal/dingtalk/**",
+      "edge/internal/wecom/**",
+      "docs/p1/dingtalk.md",
+      "docs/p1/wecom.md",
+      "review/p1/ledger/DD11.md"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC9",
+      "CC10"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/dingtalk/... ./internal/wecom/... -count=1 -> ok (approve callback answered < deadline with an injected clock; capability values match contracts dingtalk_v1/wecom_v1 via a table test; wecom feedback_event -> thumbs_down reaction; 4th in-flight reply to one user is queued)",
+      "cd edge && go vet ./... && gofmt -l . | wc -l -> exit 0 and 0; scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [],
+     "human_steps": [
+      "Real-device smoke after DD8 + DD11 merge: DingTalk test org (Stream mode, card callback STREAM) and a WeCom API-mode aibot: @Aite a question, a follow-up quoting '#A..', a card update, a Stop, a 👎/feedback mute"
+     ]
+    },
+    {
+     "id": "DD12",
+     "title": "Admin console v0 (Rust axum, server-rendered, 等保二级 basics)",
+     "goal": "core/crates/admin: axum with exactly the features approved in H1. The Cargo.lock diff WILL add transitive packages (e.g. serde_urlencoded and serde_path_to_error); list them in the receipt. Server-rendered HTML with an escaping helper, bound to admin.listen, with an 'aite admin serve' subcommand. Login: platform OAuth through PlatformPort::oauth_authorize_url/oauth_exchange (Feishu first; DingTalk/WeCom once DD11's OAuthProvider exists) against admin.owner_ids, plus a one-time bootstrap token (admin.bootstrap_token_env) for any platform. 等保二级 basics: login-failure lockout, session timeout, HMAC session cookie, CSRF tokens on every form. Pages: scopes (org/workspace/channel settings incl. respond-automatically, network level, model, spend limit); access bundles (connections, repos, domains, skills, instructions, tools, approval_required_tools); skills (markdown); read-only tasks + evidence viewer; and a '模型与备案' panel listing every configured model (primary, fallback, fast, catalog) with its own display_name and filing_no. Pre-seed page stubs setup/usage/audit/routines/memory/network/connections/disconnect/personal/hosted for later waves. [REVISION 2026-09-25] aite admin serve = one forwarding branch in core/crates/app/src/main.rs (clap top-level). Tests may use dev-deps tower(util)+http-body-util if approved (D12), else reqwest against 127.0.0.1.",
+     "ct_ids": [
+      "CT09",
+      "CT16",
+      "CT24",
+      "CT30",
+      "NEW10",
+      "NEW11",
+      "NEW12"
+     ],
+     "writable_surface": [
+      "core/crates/admin/**",
+      "core/crates/app/src/features/admin.rs",
+      "core/crates/app/src/cli.rs",
+      "core/crates/app/tests/cli_smoke.rs",
+      "core/Cargo.toml",
+      "core/Cargo.lock",
+      "review/p1/ledger/DD12.md",
+      "core/crates/app/src/main.rs"
+     ],
+     "depends_on": [
+      "T0c",
+      "CC1",
+      "CC4"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-admin -p aite --test cli_smoke -> 0 failed (router tests via tower oneshot: unauthenticated -> login redirect; bootstrap token single use; OAuth code exchange through a fake platform; non-owner forbidden; lockout after N failures; CSRF missing -> 403; user text HTML-escaped; bundle CRUD round-trips through a private ScopeStore double; model panel lists every model's filing_no)",
+      "the Cargo.lock diff contains only axum-related packages named in the receipt (no version moves of existing packages)",
+      "scripts/check.sh -> 全部通过; cargo passed=B1+Δ failed=0 (Δ itemized), contracts passed=27+K, OK 26 files, passed 10/10, B9 evals/p1 passed k/k, go packages ok=all fail=0",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface (the reviewer also confirms no Go module file changed)"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [
+      "core/Cargo.toml",
+      "core/Cargo.lock"
+     ],
+     "human_steps": [
+      "Feishu console: add the admin OAuth redirect URL; set admin.owner_ids"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Wave 3 - vertical feature slices + Feishu context depth + deployment bundle (base B2 = main after wave 2)",
+   "start_gate": "Wave 2 is merged in the order DD1 -> DD2 -> DD8 -> DD3..DD7 -> DD9..DD12 and main is green; B2 rows are recorded in every wave-3 paste. Each feature owns one app/src/features/<x>.rs, its own pre-seeded command/context/tool stub files, its own skeleton crate, core/crates/*/tests/<ID>_*.rs and evals/p1/<ID>_*.yaml. Nobody edits a registry, core/Cargo.toml, core/crates/app/Cargo.toml or Cargo.lock: CC1 pre-declared the skeleton crates' deps, and a track needing another dep stops and reports. Only EE12 edits an existing app test (cold_start_to_delivery.rs, for the AIGC label flip). DD2's fakes are available to everyone.",
+   "tracks": [
+    {
+     "id": "EE1",
+     "title": "Memory (per-channel / workspace memory files)",
+     "goal": "aite-memory crate: memory_list, memory_write and memory_delete GatewayTools, plus the context block renderer. Anyone in the chat can correct or delete an entry; each entry keeps its source task_id; guests are refused. Visibility: a public chat uses the workspace store; a private chat uses its own store plus the workspace store read-only; DingTalk/WeCom treat every chat as private. !memory answers 'what do you remember'. Prompt rule: work facts only; obvious personal data (ID-card, phone, bank-card patterns) is refused. Optional auto-extraction with the fast model is off by default. Delete leaves a tombstone; purge covers PIPL. Evidence: checklist_op op=memory_op; AuditLog on edits.",
+     "ct_ids": [
+      "CT21",
+      "NEW22"
+     ],
+     "writable_surface": [
+      "core/crates/memory/**",
+      "core/crates/worker/src/context/memory.rs",
+      "core/crates/worker/tests/ee1_*.rs",
+      "core/crates/control/src/commands/memory.rs",
+      "core/crates/control/tests/ee1_*.rs",
+      "core/crates/app/src/features/memory.rs",
+      "evals/p1/EE1_*.yaml",
+      "review/p1/ledger/EE1.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD2",
+      "DD4",
+      "DD6"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-memory -p aite-control -p aite-worker -> 0 failed (private_chat_cannot_write_workspace, public_memory_visible_in_other_chat, delete_is_tombstone, memory_block_in_context, pii_refused, guest_cannot_delete)",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k (EE1_remember_and_recall.yaml)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L"
+    },
+    {
+     "id": "EE2",
+     "title": "Routines (schedules, self-scheduled follow-ups, channel-watch, output targets)",
+     "goal": "aite-routines crate: next_run for once/daily/weekdays/weekly/interval with an IANA name plus a fixed offset (default Asia/Shanghai +480, no DST; other zones use a fixed offset, with NEW20 documented). A scheduler loop (start_all) runs every tick_sec: due() -> ControlPlane::submit_internal(origin=routine) -> mark_fired; a missed run fires once on catch-up. Tools schedule_followup, routine_create, routine_list and routine_delete, within min_interval and max_per_chat. Output targets: the origin chat; another non-external chat where the bot is a member and output is granted; or the creator's DM (NEW21). The channel-watch trigger (keyword filter) runs only where passive listen is available. !routines [chat]. Evidence: checklist_op op=routine_fired; AuditLog records created_by (CT27). [REVISION 2026-09-25] Output targets: origin chat; another chat with is_public=true where the bot is a member and output is granted; creator DM. DingTalk/WeCom treat every chat as private (origin + creator only). Non-Shanghai zones use a fixed offset (DST zones drift, documented).",
+     "ct_ids": [
+      "CT22",
+      "NEW01",
+      "NEW20",
+      "NEW21",
+      "CT27"
+     ],
+     "writable_surface": [
+      "core/crates/routines/**",
+      "core/crates/control/src/commands/routines.rs",
+      "core/crates/control/tests/ee2_*.rs",
+      "core/crates/app/src/features/routines.rs",
+      "evals/p1/EE2_*.yaml",
+      "review/p1/ledger/EE2.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD3"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-routines -p aite-control -> 0 failed (weekday_9am_shanghai_next_run, interval_respects_min, due_fires_once_under_restart, catch_up_fires_once, output_to_nonmember_chat_rejected, followup_scheduled_by_model_fires)",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L"
+    },
+    {
+     "id": "EE3",
+     "title": "Budget and usage (RMB spend limits)",
+     "goal": "Record a UsageRecord for every model and search call (cost from DD7) via the budget.rs after_model_call hook. Limits: org monthly, channel monthly and per-task (BudgetConfig + ScopeSettings.spend_limit_cny_month), enforced in before_step. Warn once at warn_ratio; at 100% stop the task with a fixed text and checklist_op op=budget_stop. DM usage is attributed to the user. !usage gives this month's per-channel breakdown. Setup-wizard presets (used by EE9) in RMB: ¥3,500 / ¥7,000 / ¥17,500 / ¥35,000 / 不限 / 自定义 (up to ¥7,000,000). [REVISION 2026-09-25] Presets per plan D24 pinned in worker/src/budget.rs (rmb_presets_exact); EE9 keeps its own identical const (no same-wave dependency).",
+     "ct_ids": [
+      "CT26",
+      "NEW16"
+     ],
+     "writable_surface": [
+      "core/crates/worker/src/budget.rs",
+      "core/crates/worker/tests/ee3_*.rs",
+      "core/crates/control/src/commands/usage.rs",
+      "core/crates/control/tests/ee3_*.rs",
+      "core/crates/app/src/features/budget.rs",
+      "evals/p1/EE3_*.yaml",
+      "review/p1/ledger/EE3.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD4",
+      "DD7"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-worker -p aite-control -> 0 failed (channel_limit_stops_task, warn_once_at_80pct, dm_usage_attributed_to_user, usage_command_breakdown, rmb_presets_exact)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE4",
+     "title": "Web search + workspace search",
+     "goal": "aite-search crate. The web_search GatewayTool runs server-side (Bocha default, Zhipu alternative, Baidu fallback; never through the sandbox proxy) and returns cited URL/title/snippet. Evidence stores only URL/title/snippet. The tool is off when provider=none (offline private deployments). search_workspace: PlatformPort::search_messages restricted to joined chats (or public ones, per SearchScope) and filtered by requester membership (CT29). It is unavailable in external chats by default and falls back to a local index of messages the bot has seen.",
+     "ct_ids": [
+      "CT08",
+      "CT11",
+      "CT19",
+      "CT29"
+     ],
+     "writable_surface": [
+      "core/crates/search/**",
+      "core/crates/app/src/features/search.rs",
+      "evals/p1/EE4_*.yaml",
+      "review/p1/ledger/EE4.md"
+     ],
+     "depends_on": [
+      "DD2",
+      "DD6"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-search -> 0 failed (bocha/zhipu request+response fixtures via the in-test HTTP server, provider_none_hides_tool, results_filtered_by_membership, external_chat_denied)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M",
+     "human_steps": [
+      "Buy a Bocha (or Zhipu web-search) key; test locally, not in the cloud env"
+     ]
+    },
+    {
+     "id": "EE5",
+     "title": "Git workflow (GitLab/极狐 first) with bot identity and Draft MRs",
+     "goal": "aite-githost crate: an internal GitHost trait, a GitLab adapter and a Gitee stub. The GitLab project access token is a bot user, so the MR author is the shared bot, like Tag's GitHub App (NEW24). Tools. repo_list shows RepoGrants from EffectiveSettings. repo_checkout fetches the archive server-side into /work/repo/<name> with a baseline git commit in the sandbox; a real proxied clone/push arrives with EE10 + FF8 credential injection. repo_propose_change computes changed files with sandbox git, creates a branch + commit through the commits API, and opens a 'Draft: ' MR whose description back-links the thread. The MR link is posted back and added to the card links. The token never enters the sandbox. Push requires RepoGrant.can_push.",
+     "ct_ids": [
+      "CT12",
+      "CT15",
+      "NEW24"
+     ],
+     "writable_surface": [
+      "core/crates/githost/**",
+      "core/crates/app/src/features/git.rs",
+      "evals/p1/EE5_*.yaml",
+      "review/p1/ledger/EE5.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD6"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-githost -> 0 failed (gitlab fixtures: archive download, commits-with-actions payload, Draft: MR, back-link in description; repo_not_granted_denied; can_push_false_denied; token_never_in_tool_output_or_evidence)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L",
+     "human_steps": [
+      "Provision a GitLab test project (jihulab.com or self-hosted) + project access token (Developer; api, write_repository); run the ignored live test locally"
+     ]
+    },
+    {
+     "id": "EE6",
+     "title": "Hosted pages and continuously updated outputs",
+     "goal": "The publish_page GatewayTool (gateway/src/tools/pages.rs, registered from app/src/features/pages.rs) calls PlatformPort::write_doc with aigc_banner=true. The result is a Feishu docx shared with the chat: channel-scoped, persisting after the session, needing no ICP filing, with an explicit AIGC banner. Session.meta.page_id makes later calls in the same thread update the same page. A card link is added. Platforms without supports_docs fall back to a .md/.docx attachment and say so.",
+     "ct_ids": [
+      "CT14",
+      "NEW05"
+     ],
+     "writable_surface": [
+      "core/crates/gateway/src/tools/pages.rs",
+      "core/crates/gateway/tests/ee6_*.rs",
+      "core/crates/app/src/features/pages.rs",
+      "evals/p1/EE6_*.yaml",
+      "review/p1/ledger/EE6.md"
+     ],
+     "depends_on": [
+      "DD2",
+      "DD6",
+      "DD10"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-gateway -> 0 failed (publish_creates_then_updates_same_page, banner_requested, no_docs_capability_falls_back_to_file)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE7",
+     "title": "Approvals (blocked state, buttons or text commands, restart behaviour)",
+     "goal": "The request_approval local tool sets the task to AwaitingApproval, puts an approval prompt on the card and records checklist_op op=approval_requested. It waits in-process on RunHooks.take_decision until approval_timeout_sec, then cancels. Control: the Approve/Reject card actions (routing/card_actions.rs) and !approve / !reject #A.. set the decision through DD3's send_decision mailbox (approvals.rs). Guests and external users cannot approve (NEW08, via sender_external/UserInfo). Evidence records op=approval_decided with the approver. The gateway policy switches approval_required_tools from deny to 'pause for approval'. The card shows the blocked state (CT13). Restart: the in-process wait cannot resume, so at startup features/approvals.rs fails every AwaitingApproval task with a notice ('服务重启，审批已失效，请重新发起'). Never claim approvals survive a restart.",
+     "ct_ids": [
+      "CT13",
+      "CT29",
+      "NEW08"
+     ],
+     "writable_surface": [
+      "core/crates/worker/src/local_tools/request_approval.rs",
+      "core/crates/worker/tests/ee7_*.rs",
+      "core/crates/control/src/approvals.rs",
+      "core/crates/control/src/routing/card_actions.rs",
+      "core/crates/control/src/commands/approve.rs",
+      "core/crates/control/src/commands/reject.rs",
+      "core/crates/control/tests/ee7_*.rs",
+      "core/crates/gateway/src/policy.rs",
+      "core/crates/gateway/tests/ee7_*.rs",
+      "core/crates/app/src/features/approvals.rs",
+      "core/crates/app/tests/ee7_*.rs",
+      "evals/p1/EE7_*.yaml",
+      "review/p1/ledger/EE7.md"
+     ],
+     "depends_on": [
+      "DD3",
+      "DD4",
+      "DD5",
+      "DD6",
+      "DD10"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-worker -p aite-control -p aite-gateway -> 0 failed (approve_resumes_task, reject_cancels, timeout_cancels, guest_cannot_approve, external_user_cannot_approve, card_shows_awaiting_approval, open_tasks_include_awaiting)",
+      "cd core && cargo test -p aite --test ee7_restart -> 0 failed (awaiting_approval_failed_with_notice_on_startup)",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k (EE7_approval_card.yaml, EE7_approval_text_commands.yaml)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE8",
+     "title": "Scope and access gate: restriction knobs, bot-loop guard, !access, !configure, !help, !about, skills block",
+     "goal": "gate.rs runs before routing and checks, in order: settings.enabled, with the pre-launch notice 'Aite 尚未在本群启用' (NEW15); external chat mode restrict/channel_only/allow (NEW06/NEW08, notice 'Aite 未在外部群开启'); dm_enabled; allow/block chat patterns; the member allowlist (CT28). Guests may not !stop, !restart or !mute. Bot-loop guard (CT29): bot-authored events never start tasks, and at most ambient.max_consecutive_bot_turns bot-triggered turns run in a row. Commands: !access lists the effective bundle; !configure returns the Configure link card, absent in DMs and external chats; !help comes from the registry; !about lists every configured model's display_name + filing_no plus the service filing number and retention (compliance display). context/skills.rs renders the locked skills and instructions from the snapshot (CT09). [REVISION 2026-09-25] In a not-yet-enabled chat/DM, !connect <code>, !help and !about must pass the gate to command routing (test connect_passes_gate_before_enabled). Leaving external_chat_mode=restrict requires plan D25 (confirmed registration scope + content-safety filter); otherwise refuse with a notice. !help is CC2's; EE8 only adds entries. [REVISION 2026-09-25b] D25 gate reads compliance.registration_scope_confirmed && compliance.content_safety_filter.",
+     "ct_ids": [
+      "CT01",
+      "CT09",
+      "CT16",
+      "CT28",
+      "CT29",
+      "NEW01",
+      "NEW06",
+      "NEW08",
+      "NEW10",
+      "NEW15",
+      "NEW19"
+     ],
+     "writable_surface": [
+      "core/crates/control/src/gate.rs",
+      "core/crates/control/src/commands/access.rs",
+      "core/crates/control/src/commands/configure.rs",
+      "core/crates/control/src/commands/help.rs",
+      "core/crates/control/src/commands/about.rs",
+      "core/crates/control/tests/ee8_*.rs",
+      "core/crates/worker/src/context/skills.rs",
+      "core/crates/worker/tests/ee8_*.rs",
+      "evals/p1/EE8_*.yaml",
+      "review/p1/ledger/EE8.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD3",
+      "DD4"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-control -p aite-worker -> 0 failed (disabled_chat_gets_prelaunch_notice, external_restrict_notice, channel_only_hides_inherited_bundle, guest_cannot_restart, bot_loop_guard_caps_consecutive_turns, access_lists_bundle, configure_absent_in_dm, about_lists_each_model_filing_no, skills_block_from_snapshot)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE9",
+     "title": "Setup/pairing, first-invite intro, !fork, mute (👎/!mute/!unmute), !feedback",
+     "goal": "CT24 pairing: the admin setup page issues a one-time code (15 min); '@Aite !connect <code>' binds and enables the workspace. The next steps choose first tools, connect Git, set up service accounts, set the spend limit with the RMB presets (¥3,500 / ¥7,000 / ¥17,500 / ¥35,000 / 不限 / 自定义), and launch with zero initial access. The optional member intro DM (NEW18) is off by default. NEW22: on BOT_ADDED post suggested tasks, unless the bot was added by a bot, the chat is external, memory exists, or it is a re-invite. NEW02: a 👎 on an Aite message (Feishu reaction or WeCom feedback_event) or !mute mutes the thread (Session.meta.muted), abandons any unfinished reply and posts a notice; a reply or @ unmutes. NEW03 !fork [chat] <prompt>: a linked new thread in the same chat or in another non-external chat where both are members. !feedback text goes to AuditLog. [REVISION 2026-09-25] !fork across chats only into is_public=true chats where both are members; presets as its own const in admin/src/pages/setup.rs (rmb_presets_rendered), not importing EE3.",
+     "ct_ids": [
+      "CT24",
+      "NEW01",
+      "NEW02",
+      "NEW03",
+      "NEW15",
+      "NEW16",
+      "NEW18",
+      "NEW22"
+     ],
+     "writable_surface": [
+      "core/crates/control/src/mute.rs",
+      "core/crates/control/src/intro.rs",
+      "core/crates/control/src/commands/connect.rs",
+      "core/crates/control/src/commands/fork.rs",
+      "core/crates/control/src/commands/mute.rs",
+      "core/crates/control/src/commands/unmute.rs",
+      "core/crates/control/src/commands/feedback.rs",
+      "core/crates/control/tests/ee9_*.rs",
+      "core/crates/admin/src/pages/setup.rs",
+      "core/crates/admin/tests/ee9_*.rs",
+      "evals/p1/EE9_*.yaml",
+      "review/p1/ledger/EE9.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD3",
+      "DD9",
+      "DD11",
+      "DD12"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-control -p aite-admin -> 0 failed (connect_code_single_use_15min, intro_skipped_when_memory_exists, thumbs_down_mutes_and_abandons, wecom_feedback_thumbs_down_mutes, reply_unmutes, fork_links_threads, fork_to_external_denied, rmb_presets_rendered)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE10",
+     "title": "Egress v2: credential injection (MITM for credential hosts only), secret store, connections",
+     "goal": "The egress proxy terminates TLS only for hosts that have a CredentialBinding, using an Aite CA generated at edge start and kept in data/ (0600); it injects header/scheme from a secret_ref. Secrets live in edge env or a 0600 secrets file and never cross gRPC or reach the sandbox. IM/API hosts (open.feishu.cn, api.dingtalk.com, mcp.dingtalk.com, qyapi.weixin.qq.com) are reachable only this way. Every other host is a plain CONNECT tunnel. NetworkEvent records injected=true. The sandbox trusts the CA through SSL_CERT_FILE, REQUESTS_CA_BUNDLE, NODE_EXTRA_CA_CERTS and GIT_SSL_CAINFO, set at container creation (docker.go), plus an image default path. Full-access '*' egress is gated by sandbox.allow_full (NEW12). Docker tests are hermetic (a local TLS test server). [REVISION 2026-09-25] After proxy + CA are live, features/egress.rs flips the EFFECTIVE default network level to trusted (china preset); test default_network_is_china_trusted_after_ee10.",
+     "ct_ids": [
+      "CT15",
+      "CT17",
+      "CT18",
+      "CT25",
+      "NEW11",
+      "NEW12"
+     ],
+     "writable_surface": [
+      "edge/internal/egress/**",
+      "edge/internal/sandbox/**",
+      "docker/sandbox/**",
+      "docs/p1/egress.md",
+      "review/p1/ledger/EE10.md",
+      "core/crates/app/src/features/egress.rs"
+     ],
+     "depends_on": [
+      "DD8",
+      "CC12"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/egress/... -count=1 -> ok (injects Authorization only for a bound host; secret never in the audit line; non-bound host tunnelled untouched)",
+      "make docker-image && cd edge && go test -tags docker ./internal/sandbox/... -count=1 -> ok (a sandbox curl to a bound local test host sees the injected header; the env contains no secret); docker ps -a --filter label=aite.task -q | wc -l -> 0",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L"
+    },
+    {
+     "id": "EE11",
+     "title": "External triggers: webhook ingress (GitLab) and Feishu doc/approval events -> routines",
+     "goal": "edge/internal/webhook mounts on DD8's listener. GitLab webhooks are verified with X-Gitlab-Token (git.webhook_secret_env); MR and pipeline events -> NormalizedEvent{kind: External, external{source: gitlab, topic: merge_request.opened, ...}}. feishu/external.go registers into CC8's handler table: drive.file.edit_v1, drive.notice.comment_add_v1 and approval.instance.status_changed_v4 -> External. Control routing/external.rs matches RoutineStore external_topic and calls submit_internal (origin=external); tests use DD2's FakeRoutineStore, so EE2 is not needed. A comment on Aite's own MR routes back to the originating thread (CT22 PR subscriptions).",
+     "ct_ids": [
+      "CT22",
+      "CT12"
+     ],
+     "writable_surface": [
+      "edge/internal/webhook/gitlab.go",
+      "edge/internal/webhook/gitlab_test.go",
+      "edge/internal/webhook/testdata/**",
+      "edge/internal/feishu/external.go",
+      "edge/internal/feishu/external_test.go",
+      "core/crates/control/src/routing/external.rs",
+      "core/crates/control/tests/ee11_*.rs",
+      "review/p1/ledger/EE11.md"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD3",
+      "DD8"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/webhook/... ./internal/feishu/... -count=1 -> ok (bad token 401; MR opened -> External event shape; drive edit -> External)",
+      "cd core && cargo test -p aite-control -> 0 failed (external_topic_triggers_routine, mr_comment_routes_to_origin_thread)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE12",
+     "title": "Audit, evidence and compliance: op rendering, !evidence, network-event export, retention, AIGC label flip",
+     "goal": "The evidence cli renders the new checklist_op / event_received ops from docs/p1/contract-p1.md and cross-checks root_hash against SQLite. 'aite audit export --since --until' merges the proxy JSONL and AuditLog into hourly JSON files (CT27). The retention job keeps audit and network logs >= 190 days and applies content_retention_days to content only. This content-vs-audit split serves PIPL and replaces Tag's ZDR/CMEK stance (NEW13). !evidence #A.. follows review/spec-bb5-evidence-command.md: chain status + a short summary, never a filesystem path. This track also owns the compliance flip. app/src/features/compliance.rs pushes a worker_options entry that sets WorkerDeps.aigc_label from compliance.aigc_label/label_text and each model's display_name (default on). That turns on DD5's explicit label (inside the same send_text) and the implicit metadata. This track updates cold_start_to_delivery.rs accordingly (the exact reply at :517 and the fetch sequence). Wired via features/audit.rs and retention.rs. [REVISION 2026-09-25] aite audit export = one forwarding branch in core/crates/app/src/main.rs.",
+     "ct_ids": [
+      "CT14",
+      "CT27",
+      "NEW13",
+      "NEW23"
+     ],
+     "writable_surface": [
+      "core/crates/evidence/**",
+      "core/crates/control/src/commands/evidence.rs",
+      "core/crates/control/tests/ee12_*.rs",
+      "core/crates/app/src/features/audit.rs",
+      "core/crates/app/src/features/retention.rs",
+      "core/crates/app/src/features/compliance.rs",
+      "core/crates/app/tests/cold_start_to_delivery.rs",
+      "core/crates/app/tests/ee12_*.rs",
+      "review/p1/ledger/EE12.md",
+      "core/crates/app/src/main.rs"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD5",
+      "DD6",
+      "CC11",
+      "CC12"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-evidence -p aite-control -> 0 failed (renders_approval_ops, root_hash_mismatch_with_sqlite_reported, export_hourly_json, retention_keeps_190_days, evidence_command_by_task_no)",
+      "cd core && cargo test -p aite --test cold_start_to_delivery --test ee12_label -> 0 failed (label present in the single delivery send_text; implicit label exec before fetch)",
+      "core/target/debug/aite evals run evals/p0 --platform fake --model scripted -> passed 10/10 (send_text counts unchanged)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE13",
+     "title": "Feishu context depth: pull-based edits, pins block, quote block, mid-thread window (moved from FF2)",
+     "goal": "At turn start, pull the thread history, diff updated_at/deleted against the stored turns (Turn.message_id), and insert 'edited: before -> after' notes; this never starts a task (CT06 without an edit event). The context gets a pinned-messages block when supports_pins (CT07); a quoted-message block (the DingTalk/WeCom quote snapshot from NormalizedEvent.quote); and a mid-thread @ window (the recent N thread messages instead of the full thread).",
+     "ct_ids": [
+      "CT06",
+      "CT07"
+     ],
+     "writable_surface": [
+      "core/crates/worker/src/context/pins.rs",
+      "core/crates/worker/src/context/quote.rs",
+      "core/crates/worker/src/context/history.rs",
+      "core/crates/worker/tests/ee13_*.rs",
+      "core/crates/control/src/routing/edits.rs",
+      "core/crates/control/tests/ee13_*.rs",
+      "evals/p1/EE13_*.yaml",
+      "review/p1/ledger/EE13.md"
+     ],
+     "depends_on": [
+      "DD2",
+      "DD3",
+      "DD4",
+      "DD9"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-worker -p aite-control -> 0 failed (pulled_edit_inserts_before_after_once, pins_block_present_when_supported, quote_in_context_on_dingtalk_profile, mid_thread_window_bounded)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k)",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "EE14",
+     "title": "Private-deployment bundle v1 (moved forward from FF5): multi-arch images, offline tarballs, install scripts",
+     "goal": "buildx amd64 + arm64 images for core, edge and sandbox (海光 = amd64, 鲲鹏 = arm64). 'make bundle' writes dist/aite-bundle-<ver>/: docker save tarballs, the compose file, install.sh / upgrade.sh / uninstall.sh (with --dry-run), a sha256 manifest, config templates and docs. The mainland mirror build-arg defaults from CC1 are documented. Compose profiles keep the admin port internal. docs/p1/deploy.md covers Kylin V10 SP3 / UOS V20, Docker CE >= 20.10, Podman socket notes, and never pulling Docker Hub at runtime. A manual-dispatch / tag-triggered CI job builds and attaches the bundle. [REVISION 2026-09-25] deploy.md documents BASE_REGISTRY values (ACR/TCR/SWR/customer Harbor); the offline config template writes the network level back to none.",
+     "ct_ids": [
+      "CT10",
+      "CT18",
+      "CT24"
+     ],
+     "writable_surface": [
+      "docker/core/**",
+      "docker/edge/**",
+      "deploy/**",
+      "Makefile",
+      ".github/**",
+      "scripts/package/**",
+      "docker-compose.yml",
+      "docs/p1/deploy.md",
+      "review/p1/ledger/EE14.md"
+     ],
+     "depends_on": [
+      "DD8",
+      "CC1"
+     ],
+     "acceptance_cloud": [
+      "make bundle ARCH=amd64 -> dist/aite-bundle-*/ holds 3 image tarballs; sha256sum -c on the manifest -> OK",
+      "bash deploy/install.sh --dry-run -> exit 0; docker compose -f deploy/docker-compose.yml config --services -> core edge",
+      "docker buildx build --platform linux/arm64 -f docker/edge/Dockerfile . -> ok (arm64 core under qemu optional; record the time)",
+      "scripts/check.sh -> 全部通过 (cargo passed=B2+Δ itemized, OK 26 files, passed 10/10, B9 passed k/k); PR CI green",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L",
+     "touches_r0_or_locked": [
+      "Makefile",
+      ".github/**",
+      "docker-compose.yml",
+      "docker/core/**",
+      "docker/edge/**"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Wave 4 - P2 parity and hardening (base B3 = main after wave 3; T0.1 applied first only if admitted)",
+   "start_gate": "Wave 3 merged and main green (B3). T0.1 is applied (branch + companion) if any wave-2/3 receipt passed the admission rule. FF1 additionally needs the Feishu im:message.group_msg scope approved and the §3.7(a) probe recorded; until then it may ship behind the passive-listen capability with @-only fallbacks.",
+   "tracks": [
+    {
+     "id": "FF1",
+     "title": "Ambient + channel top-level session",
+     "goal": "Respond-automatically is set per channel (settings, off by default). A channel session per chat reads top-level non-@ traffic only when supports_passive_listen; a top-level @ still creates exactly one Task session (p0/01 sessions_equals 1). Simple questions are answered inline; complex ones spawn a thread with a working session. The channel session is replaced after 1 h without top-level activity, after 1 day of age, or on a config change. It stops reading after 100 messages since its last post, until @'d. A fast-model triage decides whether to respond, capped by daily_cap_per_chat and honouring EE8's bot-loop guard. Stalled-thread follow-ups @ people after stalled_followup_h. Passive steering inside threads works without @. Feishu only, with group_msg; DingTalk/WeCom degrade to routines + follow-ups on Aite's own #A tasks.",
+     "ct_ids": [
+      "CT03",
+      "CT04",
+      "CT23"
+     ],
+     "writable_surface": [
+      "core/crates/control/src/ambient.rs",
+      "core/crates/control/src/sessions_channel.rs",
+      "core/crates/control/tests/ff1_*.rs",
+      "evals/p1/FF1_*.yaml",
+      "review/p1/ledger/FF1.md"
+     ],
+     "depends_on": [
+      "DD3",
+      "DD7",
+      "DD9",
+      "EE2",
+      "EE8"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-control -> 0 failed (channel_session_replaced_after_idle, stops_after_100_msgs_until_mentioned, triage_no_reply_counts_cap, stalled_thread_followup_mentions_people, off_by_default, top_level_mention_still_one_task_session, bot_messages_never_trigger)",
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k; evals/p0 passed 10/10",
+      "scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L",
+     "human_steps": [
+      "Feishu admin approval of im:message.group_msg; set the passive-listen capability; real-group ambient test"
+     ]
+    },
+    {
+     "id": "FF3",
+     "title": "Streaming progress surfaces (CardKit / DingTalk AI card / WeCom stream)",
+     "goal": "Feishu CardKit card entity: per-element checklist updates and streaming text. streaming_mode switches itself off after 10 min, so re-enable it, and set streaming_mode=false before callback updates; fall back to im PATCH. DingTalk: incremental AI card streaming (<= 1 KB per call). WeCom: one stream per task, finished at 9 min, with milestone messages after that within 30/min and 1000/h. The worker card coalescer gets a capability-gated streaming mode; the final text is identical to the non-streamed one, and cancel/mute stops streaming.",
+     "ct_ids": [
+      "CT13",
+      "CT14"
+     ],
+     "writable_surface": [
+      "edge/internal/feishu/cardkit.go",
+      "edge/internal/feishu/cardkit_test.go",
+      "edge/internal/dingtalk/stream_card.go",
+      "edge/internal/dingtalk/stream_card_test.go",
+      "edge/internal/wecom/stream.go",
+      "edge/internal/wecom/stream_test.go",
+      "core/crates/worker/src/card.rs",
+      "core/crates/worker/tests/ff3_*.rs",
+      "review/p1/ledger/FF3.md"
+     ],
+     "depends_on": [
+      "DD10",
+      "DD11",
+      "EE7"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/feishu/... ./internal/dingtalk/... ./internal/wecom/... -count=1 -> ok",
+      "cd core && cargo test -p aite-worker -> 0 failed; scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "FF4",
+     "title": "DMs and model selection",
+     "goal": "The per-user DM session runs with shared read-only connections plus personal memory (MemoryScope::user), with usage billed to that user; admins can disable DMs. Model selection: 'use model X' or !model <name> per thread or channel, from models.catalog and filtered by settings. The footer names the model, and provider_extra is not carried across a switch (CT30). [REVISION 2026-09-25] DM usage is charged to the org balance and itemised per user (no per-user balance).",
+     "ct_ids": [
+      "CT20",
+      "CT30"
+     ],
+     "writable_surface": [
+      "core/crates/control/src/dm.rs",
+      "core/crates/control/src/commands/model.rs",
+      "core/crates/control/tests/ff4_*.rs",
+      "core/crates/memory/**",
+      "evals/p1/FF4_*.yaml",
+      "review/p1/ledger/FF4.md"
+     ],
+     "depends_on": [
+      "DD3",
+      "DD7",
+      "EE1",
+      "EE3"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-control -p aite-memory -> 0 failed (dm_uses_personal_memory, dm_disabled_notice, model_switch_per_thread, unknown_model_rejected)",
+      "scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "FF5",
+     "title": "Preflight P1 groups + aite doctor (bundle part moved to EE14)",
+     "goal": "Preflight gains groups for search, git, egress (CA dir), admin (listen/secret), compliance (filing numbers present when public-facing), DingTalk/WeCom credentials and mainland-only model endpoints; this lifts the frozen 'seven groups' count, with new pins. 'aite doctor' prints the same checks with fixes. Add a host capacity check for per-thread sandbox linger x max_parallel_tasks. [REVISION 2026-09-25] aite doctor = one forwarding branch in core/crates/app/src/main.rs.",
+     "ct_ids": [
+      "CT24",
+      "CT18",
+      "CT10"
+     ],
+     "writable_surface": [
+      "core/crates/app/src/preflight.rs",
+      "core/crates/app/src/cli.rs",
+      "core/crates/app/tests/preflight_e2e.rs",
+      "core/crates/app/tests/cli_smoke.rs",
+      "docs/p1/deploy.md",
+      "review/p1/ledger/FF5.md",
+      "core/crates/app/src/main.rs"
+     ],
+     "depends_on": [
+      "DD8",
+      "EE10",
+      "EE14"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite --test preflight_e2e --test cli_smoke -> 0 failed",
+      "scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M",
+     "touches_r0_or_locked": [
+      "core/crates/app/src/preflight.rs"
+     ]
+    },
+    {
+     "id": "FF6",
+     "title": "PIPL deletion and workspace disconnect (NEW23), compliance doc",
+     "goal": "An admin-only disconnect/purge deletes transcripts, memory, routines, the pages index, scopes and account links for a chat or tenant, keeps audit metadata (tombstones) and writes AuditLog; a per-chat content purge is available on request. docs/p1/compliance.md covers the 登记 scope question, explicit/implicit labels, 190-day retention, a per-model filing-number checklist, and the deliberate deviations from Tag (CT06 pull-only edits, CT08 service-user token, CT14 docx page, CT20 app identity). [REVISION 2026-09-25] Evidence content fields become tombstones while payload_hash is kept, so the chain still verifies; hosted docs are deleted or unshared via delete_doc (test purge_deletes_or_unshares_hosted_docs; purged_evidence_has_no_original_content).",
+     "ct_ids": [
+      "NEW23",
+      "CT27"
+     ],
+     "writable_surface": [
+      "core/crates/admin/src/pages/disconnect.rs",
+      "core/crates/app/src/features/purge.rs",
+      "core/crates/app/tests/ff6_*.rs",
+      "docs/p1/compliance.md",
+      "review/p1/ledger/FF6.md",
+      "core/crates/evidence/**"
+     ],
+     "depends_on": [
+      "DD1",
+      "DD12",
+      "EE12"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite -p aite-admin -> 0 failed (purge_removes_content_keeps_audit, evidence_chain_still_verifies_after_purge)",
+      "scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "FF7",
+     "title": "Admin console v1: usage, audit, routines, memory, network pages",
+     "goal": "Pages: per-channel usage breakdown and spend limits (CT26); the audit log and an hourly network-event export download (CT27); routines with created_by and enable/disable (CT22); memory view/edit (CT21); network-event search by audit_tag. All pages are owner-only and use DD12's CSRF/escaping.",
+     "ct_ids": [
+      "CT21",
+      "CT22",
+      "CT26",
+      "CT27"
+     ],
+     "writable_surface": [
+      "core/crates/admin/src/pages/usage.rs",
+      "core/crates/admin/src/pages/audit.rs",
+      "core/crates/admin/src/pages/routines.rs",
+      "core/crates/admin/src/pages/memory.rs",
+      "core/crates/admin/src/pages/network.rs",
+      "core/crates/admin/tests/ff7_*.rs",
+      "review/p1/ledger/FF7.md"
+     ],
+     "depends_on": [
+      "DD12",
+      "EE1",
+      "EE2",
+      "EE3",
+      "EE12"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-admin -> 0 failed (owner-only, renders each page against the fakes, export download is JSON)",
+      "scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    },
+    {
+     "id": "FF8",
+     "title": "Connectors pack and skills library",
+     "goal": "Connection presets: Feishu docs/bitable (native RPCs); GitLab (proxied git clone/push with credential injection, completing CT12); a generic HTTP API (host allowlist + header credential via EE10). Vendor CLIs run in the sandbox with dummy credentials (lark-cli; dws/wecom-cli documented), and the proxy injects the real token into their traffic. IM API hosts are credential-bound connection hosts only. A skills library of markdown skills with an admin page. A remote MCP-over-HTTP connector via an mcp_call GatewayTool, if the owner approves.",
+     "ct_ids": [
+      "CT25",
+      "CT15",
+      "CT17",
+      "CT12"
+     ],
+     "writable_surface": [
+      "core/crates/gateway/src/tools/connections.rs",
+      "core/crates/gateway/tests/ff8_*.rs",
+      "core/crates/admin/src/pages/connections.rs",
+      "core/crates/app/src/features/connections.rs",
+      "docker/sandbox/**",
+      "docs/p1/skills/**",
+      "review/p1/ledger/FF8.md"
+     ],
+     "depends_on": [
+      "EE10",
+      "DD12",
+      "DD6",
+      "EE5"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-gateway -p aite-admin -> 0 failed",
+      "make docker-image && docker run --rm --network none aite-sandbox:p0 lark-cli --version -> exit 0 (if approved)",
+      "scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "L",
+     "human_steps": [
+      "Owner approval for lark-cli in the image and for MCP support"
+     ]
+    },
+    {
+     "id": "FF9",
+     "title": "Live model matrix harness",
+     "goal": "evals/p1/live/ scenarios with protocol-report checks that read ModelProbe observations and do not depend on scripted dialogue. scripts/live-matrix.sh runs deepseek-flash, deepseek-v4-pro, qwen3.7-plus, glm-5.3, kimi and doubao, each writing a report. Cloud acceptance runs only the scripted and dry-run paths; the human runs live locally with keys. [REVISION 2026-09-25] Add a 7th live row: self-hosted OpenAI-compatible endpoint (vLLM + Qwen3.8-27B).",
+     "ct_ids": [
+      "CT30",
+      "CT29"
+     ],
+     "writable_surface": [
+      "evals/p1/live/**",
+      "scripts/live-matrix.sh",
+      "core/crates/evals/src/live_matrix.rs",
+      "core/crates/evals/src/lib.rs",
+      "core/crates/evals/src/cli.rs",
+      "core/crates/evals/tests/ff9_*.rs",
+      "docs/p1/live-report-template.md",
+      "review/p1/ledger/FF9.md"
+     ],
+     "depends_on": [
+      "DD7",
+      "CC7"
+     ],
+     "acceptance_cloud": [
+      "bash scripts/live-matrix.sh --dry-run -> prints the 6-provider plan, exit 0",
+      "cd core && cargo test -p aite-evals -> 0 failed; scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M",
+     "human_steps": [
+      "Run scripts/live-matrix.sh locally with real keys; commit the report as docs/p1/live-report-<date>.md"
+     ]
+    },
+    {
+     "id": "FF10",
+     "title": "P1 prompt and cross-feature scenario suite (incl. prompt injection)",
+     "goal": "Update platform.md for every P1 tool (memory, routines, search, git, pages, approvals, post_update) while keeping the four iron rules. Add cross-feature p1 scenarios (search -> page -> approval -> MR) and injection scenarios: instructions hidden in history, docs, search results or quotes are not followed, and bot @-mentions do not trigger.",
+     "ct_ids": [
+      "CT29",
+      "CT11",
+      "CT04"
+     ],
+     "writable_surface": [
+      "core/crates/worker/prompts/platform.md",
+      "core/crates/worker/tests/test_prompts_checklist.rs",
+      "evals/p1/FF10_*.yaml",
+      "review/p1/ledger/FF10.md"
+     ],
+     "depends_on": [
+      "EE1",
+      "EE2",
+      "EE4",
+      "EE5",
+      "EE6",
+      "EE7"
+     ],
+     "acceptance_cloud": [
+      "core/target/debug/aite evals run evals/p1 --platform fake --model scripted -> passed k/k",
+      "cd core && cargo test -p aite-worker -> 0 failed; scripts/check.sh -> 全部通过",
+      "git diff --name-only origin/main...HEAD -> every path is inside this track's writable surface"
+     ],
+     "size": "M"
+    }
+   ]
+  },
+  {
+   "name": "Wave 5 - P1 acceptance kit (base B4 = main after wave 4); real-platform runs are human-only",
+   "start_gate": "Wave 4 merged and main green (B4). Real tenants exist for Feishu (scopes approved), DingTalk and WeCom.",
+   "tracks": [
+    {
+     "id": "GG1",
+     "title": "P1 acceptance scripts and 3-minute demo",
+     "goal": "docs/p1/acceptance-P1.md: M-P1 scenarios per CT/NEW for Feishu and the degraded matrix for DingTalk/WeCom, each with steps, where to look, the expected result and a results column. Each CT references the deliberate-deviation list from docs/p1/compliance.md. Also write docs/p1/demo-p1.md and a results template. Fold in the stale docs/acceptance-M.md lines (the .gitignore line at :282, :445, the §7 counters).",
+     "ct_ids": [
+      "CT01",
+      "CT02",
+      "CT03",
+      "CT12",
+      "CT14",
+      "CT21",
+      "CT22",
+      "CT23",
+      "CT24",
+      "CT26"
+     ],
+     "writable_surface": [
+      "docs/p1/acceptance-P1.md",
+      "docs/p1/demo-p1.md",
+      "docs/acceptance-M.md",
+      "review/p1/ledger/GG1.md"
+     ],
+     "depends_on": [
+      "FF1",
+      "FF3",
+      "FF7"
+     ],
+     "acceptance_cloud": [
+      "python3 -c \"import re;t=open('docs/p1/acceptance-P1.md').read();print(len(set(re.findall(r'(CT\\d\\d|NEW\\d\\d)',t))))\" -> >= 45",
+      "scripts/check.sh -> 全部通过"
+     ],
+     "size": "S",
+     "human_steps": [
+      "Run M-P1 on Feishu, DingTalk and WeCom; record results; open S/M fix-it tracks from the findings"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Wave 6 - deferred parity (optional; each track needs an explicit owner decision)",
+   "start_gate": "Wave 5 acceptance done and the owner has decided which of HH1-HH3 to fund (design-partner driven).",
+   "tracks": [
+    {
+     "id": "HH1",
+     "title": "Personal connectors + DM on the user's own identity (NEW09, CT20 full)",
+     "goal": "Per-user Feishu OAuth (offline_access), stored edge-side. In DMs, and for approved per-user requests in channels, tools run with the user's token (docs, search) and are attributed to the user; other members' requests keep channel access. Opt-in per user, plus admin approval.",
+     "ct_ids": [
+      "CT20",
+      "NEW09"
+     ],
+     "writable_surface": [
+      "edge/internal/feishu/oauth_user.go",
+      "edge/internal/feishu/oauth_user_test.go",
+      "core/crates/app/src/features/personal.rs",
+      "core/crates/admin/src/pages/personal.rs",
+      "core/crates/app/tests/hh1_*.rs",
+      "review/p1/ledger/HH1.md"
+     ],
+     "depends_on": [
+      "GG1"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite --test hh1_personal -> 0 failed (personal_connector_only_for_owner_requests)",
+      "cd edge && go test -race ./internal/feishu/... -count=1 -> ok; scripts/check.sh -> 全部通过"
+     ],
+     "size": "L",
+     "human_steps": [
+      "Owner decision; Feishu user-token scopes"
+     ]
+    },
+    {
+     "id": "HH2",
+     "title": "Own-domain hosted HTML pages with OAuth + chat-membership check (CT14 full)",
+     "goal": "The admin server serves /pages/{id} (HTML artifacts published from the sandbox) behind platform OAuth plus a chat-membership check. Non-members get a request-access prompt; pages carry an AIGC banner and <meta name=AIGC>. Intranet or ICP-filed domain only.",
+     "ct_ids": [
+      "CT14",
+      "NEW05"
+     ],
+     "writable_surface": [
+      "core/crates/admin/src/pages/hosted.rs",
+      "core/crates/admin/tests/hh2_*.rs",
+      "core/crates/app/src/features/pages.rs",
+      "review/p1/ledger/HH2.md"
+     ],
+     "depends_on": [
+      "GG1"
+     ],
+     "acceptance_cloud": [
+      "cd core && cargo test -p aite-admin -> 0 failed (non_member_gets_request_access, aigc_meta_present); scripts/check.sh -> 全部通过"
+     ],
+     "size": "M",
+     "human_steps": [
+      "ICP备案 if public; otherwise intranet only"
+     ]
+    },
+    {
+     "id": "HH3",
+     "title": "DingTalk DWS delegated user (history, search, non-@) behind an owner flag",
+     "goal": "Use the DingTalk DWS delegated-user CLI/API (beta) edge-side to unlock group history, message search and non-@ passive listening on DingTalk, behind dingtalk.dws_enabled (default off). Capabilities are reported accordingly, so CT03/CT07/CT08 upgrade from the degraded path.",
+     "ct_ids": [
+      "CT03",
+      "CT07",
+      "CT08",
+      "NEW25"
+     ],
+     "writable_surface": [
+      "edge/internal/dingtalk/dws.go",
+      "edge/internal/dingtalk/dws_test.go",
+      "docs/p1/dingtalk.md",
+      "review/p1/ledger/HH3.md"
+     ],
+     "depends_on": [
+      "GG1"
+     ],
+     "acceptance_cloud": [
+      "cd edge && go test -race ./internal/dingtalk/... -count=1 -> ok (flag off -> capabilities unchanged; flag on -> history/search fixtures)",
+      "scripts/check.sh -> 全部通过"
+     ],
+     "size": "L",
+     "human_steps": [
+      "Owner decision (beta status, licensing); DingTalk DWS enrolment"
+     ]
+    }
+   ]
+  }
+ ],
+ "human_queue": [
+  "H1 (Day 0, before any dispatch, 15 min) Sign off the owner defaults and freeze lifts in the rationale and the T0 branch+companion mechanics. Also approve the dependencies that wave 1-2 tracks need: apt packages git/curl/jq/unzip + pypdf in the sandbox image (CC12; if pypdf is declined, PDF labels are skipped), and axum 0.8 with an explicit feature list for DD12 (the Cargo.lock will gain transitive packages such as serde_urlencoded and serde_path_to_error). Nothing dispatched on Day 0 waits for a later approval.",
+  "H2 (Day 0) Commit D0 on main in ~/Documents/Projects/Aite. Contents: review/plan-2026-09-25-claude-tag-parity.md (this plan); CLAUDE.md (cloud rules: guard facts and false-block patterns, baselines 897/25/OK 25/10-10 and post-P0-CLOSE 901/27/OK 25/10-10, the flaky list with the rerun-singly rule, rustfmt per file, python3 only, never pipe check.sh into tail, receipts in review/p1/ledger, a draft PR per track, stop-and-report rules, B8 invariants, docs/commits in Chinese); git add review/backlog-2026-09-15.md review/paste-BB1..6.md; review/paste-T0.md and review/paste-CC1..CC12.md (generated from this plan, Chinese, 8 sections). Hygiene: git rm -r -q --cached .venv aite.egg-info dev-spec-2026-09-09.md (14,439 + 5 + 1 files; the top-level dev-spec is byte-identical to docs/dev-spec-2026-09-09.md, verified with cmp), and add .venv/ and *.egg-info/ to .gitignore. Run the git rm line in a plain terminal, not through a local Claude session (the guard would scan the dev-spec filename). Push; record the sha as B0 and grep-refresh it in every paste. [REVISION 2026-09-25] No B0 refresh commit: wave-1 pastes pin 98e4460 and accept D0 through the plan §4.4 diff excludes; use the idempotent H2 command in plan §8.",
+  "H3 (Day 0) claude.ai/code environment for TomwaltW/aite. Setup script = scripts/cloud-setup.sh text: protoc v31.1 zip -> /usr/local; rustup toolchain install 1.98.1 with clippy,rustfmt; GOTOOLCHAIN=auto; go install protoc-gen-go@v1.36.12 and protoc-gen-go-grpc@v1.6.2; cargo fetch + cargo test --workspace --no-run; go mod download; docker build of aite-sandbox:p0 as best effort. Network: Trusted plus the custom domains deb.debian.org, security.debian.org, auth.docker.io, production.cloudflare.docker.com. No secrets: environment variables are visible to everyone using the environment. Connect the Claude GitHub App so sessions can open draft PRs.",
+  "H4 (Day 0) Launch CC1 alone: claude --cloud \"读 review/paste-CC1.md 并照做\". When its self-check shows check.sh green and the Read of .claude/hooks/guard_bash.py BLOCKED, launch the rest from the repo root in one line: for t in T0 CC2 CC3 CC4 CC5 CC6 CC7 CC8 CC9 CC10 CC11 CC12; do claude --cloud \"读 review/paste-$t.md 并照做\"; done. If the guard is not active in the cloud, stop everything and fix the hook (python3 path / single-repo session) first.",
+  "H5 (Day 0, longest external lead time) Feishu developer console. Callback subscription = long connection + card.action.trigger. Events: im.message.recalled_v1, im.message.reaction.created_v1/deleted_v1, im.chat.member.bot.added_v1, im.chat.member.user.added_v1/deleted_v1. Scopes: im:message.group_msg (sensitive, admin approval; gates CT03/CT04 steering without @/CT22 channel-watch/CT23), im:message.p2p_msg, reactions read, im:chat read, pins read, contact:user.base:readonly, docx:document, the permission-member create scope (openchat sharing), doc/wiki search. Also a service-user OAuth app with offline_access + message search (CT08). Publish the app version.",
+  "H6 (Day 0-1, local, about 1 h, while wave 1 runs) P0-CLOSE in ~/Documents/Projects/Aite, one command per line with cd on the same line. (1) mv data/evidence data/evidence-p0.1-legacy. (2) AITE_RELOCK=1 python3 review/aa4-proto-patch.py --check, then the real run; make proto-gen. (3) AITE_RELOCK=1 python3 review/bb2-created-at-chain-patch.py --check, then the real run. (4) (cd core && cargo build). (5) core/target/debug/aite contracts lock --check -> MISMATCH naming 4 files (edge.proto + BB2's 3 contracts files); a workspace test run at this point shows cli_smoke contracts_lock_check_is_ok_on_a_clean_tree red by construction, so do not run check.sh yet. (6) AITE_RELOCK=1 core/target/debug/aite contracts lock --write. (7) scripts/check.sh -> cargo passed=901 failed=0, contracts passed=27, OK 25 files, passed 10/10. (8) The BB4 guard patch, then (cd core && cargo test -p aite --test guard) -> 21 passed. Commit and push. Running wave-1 sessions are unaffected: they reset to B0 and their surfaces avoid every P0-CLOSE file.",
+  "H7 (Day 1) P0 acceptance on main after P0-CLOSE, in the real Feishu group: M1-M6 (M6 has three variants), the §3.7(a) non-@ thread-reply probe and the §3.7(b) history-permission probe. Record the results in docs/acceptance-M.md. This declares P0 done.",
+  "H8 (Day 0-1, 10 min) Card click test. Day-0 attempt: with local edge on main running against the test tenant, send a schema-2.0 card with a callback button from API Explorer, click it, and check in the edge/core logs whether card.action.trigger reaches OnP2CardActionTrigger. If that is inconclusive, repeat on the CC8 branch with AITE_FEISHU_CARD_BUTTONS=1 and read the logged frame type. Record PASS (frame type event) or FAIL in review/p1/ledger/CC8-clicktest.md. DD10 reads it: PASS -> buttons default on; FAIL -> !approve/!reject/!stop text commands.",
+  "H9 (Day 1) Keys and tenants, kept local: Bailian workspace key (qwen3.7-plus), DeepSeek, Zhipu (optionally Kimi/Doubao), a Bocha or Zhipu web-search key; a DingTalk test org with an internal app + robot (Stream mode, card callback STREAM) + AI card template; a WeCom API-mode aibot; a GitLab test project + project access token; each model service's 备案号/上线编号 for the per-model filing_no. DingTalk probe: send a quoted reply to an Aite message and check whether text.repliedMsg.msgId equals any id Aite stored (processQueryKey/outTrackId); record the result in review/p1/ledger/H9-dingtalk-probe.md (DD11 folds it into docs/p1/dingtalk.md). Until it is confirmed, #A text is the primary anchor.",
+  "H10 (Day 1) Review and merge wave 1: CC1 first, then CC2-CC7, then CC8-CC12 and T0's docs PR. For each PR check: CI green, receipt present, surface respected (including the reviewer-side Go-module no-change check), pass-count delta explained test by test. On a Cargo.lock conflict, only CC1 changes it in wave 1. [REVISION 2026-09-25b] Do not merge CC1 until the other 12 sessions have launched. Merge CC2 before CC3, then run reconnect_replay 5x on main. Collect every receipt's contract-gap and hand-to-T0/T0c sections into one list for H11/H12.",
+  "H11 (Day 1-2, local, about 45 min) Apply T0 per review/t0/APPLY.md, one line: cd ~/Documents/Projects/Aite && git pull && (cd core && cargo build -p aite) && cp core/target/debug/aite /tmp/aite-prelock && git checkout -b contract/p1.0 && AITE_RELOCK=1 python3 review/t0/p1-contract-patch.py --check && AITE_RELOCK=1 python3 review/t0/p1-contract-patch.py && make proto-gen && (cd core && cargo test -p aite-contracts -p aite-proto) && AITE_RELOCK=1 /tmp/aite-prelock contracts lock --write && /tmp/aite-prelock contracts lock --check && (cd edge && go build ./... && go vet ./...). Expect contracts passed=27+K and OK 26 files; the rest of the workspace is expected not to compile yet. Commit 'contract(p1.0): T0' and git push origin contract/p1.0. [REVISION 2026-09-25b] Review docs/p1/contract-p1.md against the H10 contract-gap list before applying.",
+  "H12 (Day 2) Launch T0c (claude --cloud \"读 review/paste-T0c.md 并照做\"). When its PR is green, merge it (it carries the contract commit), delete contract/p1.0, and refresh the B1 sha and counts in review/paste-DD1..DD12.md. [REVISION 2026-09-25] Commit paste-T0c.md onto contract/p1.0 and push; start the session on branch contract/p1.0 (web UI if --cloud cannot pick a branch); its self-check is HEAD == origin/contract/p1.0.",
+  "H13 (Day 2-3) Launch wave 2 (DD1-DD12) in one loop. Merge in the order DD1 -> DD2 -> DD8 -> DD3/DD4/DD5/DD6/DD7 -> DD9/DD10/DD11/DD12. After DD8+DD9+DD10+DD11 are merged, run a real-device smoke on Feishu, DingTalk and WeCom (@Aite question, #A follow-up by quote, card update, Stop, 👎/feedback). After DD7, run a live model check locally with real keys.",
+  "H14 (Day 3-4) Launch wave 3 (EE1-EE14) at B2 and merge. Read every wave-2/3 receipt's 'contract gap' section. If a gap passes the T0.1 admission rule, launch T01, apply its patch on branch contract/p1.1 (relock #3), then launch T01c, all before wave 4.",
+  "H15 (Day 5+) Launch wave 4 at B3 (FF1 once im:message.group_msg is approved, the rest immediately) and merge. Run scripts/live-matrix.sh locally with keys (FF9) and commit the report. [REVISION 2026-09-25] Dispatch FF1 with the rest; without group_msg it ships @-only with passive-listen off.",
+  "H16 (Day 7+) Wave 5: run M-P1 from docs/p1/acceptance-P1.md on Feishu (full parity), DingTalk and WeCom (degraded matrix), plus the 3-minute demo, and open S/M fix-it tracks. Compliance: confirm the 登记 scope question (single-tenant private deployment is likely out of scope), fill the per-model filing numbers, keep audit logs >= 190 days. Install the EE14 bundle at the design partner.",
+  "H17 (after wave 5) Decide which deferred tracks to fund: HH1 personal connectors (NEW09), HH2 own-domain hosted pages (ICP or intranet), HH3 DingTalk DWS delegated user."
+ ],
+ "critical_path": "D0 + cloud environment + CC1 green (human, about 2 h) -> T0 authoring (cloud XL, about 1 day), in parallel with CC2-CC12 and the human P0-CLOSE -> wave-1 review/merge (human, about 12 PRs) -> T0 apply on branch contract/p1.0 (human, about 45 min) -> T0c companion (cloud L, 0.5-1 day, alone) -> wave-2 spine: DD1 store (XL) + DD3 routing + DD4/DD6 worker/gateway + DD8 edge wiring (1-1.5 days) -> wave 3 EE7 approvals / EE2 routines / EE1 memory (1-1.5 days) -> wave 4 FF1 ambient (also gated by the external Feishu im:message.group_msg approval) -> wave 5 human M-P1 acceptance on real tenants. The scheduling bottlenecks are human: about 12 PR reviews per wave, two local applies (P0-CLOSE, T0), and all real-platform checks. External gates: Feishu scope approval, DingTalk/WeCom tenant setup, the card click test.",
+ "r0_owners": [
+  "scripts/check.sh: CC1 (W1: Go package summary, B9 evals/p1 gate, --docker); nobody else planned",
+  "scripts/cloud-setup.sh (new): CC1; the human pastes changes into the environment settings",
+  "Makefile: CC1 (W1: cloud-setup, docker-test, evals-p1, build-arg pass-through) -> EE14 (W3: bundle, buildx)",
+  ".github/**: CC1 (W1: sandbox-docker job, evals-p1 step) -> EE14 (W3: bundle/buildx job)",
+  "docker-compose.yml: CC1 (W1: mirror build args) -> DD8 (W2: sandbox internal network) -> EE14 (W3: bundle profiles)",
+  "docker/core/**, docker/edge/**: CC1 (W1: mirror ARGs) -> EE14 (W3: multi-arch)",
+  "docker/sandbox/**: CC12 (W1) -> EE10 (W3: CA trust) -> FF8 (W4: vendor CLIs)",
+  "core/Cargo.toml: CC1 (W1: aite-* path deps for the skeleton crates) -> DD12 (W2: axum with the approved features); nobody else",
+  "core/Cargo.lock: CC1 (W1) -> T0c (W2a, only if a companion edit forces it) -> DD12 (W2); none in W3/W4 (skeleton crates pre-declare their deps); merge-time regeneration by the human only as a fallback",
+  "core/crates/app/Cargo.toml: CC1 (W1: deps on the five skeleton crates); nobody else",
+  "core/crates/proto/** (guard-blocked through the proto/ prefix): the T0 patch only (T0.1 if admitted); applied by the human",
+  "edge/gen/**: the human's local make proto-gen only (P0-CLOSE AA4, T0, T0.1); never a cloud session",
+  "edge/internal/server/**: T0 patch (server.go ContractVersion line) -> T0c (W2a: new files ports_p1.go/services_p1.go) -> DD8 (W2)",
+  "edge/internal/config/**, edge/internal/aiteerr/**: DD8 (W2)",
+  "edge/internal/pin/**: nobody (no new Go dependency; gorilla/websocket is already pinned)",
+  "edge/cmd/aite-edge/main.go: AA4 comment (human, P0-CLOSE) -> DD8 (W2: platform factory, egress, HTTP ingress); main_test.go: T0c (W2a: p1.0 pin) -> DD8 (W2)",
+  "config/aite.example.yaml: the T0 patch only (T0.1 if admitted)",
+  "core/crates/app/src/app.rs, wiring.rs, lib.rs, features/mod.rs: CC4 (W1) -> T0c (W2a: Services threading, parallel flip); afterwards each feature owns only its app/src/features/<x>.rs",
+  "core/crates/app/src/run.rs: CC2 (W1) -> T0c (W2a)",
+  "core/crates/app/src/cli.rs: DD12 (W2) -> FF5 (W4); core/crates/app/src/preflight.rs: FF5 (W4)",
+  "core/crates/app/tests/cold_start_to_delivery.rs: BB2 (human) -> T0c (literal sites only) -> DD6 (W2) -> EE12 (W3)",
+  "core/crates/worker/prompts/platform.md (live baseline): DD4 (W2) -> FF10 (W4)",
+  "CLAUDE.md: human (D0) -> CC1 (W1 cloud baseline) -> T0c (W2a B1 rows); .gitignore: human (D0) -> CC1 (W1)",
+  ".claude/**, docs/dev-spec-*.md, evals/p0/*.yaml: human only / never",
+  ".contracts.lock: human relocks only: #1 P0-CLOSE, #2 T0, #3 T0.1 if admitted"
+ ],
+ "risks": [
+  "T0 is a single XL design, so a miss found in wave 2/3 costs relock #3 (the T0.1 reserve, with an admission rule). Mitigation: docs/p1/contract-p1.md is reviewed before apply. Open maps (Session.meta, ExternalEvent.payload, AuditEvent.detail, provider_extra) and default trait methods absorb small gaps. T0 may run a throwaway companion on its scratch copy to catch shape errors early.",
+  "T0c sits alone on the critical path, and its edits span every crate. Mitigation: its scope is purely mechanical (literal sites, pins, threading, one flip). The parallel-dispatch flip is its only behaviour change, and the rule is stop-and-report on a genuine race.",
+  "Guard behaviour in the cloud: hooks run only in single-repo sessions and fail open silently. Known false blocks: heredoc text, $(...), multi-line quotes, commands naming protected paths, the bare proto token. Mitigation: every paste's self-check requires the guard Read BLOCKED; the T0 script does all protected work internally; data files use flattened names.",
+  "Cloud vs local drift: Linux vs macOS, 4 vCPU, cold cargo builds (maybe 10-15 min), an unknown Go version (GOTOOLCHAIN=auto), Debian/Docker Hub reachability for the sandbox image (custom domains, best-effort build). CC1 measures and records all of it.",
+  "Human bottlenecks: about 12 PR reviews per wave, two local applies, and all real-platform checks. CI runs on every PR update (checks + compose-smoke + sandbox-docker).",
+  "External gates: Feishu im:message.group_msg approval (unknown lead time) gates CT03/CT23 and steering without @. Message search needs a service-user token (CT08). The card click test decides buttons vs text commands.",
+  "DingTalk/WeCom are verified against fakes only until the human runs real devices. DingTalk repliedMsg is undocumented, and its msgId may not match stored ids (H9 probe). WeCom quotes carry no msgid. Platform limits: 1 KB card streaming, 2 s callback, 10-min stream, 5 s updates, 3 in-flight replies per user.",
+  "Model vendor behaviour differs from the research: the DeepSeek 400-without-echo claim did not reproduce, and deepseek-chat silently routes to deepseek-flash. Only fixtures run in the cloud; live keys stay local.",
+  "Default-off features (the AIGC label until EE12) mean wave-2 main does not yet label replies; do not run a public pilot before wave 3 merges.",
+  "Approvals do not survive a restart in v1 (EE7 fails them with a notice); document this for the design partner.",
+  "Egress MITM (EE10) is security-sensitive: CA key custody, host-scoped interception, and edge already holds docker.sock. Keep secrets edge-only, MITM only credential hosts, audit injected=true, keep docker tests hermetic.",
+  "Compliance uncertainty: the 登记 scope for any public SaaS, and the GB 45438 metadata layout, which comes from a third-party reading (buy the standard before FF6 sign-off).",
+  "Per-thread sandbox linger x 4 parallel tasks raises the container count; FF5 preflight adds a host capacity check."
+ ],
+ "changes_vs_winner": [
+  "T0 restructured (platform-first graft; judges 1 and 3). The patch writes only proto/aite/v1, contracts, core/crates/proto, the server.go ContractVersion line and config/aite.example.yaml. The human applies it on branch contract/p1.0, with make proto-gen and a relock using a pre-patch binary. A new wave-2a companion track, T0c, makes the workspace compile. Removed: the T0 freeze/rebase step, the CC2-CC7 freeze prerequisite, the 12 h cutoff rule, and the dependence on a long-lived T0 session.",
+  "The T0 self-test now runs everything protected inside the script (--self-test/--codegen, a git clone --local scratch copy, AA4/BB2/BB4 via --root, the prelock binary). Its acceptance no longer claims 'cargo failed=1 exactly cli_smoke' on a patched tree, which was wrong because cli_smoke.rs:481 also pins p0.2. It now claims only: contracts/proto green, the exact MISMATCH list (4 P0-CLOSE files + the T0 set), and go build/vet.",
+  "All five literal p0.2 pins outside the lock (main_test.go:202, evidence/tests/manifest.rs:65, evals_runner.rs:111, protocol_probe.rs:523, cli_smoke.rs:481) are assigned to T0c.",
+  "T0 contract content additions: per-model display_name/filing_no on ModelConfig (replacing the single ComplianceConfig.model_filing_no); OAuthAuthorizeUrl/OAuthExchange RPCs + PlatformPort defaults (platform-agnostic admin login; secrets stay in edge); UserInfo.is_guest and ToolContext.initiator_external (NEW08); AmbientConfig.max_consecutive_bot_turns (bot-loop guard); AdminConfig.bootstrap_token_env; DocWrite.aigc_banner; DingtalkConfig.card_template_id_env; wecom_v1 reactions_in=true for feedback_event.",
+  "CC2 parallel dispatch ships as with_max_parallel(n) defaulting to 1 (was const 4, on by default). T0c flips it from config and owns the affected app/evals tests.",
+  "CC3 no longer touches cold_start_to_delivery.rs, a BB2 file with no turn assertions. It keeps reconnect_replay.rs and sqlite_cross_process.rs, pre-seeds snapshot.rs and label.rs, and wraps tool results as external data (CT29).",
+  "DD6 (per-thread sandbox) now owns cold_start_to_delivery.rs:661-665, graceful_shutdown.rs:279 and features/sandbox.rs. !stop/cancel still releases immediately (new test cancel_releases_sandbox_immediately; p0/07 release min:1).",
+  "DD5's AIGC label ships default-off behind a WorkerDeps.aigc_label slot that T0c adds at every WorkerDeps literal, and always goes inside the same send_text/card. EE12 flips it in wave 3 through a FeatureCtx worker_options entry and owns cold_start_to_delivery.rs from then on (the exact reply at :517).",
+  "Cross-surface wiring is now explicit. CC4's FeatureCtx gains ordered gateway_options/worker_options mutation slots that wiring.rs applies before build, so features/sandbox.rs (DD6) and features/compliance.rs (EE12) can flip builders without editing wiring.rs. DD3 wires RunHooks.take_decision to a per-task approval mailbox (send_decision) that EE7 only writes into.",
+  "CC4's surface gains core/crates/app/src/lib.rs, extra feature stubs (approvals, compliance, sandbox, egress, personal) and gateway tool stubs (shell, access). T0c's surface is widened to core/crates/evidence/** (for the manifest.rs version pin) and edge/cmd/aite-edge/main_test.go. The Go config parser was checked and is lenient (yaml.Unmarshal), so T0's new example.yaml sections keep edge/internal/config green without a T0c edit there.",
+  "CC1 changes: (1) Dropped the pre-declared axum/regex/url/base64; axum moves to DD12 after H1 approval, with the Cargo.lock growth acknowledged. (2) Skeleton crates pre-declare their deps from existing workspace deps only, and app/Cargo.toml gets them, so wave 3 never edits Cargo files. (3) Gained docker/core + docker/edge mirror build ARGs and docker-compose.yml. (4) The setup script's docker build is best effort, and CC1 verifies custom-domain reachability. (5) The .venv/egg-info/top-level dev-spec untracking moved to the human D0 commit (cmp verified byte-identical), so every cloud clone is lean from the start.",
+  "CC6 gains the in-process reasoning-echo cache keyed by tool_call_id, which works before T0's provider_extra lands.",
+  "CC7 gains the catalog-aware ProtocolProbe and a scenario worker-options knob.",
+  "CC11/EE10/FF8: IM API hosts (open.feishu.cn, api.dingtalk.com, mcp.dingtalk.com, qyapi.weixin.qq.com) are never in the anonymous china-trusted preset; they are credential-bound only.",
+  "Guard hygiene: (1) removed every acceptance grep naming go.mod/go.sum, replaced by a reviewer-side check; (2) replaced test -z \"$(gofmt -l .)\" with gofmt -l . | wc -l; (3) no aite-proto/proto paths in agent Bash; (4) no dev-spec filename in agent commands; (5) docker tests are hermetic, so DD8 no longer reaches public hosts.",
+  "Wave-2 edge and control additions: DD9 gains the Feishu OAuthProvider and guest detection. DD10's docx pages carry an explicit AIGC banner. DD11 maps WeCom feedback_event to the thumbs-down Reaction, honours 3-in-flight-per-user / 24 h window / 30 per minute, and adds DingTalk OAuth. DD12 gains 等保二级 basics (lockout, session timeout, CSRF, escaping), bootstrap-token login and a per-model filing panel. DD3 documents that MessageEdited has no emitter today and adds NEW07.",
+  "Spend presets are converted to RMB (¥3,500/¥7,000/¥17,500/¥35,000/不限/自定义 up to ¥7,000,000) in EE3/EE9 (was ¥500/¥1000/¥2500/¥5000).",
+  "EE7 states that approvals do not survive a restart: at startup, features/approvals.rs fails AwaitingApproval tasks with a notice, and CC5 keeps awaiting_approval out of orphan recovery.",
+  "EE8 gains the bot-loop guard, and !about lists every model's filing number. FF1 states the invariant that a top-level @ is one Task session.",
+  "FF2 (pull-based edits + pins/quote blocks) moved to wave 3 as EE13, right after DD9. The offline-bundle part of FF5 moved to wave 3 as EE14 (private deployment first); FF5 keeps the preflight groups + doctor.",
+  "Added wave-6 deferred tracks HH1 (NEW09 personal connectors), HH2 (own-domain hosted HTML pages) and HH3 (DingTalk DWS delegated user).",
+  "Human queue changes: approvals are ordered before dispatch (H1). P0-CLOSE uses one relock, with MISMATCH 4 files, ~/Documents/Projects/Aite paths, and a note that cli_smoke is red by construction before the relock. A Day-0 click-test attempt via API Explorer. A DingTalk repliedMsg.msgId probe (H9). A note that CI runs only on PRs. Paste files live at review/paste-<ID>.md (user convention) and are launched with short prompts."
+ ],
+ "open_decisions_for_user": [
+  "Accept the T0 mechanics: the human applies a locked-files-only patch on branch contract/p1.0 (make proto-gen + a relock with the pre-patch binary; the workspace stays red on that branch until T0c lands), followed by a cloud companion T0c. The alternative is one self-contained patch with a freeze/rebase step.",
+  "Sign off the owner defaults: single-tenant private/hybrid first; SQLite + migrations; memory files, no vector DB; Rust axum admin; GitLab/极狐 first; Feishu docx as hosted page; Bocha/Zhipu search; DingTalk bot-only; qwen3.7-plus primary + deepseek-v4-pro/deepseek-flash fallback + deepseek-flash fast; one IM platform per deployment in v1.",
+  "Approve axum 0.8 as a direct dependency with a named feature list (the Cargo.lock will add transitive packages), or choose a hyper-only admin server (about +1 day).",
+  "Approve apt git/curl/jq/unzip and pypdf in the sandbox image (without pypdf, PDF implicit AIGC metadata is skipped).",
+  "Parallel dispatch default: flip to 4 in T0c (recommended), or keep 1 until a later wave.",
+  "AIGC explicit label on by default from wave 3 (EE12), with the text '内容由 AI 生成' appended inside the reply, plus the docx page banner; confirm the wording.",
+  "Card buttons: accept 'buttons only if the H8 click test passes, else !approve/!reject/!stop text commands'.",
+  "Per-model filing numbers in config: each model service's 备案号/上线编号 is shown by !about and the admin panel. Also confirm whether Aite itself needs a service filing number (the 登记 scope for any public-facing SaaS).",
+  "Approvals do not survive a restart in v1 (they fail with a notice); acceptable?",
+  "Private-deployment bundle timing: wave 3 (EE14, recommended given private-first) or wave 4.",
+  "Live model keys: local only (recommended), or a separate cloud environment 'aite-live' whose variables every environment user can see.",
+  "Paste location and launch: review/paste-<ID>.md (your convention), launched with claude --cloud loops. claude-fleet does not cover cloud sessions today; should it gain a --cloud mode?",
+  "Which deferred wave-6 tracks to fund later: HH1 personal connectors (NEW09), HH2 own-domain hosted pages (ICP or intranet), HH3 DingTalk DWS delegated user (beta)."
+ ],
+ "revisions": [
+  "2026-09-25: applied the plan-review findings (human-steps / parity / consistency lenses); see [REVISION 2026-09-25] markers.",
+  "2026-09-25b: cross-check round (CC2 DuplicateTurn retry + merge order, CC3 all-4xx, CC12 ustc, D25 compliance fields, T0c handover list)."
+ ]
+}

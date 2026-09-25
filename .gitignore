@@ -29,3 +29,7 @@ config/aite.yaml
 # 这一行留着是为了把「socket 不入库」这个意图写在明处 —— 哪天有人把 `/data/*` 收窄，
 # 它还接得住。
 /data/run/
+
+# Python 残留 (AA4 合并时误入库, 2026-09-25 移出索引) 
+.venv/
+*.egg-info/
