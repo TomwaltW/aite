@@ -179,8 +179,11 @@ impl InProcessControlPlane {
             return Ok(());
         }
 
-        // R6：话题内续接，不要求 mentioned
-        if ev.chat_type == ChatType::Group
+        // R6：话题内续接，不要求 mentioned。CC2 ⑥：看平台有没有原生话题（`supports_thread`），
+        // 不再写死「群聊」；p2p 不进 R6 —— 它先过上面的 DM 桩（FF4），桩关着时净行为与今天一致
+        // （有 @ 走 R7，无 @ 走 R8）。
+        if ev.chat_type != ChatType::P2p
+            && self.platform.capabilities().supports_thread
             && let Some(session) = session
         {
             return self.continue_session(ev, session).await;
@@ -298,6 +301,8 @@ impl InProcessControlPlane {
             .await?;
         session.last_active_at = self.now();
         self.store.update_session(&session).await?;
+        // CC2 ⑦：追问也给个「收到」，steer 与新建两条路都算（机器人在 R1 就被丢了，走不到这里）
+        self.ack(ev).await;
 
         // 先把库读完再取锁：`std::sync::Mutex` 的 guard 不许跨 await 活着（§7.6）。
         let listed = self.store.list_active_tasks(&session.chat_id).await?;

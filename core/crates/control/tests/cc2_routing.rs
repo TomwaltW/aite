@@ -2,9 +2,12 @@
 //! ⑧ `!new` 之后同话题的回复；⑩ `append_turn` 撞号重试。
 mod support;
 
-use aite_contracts::IngressError;
+use aite_contracts::{
+    ChatType, ControlPlane, IngressError, ReactionKind, SenderKind, SessionStore, TaskStatus,
+    feishu_p0,
+};
 use aite_control::Ingress;
-use support::{Harness, ev};
+use support::{CHAT, Harness, ROOT, active_tasks, ev, turn_texts};
 
 /// ③：`handler()` 对存储错误返回 `Err`（gRPC 入口翻成 INTERNAL，`proto/src/status.rs`：
 /// 非 `Invalid` 一律 INTERNAL；control 不依赖 aite-proto，断言到这里为止），计数照打。
@@ -22,4 +25,121 @@ async fn ingress_store_failure_returns_internal() {
     );
     assert_eq!(ingress.counter("ingress.errors"), 1);
     assert_eq!(plane.counter("events.dropped"), 1);
+}
+
+// ---- ⑥ R6 看 `supports_thread`；p2p 不进 R6 ------------------------------
+
+/// 话题里一条无 @ 的回复（R6 的典型输入）。
+fn followup(id: &str, message_id: &str, text: &str) -> aite_contracts::NormalizedEvent {
+    ev().id(id)
+        .message_id(message_id)
+        .thread(ROOT)
+        .mentioned(false)
+        .text(text)
+        .build()
+}
+
+#[tokio::test]
+async fn r6_requires_supports_thread() {
+    let h = Harness::new();
+    let mut caps = feishu_p0();
+    caps.supports_thread = false;
+    h.platform.set_capabilities(caps);
+    let plane = h.plane();
+    plane
+        .handle_event(ev().text("第一件事").build())
+        .await
+        .expect("R7 建会话");
+    let session = h
+        .store
+        .find_session_by_thread(CHAT, ROOT)
+        .await
+        .expect("查")
+        .expect("有");
+
+    plane
+        .handle_event(followup("e2", "om_2", "再补一句"))
+        .await
+        .expect("追问");
+
+    assert_eq!(
+        turn_texts(&h.store, &session.id).await,
+        vec!["第一件事"],
+        "平台没有原生话题：R6 不接，这句不进会话"
+    );
+    assert_eq!(plane.counter("events.ignored"), 1, "无 @ → R8 丢弃");
+    assert_eq!(plane.counter("events.steer"), 0);
+}
+
+/// DM 桩关着时 p2p 的净行为与今天一致：有 @ → R7，无 @ → R8，**即使该话题有会话也不进 R6**。
+#[tokio::test]
+async fn p2p_goes_to_disabled_dm_stub() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().chat_type(ChatType::P2p).text("私聊里的活").build())
+        .await
+        .expect("R7 建会话");
+    let session = h
+        .store
+        .find_session_by_thread(CHAT, ROOT)
+        .await
+        .expect("查")
+        .expect("p2p 有 @ 照样走 R7");
+
+    let mut ev2 = followup("e2", "om_2", "私聊里的追问");
+    ev2.chat_type = ChatType::P2p;
+    plane.handle_event(ev2).await.expect("追问");
+
+    assert_eq!(
+        turn_texts(&h.store, &session.id).await,
+        vec!["私聊里的活"],
+        "p2p 不进 R6"
+    );
+    assert_eq!(plane.counter("events.ignored"), 1);
+    assert_eq!(plane.counter("events.steer"), 0);
+}
+
+// ---- ⑦ R6 追问补 ack ------------------------------------------------------
+
+#[tokio::test]
+async fn r6_followup_gets_ack() {
+    let h = Harness::new();
+    let plane = h.plane();
+    plane
+        .handle_event(ev().text("第一件事").build())
+        .await
+        .expect("R7 建任务");
+
+    // steer 那条路：任务还在（排着队，本进程接手过）
+    plane
+        .handle_event(followup("e2", "om_2", "顺便看看这个"))
+        .await
+        .expect("steer");
+    assert_eq!(plane.counter("events.steer"), 1);
+
+    // 新建那条路：任务已经交付了，同话题再问一句 → 在同一个会话里新建任务
+    let mut task = active_tasks(&h.store, CHAT).await.remove(0);
+    task.status = TaskStatus::Delivered;
+    h.store.update_task(&task).await.expect("落 delivered");
+    plane
+        .handle_event(followup("e3", "om_3", "再来一个"))
+        .await
+        .expect("新建");
+    assert_eq!(active_tasks(&h.store, CHAT).await.len(), 1, "新建了一个");
+
+    // 机器人在话题里说话：R1 丢掉，不 ack
+    let mut bot = followup("e4", "om_bot", "我是另一个机器人");
+    bot.sender_kind = SenderKind::Bot;
+    plane.handle_event(bot).await.expect("bot");
+
+    assert_eq!(
+        h.platform.reactions(),
+        vec![
+            (ROOT.to_string(), ReactionKind::Ack),
+            ("om_2".to_string(), ReactionKind::Ack),
+            ("om_3".to_string(), ReactionKind::Ack),
+        ],
+        "R7 一次、R6 两条路各一次、bot 零次"
+    );
 }

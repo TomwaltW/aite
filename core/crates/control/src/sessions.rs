@@ -82,14 +82,7 @@ impl InProcessControlPlane {
         };
         self.store.create_session(&session).await?;
         if react {
-            // ack 失败不影响建任务（Python 的 contextlib.suppress）
-            if let Err(e) = self
-                .platform
-                .add_reaction(&ev.anchor.message_id, ReactionKind::Ack)
-                .await
-            {
-                tracing::warn!(target: "aite.control", error = %e, "control.ack_failed");
-            }
+            self.ack(ev).await;
         }
         // `!restart`（CC2 ④）：历史在前、`rest` 在后
         if let Some(thread_id) = seed_from_thread {
@@ -290,6 +283,17 @@ impl InProcessControlPlane {
             })
             .await?;
         Ok(())
+    }
+
+    /// 给这条消息加一个「收到」。失败不影响后面的事（Python 的 contextlib.suppress）。
+    pub(crate) async fn ack(&self, ev: &NormalizedEvent) {
+        if let Err(e) = self
+            .platform
+            .add_reaction(&ev.anchor.message_id, ReactionKind::Ack)
+            .await
+        {
+            tracing::warn!(target: "aite.control", error = %e, "control.ack_failed");
+        }
     }
 
     pub(crate) async fn reply(&self, ev: &NormalizedEvent, text: &str) -> Result<(), IngressError> {
