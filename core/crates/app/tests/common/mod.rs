@@ -219,7 +219,14 @@ impl GatedPlatform {
             self.dropped_after_stop.fetch_add(1, Ordering::SeqCst);
             return;
         }
-        self.inner.emit(ev).await.expect("emit");
+        if let Err(e) = self.inner.emit(ev).await {
+            // CC2 ③：`Ingress::handler()` 起对存储 / 证据错误返回 `Err`（真 gRPC 入口把它翻成
+            // INTERNAL 让平台重推）。那是投递面的正常回音，不是夹具出错；其余错误照旧当夹具出错。
+            assert!(
+                e.0.starts_with("store: ") || e.0.starts_with("evidence: "),
+                "emit: {e}"
+            );
+        }
     }
 }
 

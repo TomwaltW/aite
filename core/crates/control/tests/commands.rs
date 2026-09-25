@@ -545,20 +545,26 @@ async fn new_forces_fresh_session_inside_existing_thread() {
 
     cmd_in_thread(&plane, "!new 另起一件事", "om_5").await;
 
-    let still = h
+    // CC2 ⑧ 翻转：原来断言「按 ROOT 查到的还是老会话」「`om_5` 成了新 root」。
+    // 现在话题内的 `!new` 把新会话挂在同一个话题上，按 ROOT 查到的是新会话；
+    // 老会话不归档、任务不动（下面两条断言照旧成立）。
+    let fresh = h
         .store
         .find_session_by_thread(CHAT, ROOT)
         .await
         .expect("查")
         .expect("有");
-    assert_eq!(still.id, old.id, "老话题没被动");
-    let fresh = h
-        .store
-        .find_session_by_thread(CHAT, "om_5")
-        .await
-        .expect("查")
-        .expect("本条消息成了新 root");
-    assert_ne!(fresh.id, old.id);
+    assert_ne!(fresh.id, old.id, "同一话题，新会话胜出");
+    assert!(
+        h.store
+            .find_session_by_thread(CHAT, "om_5")
+            .await
+            .expect("查")
+            .is_none(),
+        "`!new` 这条消息不再自己当 root"
+    );
+    let still = h.store.get_session(&old.id).await.expect("读").expect("有");
+    assert_eq!(still.status, SessionStatus::Active, "老会话没被归档");
 
     let tasks = active_tasks(&h.store, CHAT).await;
     let session_ids: std::collections::HashSet<String> =
@@ -587,8 +593,8 @@ async fn unknown_command() {
         h.platform.last_text().expect("该回帖").text,
         UNKNOWN_COMMAND_TEXT
     );
-    assert!(UNKNOWN_COMMAND_TEXT.contains("!status"));
-    assert!(UNKNOWN_COMMAND_TEXT.contains("!restart"));
+    // CC2 ⑤ 翻转：原来断言这句里含 `!status` / `!restart`；现在它只指路 `!help`
+    assert!(UNKNOWN_COMMAND_TEXT.contains("!help"));
     assert_eq!(plane.counter("commands!oops"), 1);
 }
 
@@ -868,5 +874,27 @@ async fn restart_stops_what_it_can_and_names_what_it_cannot() {
             restart_while_delivering_text(std::slice::from_ref(&answering.task_no))
         ),
         "两半各说各的，一句话里说清"
+    );
+}
+
+/// CC2 ⑨：对交付中的任务发 `!stop`，**不写命令证据**（它马上会 `finish()` 落 manifest，
+/// 写在后面会让 manifest 过期）—— 链的长度不变，也没有 `route=command` 那条。
+#[tokio::test]
+async fn stop_on_an_answering_task_writes_no_command_evidence() {
+    let (h, plane, _running, task) = a_task_stuck_in_answering().await;
+    let before = h.evidence.events(&task.id).len();
+
+    cmd(&plane, &format!("!stop {}", task.task_no), "om_9").await;
+
+    assert_eq!(
+        h.evidence.events(&task.id).len(),
+        before,
+        "交付中任务的链不许动"
+    );
+    assert!(
+        h.evidence
+            .received(&task.id)
+            .iter()
+            .all(|p| p.get("route").and_then(|v| v.as_str()) != Some("command")),
     );
 }

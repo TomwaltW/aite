@@ -1,0 +1,376 @@
+//! 会话与任务的建立、话题查找、transcript 追加、回帖。CC2 从 `plane.rs` 原样搬来。
+use serde_json::{Map, Value};
+
+use chrono::{DateTime, Utc};
+
+use aite_contracts::{
+    Anchor, Attachment, EvidenceKind, IngressError, NormalizedEvent, OutboundText, ReactionKind,
+    Session, SessionKind, SessionStatus, StoreError, Task, TaskStatus, Turn, TurnRole,
+};
+use rand::Rng;
+
+use crate::card::{MAX_TITLE_CHARS, clip};
+use crate::evidence_log::{ROUTE_NEW_TASK, event_payload};
+use crate::lock;
+use crate::plane::InProcessControlPlane;
+
+/// `!restart` 回灌话题历史时最多读这么多条（CC2 ④）。与 worker 读群历史的量级相当，
+/// 既够把一段对话接上，又不至于一次把 transcript 塞爆。
+pub(crate) const RESTART_HISTORY_LIMIT: u32 = 50;
+
+/// `append_turn` 撞 `DuplicateTurn` 时最多写几次（含第一次，CC2 ⑩）。
+pub(crate) const APPEND_TURN_ATTEMPTS: u32 = 3;
+
+/// 32 hex（Python 的 `secrets.token_hex(16)`）。
+pub(crate) fn token_hex_16() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// 发起人显示名：`config_snapshot["initiator_name"]`，空则退回 `created_by`。
+pub(crate) fn initiator_of(session: &Session) -> String {
+    session
+        .config_snapshot
+        .get("initiator_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| session.created_by.clone())
+}
+
+impl InProcessControlPlane {
+    pub(crate) async fn new_session(
+        &self,
+        ev: &NormalizedEvent,
+        thread_id: &str,
+        text: &str,
+        react: bool,
+        seed_from_thread: Option<&str>,
+    ) -> Result<Session, IngressError> {
+        let now = self.now();
+        let mut config_snapshot = Map::new();
+        config_snapshot.insert(
+            "model".into(),
+            Value::String(self.config.model.model.clone()),
+        );
+        config_snapshot.insert(
+            "initiator_name".into(),
+            Value::String(
+                ev.sender_name
+                    .clone()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| ev.sender_id.clone()),
+            ),
+        );
+        let session = Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            tenant_id: ev.tenant_id.clone(),
+            workspace_id: ev.workspace_id.clone(),
+            chat_id: ev.chat_id.clone(),
+            kind: SessionKind::Task,
+            anchor: Anchor {
+                platform: ev.platform.clone(),
+                chat_id: ev.chat_id.clone(),
+                message_id: ev.anchor.message_id.clone(),
+                thread_id: Some(thread_id.to_string()),
+                task_no: None,
+            },
+            status: SessionStatus::Active,
+            created_by: ev.sender_id.clone(),
+            config_snapshot,
+            created_at: now,
+            last_active_at: now,
+            archived_at: None,
+        };
+        // `!restart`（CC2 ④）的历史在建会话之前读好：读历史是一次网络往返，不能拿着锁读。
+        let history = match seed_from_thread {
+            Some(thread_id) => self.thread_history(ev, thread_id).await,
+            None => Vec::new(),
+        };
+        // 建会话与它的头几轮在**同一段** `turn_seq_lock` 临界区里（CC1 记账转来的 R7 竞态）：
+        // 会话一落库，同话题并发到达的追问就能经 `find_session_by_thread` 命中 R6；原来这中间
+        // 隔着一次 `add_reaction` 的 await，追问会先拿到 seq=0，transcript 顺序反了。
+        {
+            let _seq_guard = self.turn_seq_lock.lock().await;
+            self.store.create_session(&session).await?;
+            for (role, uid, content, at) in history {
+                self.write_turn_locked(&session, role, uid, &content, Vec::new(), at)
+                    .await?;
+            }
+            if !text.is_empty() {
+                self.write_turn_locked(
+                    &session,
+                    TurnRole::User,
+                    Some(ev.sender_id.clone()),
+                    text,
+                    ev.attachments.clone(),
+                    ev.occurred_at,
+                )
+                .await?;
+            }
+        }
+        if react {
+            self.ack(ev).await;
+        }
+        if !text.is_empty() {
+            self.start_task(&session, ev, Some(text)).await?;
+        }
+        Ok(session)
+    }
+
+    /// `!restart` 的新会话从原话题的历史接着往下聊（CC2 ④）。
+    ///
+    /// 平台不支持读历史（`supports_history` 为假）就不读；读失败只 warn，重开照走 ——
+    /// 回灌是锦上添花，不能让一次读失败把 `!restart` 本身弄没。按时间正序写：真人的话记成
+    /// `User`（带 `platform_user_id`），其余（机器人 / 应用 / 系统，含 Aite 自己之前的答复）
+    /// 记成 `SystemNote` 并标出发言人。`!restart` 这一条本身不写（它的 `rest` 随后单独写）。
+    async fn thread_history(
+        &self,
+        ev: &NormalizedEvent,
+        thread_id: &str,
+    ) -> Vec<(TurnRole, Option<String>, String, DateTime<Utc>)> {
+        if !self.platform.capabilities().supports_history {
+            return Vec::new();
+        }
+        let history = match self
+            .platform
+            .read_history(&ev.chat_id, RESTART_HISTORY_LIMIT, Some(thread_id))
+            .await
+        {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!(target: "aite.control", thread = %thread_id, error = %e, "control.restart_history_failed");
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for msg in history {
+            if msg.message_id == ev.anchor.message_id || msg.text.trim().is_empty() {
+                continue;
+            }
+            let (role, content) = if msg.sender_kind == "human" {
+                (TurnRole::User, msg.text.clone())
+            } else {
+                let who = msg
+                    .sender_name
+                    .clone()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| msg.sender_id.clone());
+                (TurnRole::SystemNote, format!("[{who}] {}", msg.text))
+            };
+            out.push((role, Some(msg.sender_id.clone()), content, msg.created_at));
+        }
+        out
+    }
+
+    /// 六步顺序严格：造 Task → `create_task` → `task_created` 证据 → `event_received`
+    /// 证据 → `_owned` → 入队。证据链前两条永远是 `task_created, event_received`。
+    pub(crate) async fn start_task(
+        &self,
+        session: &Session,
+        ev: &NormalizedEvent,
+        text: Option<&str>,
+    ) -> Result<Task, IngressError> {
+        let now = self.now();
+        let task_no = self.store.next_task_no(&session.tenant_id).await?;
+        let task = Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session.id.clone(),
+            task_no,
+            status: TaskStatus::Created,
+            title: clip(text.unwrap_or(&ev.text), MAX_TITLE_CHARS),
+            checklist: Vec::new(),
+            card_id: None,
+            sandbox_id: None,
+            session_token: token_hex_16(),
+            model: self.config.model.model.clone(),
+            steps: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            cost: 0.0,
+            max_steps: self.config.worker.max_steps,
+            max_wall_sec: self.config.worker.max_wall_sec,
+            result_summary: String::new(),
+            evidence_root_hash: None,
+            created_by: ev.sender_id.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        self.store.create_task(&task).await?;
+
+        let mut created = Map::new();
+        created.insert("session_id".into(), Value::String(session.id.clone()));
+        created.insert("task_no".into(), Value::String(task.task_no.clone()));
+        created.insert("chat_id".into(), Value::String(session.chat_id.clone()));
+        created.insert("created_by".into(), Value::String(task.created_by.clone()));
+        created.insert("title".into(), Value::String(task.title.clone()));
+        self.evidence
+            .append(&task.id, EvidenceKind::TaskCreated, created)
+            .await?;
+        self.evidence
+            .append(
+                &task.id,
+                EvidenceKind::EventReceived,
+                event_payload(ev, ROUTE_NEW_TASK, None),
+            )
+            .await?;
+
+        lock(&self.shared.owned).insert(task.id.clone());
+        self.shared
+            .queue
+            .put_keyed(task.id.clone(), session.id.clone());
+        Ok(task)
+    }
+
+    pub(crate) async fn thread_session(
+        &self,
+        ev: &NormalizedEvent,
+        fallback_to_message_id: bool,
+    ) -> Result<Option<Session>, IngressError> {
+        if let Some(thread_id) = ev.anchor.thread_id.as_deref().filter(|t| !t.is_empty())
+            && let Some(hit) = self
+                .store
+                .find_session_by_thread(&ev.chat_id, thread_id)
+                .await?
+        {
+            return Ok(Some(hit));
+        }
+        if fallback_to_message_id {
+            // 被编辑的可能正是话题 root 那条消息
+            return Ok(self
+                .store
+                .find_session_by_thread(&ev.chat_id, &ev.anchor.message_id)
+                .await?);
+        }
+        Ok(None)
+    }
+
+    /// seq 由调用方分配（§3.2）。只用协议里有的 `list_turns` 推下一个 seq，
+    /// 这样换任何 SessionStore 实现都成立。
+    ///
+    /// 读 seq 和写 turn 之间不许有别人插进来。同一个话题里的两条事件**是会同时**进
+    /// `handle_event` 的 —— 重连那一刻整批一起上来，而这中间隔着两次真会挂起的存储往返。
+    /// 两条都读到「还没有 turn」就都写 seq=0，第二条撞上 (session_id, seq) 唯一约束报
+    /// `DuplicateTurn`；这一报发生在 `seen_event` **已经落库之后**，于是事件既没变成任务，
+    /// 也永远不会被重推第二次（R2 认得它了）—— 用户那句话就此消失。M2 后半句在这里破。
+    ///
+    /// plane 自己的写者由 `turn_seq_lock` 串住。**但它不是唯一的写者**（CC2 ⑩）：CC3 起 worker
+    /// 在 `deliver()` 里用 `store.next_turn_seq` 写 Assistant 轮，那是在这把锁**之外**写的，
+    /// 「进程内一把锁就够」不再成立。所以撞 `DuplicateTurn` 就重读 seq 再写，见
+    /// [`Self::write_turn_locked`]。
+    pub(crate) async fn append_turn(
+        &self,
+        session: &Session,
+        ev: &NormalizedEvent,
+        role: TurnRole,
+        content: &str,
+    ) -> Result<(), IngressError> {
+        self.append_turn_raw(
+            session,
+            role,
+            Some(ev.sender_id.clone()),
+            content,
+            ev.attachments.clone(),
+            ev.occurred_at,
+        )
+        .await
+    }
+
+    /// `append_turn` 的本体：字段不从事件取（`!restart` 回灌历史时每一轮的发言人与时间各不相同）。
+    pub(crate) async fn append_turn_raw(
+        &self,
+        session: &Session,
+        role: TurnRole,
+        platform_user_id: Option<String>,
+        content: &str,
+        attachments: Vec<Attachment>,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), IngressError> {
+        let _seq_guard = self.turn_seq_lock.lock().await;
+        self.write_turn_locked(
+            session,
+            role,
+            platform_user_id,
+            content,
+            attachments,
+            created_at,
+        )
+        .await
+    }
+
+    /// 写一轮；调用方**已经持有** `turn_seq_lock`。
+    ///
+    /// 撞 `DuplicateTurn`（锁外的写者 —— worker 的 Assistant 轮 —— 抢先占了这个 seq）就重读 seq
+    /// 再写，**至多 [`APPEND_TURN_ATTEMPTS`] 次**；都撞 → 照旧把 `Store` 错误传出去（经 CC2 ③
+    /// 成 `Err`，平台重推 —— 但 `seen_event` 已落库，重推会被 R2 吃掉，与 ③ 记的契约缺口同一个）。
+    /// 其它 `StoreError` 不重试。
+    pub(crate) async fn write_turn_locked(
+        &self,
+        session: &Session,
+        role: TurnRole,
+        platform_user_id: Option<String>,
+        content: &str,
+        attachments: Vec<Attachment>,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), IngressError> {
+        let mut attempt = 1;
+        loop {
+            let recent = self.store.list_turns(&session.id, 1).await?;
+            let seq = recent.last().map(|t| t.seq + 1).unwrap_or(0);
+            let turn = Turn {
+                session_id: session.id.clone(),
+                seq,
+                role,
+                platform_user_id: platform_user_id.clone(),
+                content: content.to_string(),
+                attachments: attachments.clone(),
+                created_at,
+            };
+            match self.store.append_turn(&turn).await {
+                Ok(()) => return Ok(()),
+                Err(StoreError::DuplicateTurn { .. }) if attempt < APPEND_TURN_ATTEMPTS => {
+                    tracing::warn!(target: "aite.control", session = %session.id, seq, attempt, "control.turn_seq_retry 撞号，重读 seq 再写");
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+
+    /// 给这条消息加一个「收到」。失败不影响后面的事（Python 的 contextlib.suppress）。
+    pub(crate) async fn ack(&self, ev: &NormalizedEvent) {
+        if let Err(e) = self
+            .platform
+            .add_reaction(&ev.anchor.message_id, ReactionKind::Ack)
+            .await
+        {
+            tracing::warn!(target: "aite.control", error = %e, "control.ack_failed");
+        }
+    }
+
+    pub(crate) async fn reply(&self, ev: &NormalizedEvent, text: &str) -> Result<(), IngressError> {
+        self.platform
+            .send_text(&OutboundText {
+                chat_id: ev.chat_id.clone(),
+                text: text.to_string(),
+                reply_to: Some(ev.anchor.message_id.clone()),
+                in_thread: true,
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_hex_16_is_32_hex_chars() {
+        let token = token_hex_16();
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(token, token_hex_16(), "两次取不该一样");
+    }
+}

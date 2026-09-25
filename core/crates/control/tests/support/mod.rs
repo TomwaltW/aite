@@ -216,6 +216,31 @@ impl TickingWallClock {
     }
 }
 
+/// 可以手动往前拨的墙钟（CC2 ④ 卡死判定要「过了 N 分钟」）。每次取也加 1 毫秒，理由同上。
+pub struct SettableWallClock {
+    next: Mutex<DateTime<Utc>>,
+}
+
+impl SettableWallClock {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            next: Mutex::new(Utc::now()),
+        })
+    }
+    pub fn advance_sec(&self, secs: i64) {
+        *lk(&self.next) += chrono::Duration::seconds(secs);
+    }
+    pub fn as_wall(self: &Arc<Self>) -> WallClock {
+        let me = Arc::clone(self);
+        Arc::new(move || {
+            let mut g = lk(&me.next);
+            let now = *g;
+            *g = now + chrono::Duration::milliseconds(1);
+            now
+        })
+    }
+}
+
 /// 替掉 reaper 的 `sleep`：前 `limit-1` 次立刻返回（让循环转起来），
 /// 第 `limit` 次永久挂住 —— 否则一个不 yield 的假 sleep 会把 reaper 变成空转。
 ///
@@ -317,6 +342,8 @@ struct StoreData {
 pub struct FakeStore {
     data: Mutex<StoreData>,
     fail: Mutex<HashMap<String, usize>>,
+    /// `append_turn` 接下来几次先替「别的写者」占掉该 seq、再报 `DuplicateTurn`（CC2 ⑩）
+    duplicate: Mutex<usize>,
     pub attempts: Mutex<Vec<String>>,
 }
 
@@ -325,8 +352,15 @@ impl FakeStore {
         Arc::new(Self {
             data: Mutex::new(StoreData::default()),
             fail: Mutex::new(HashMap::new()),
+            duplicate: Mutex::new(0),
             attempts: Mutex::new(Vec::new()),
         })
+    }
+
+    /// 模拟 worker 在 plane 的 `turn_seq_lock` 之外抢先写了一轮（CC2 ⑩）：接下来 `times` 次
+    /// `append_turn`，先把调用方要写的那个 seq 用一条 Assistant 轮占掉，再报 `DuplicateTurn`。
+    pub fn duplicate_next_append_turn(&self, times: usize) {
+        *lk(&self.duplicate) = times;
     }
 
     /// 让某个方法接下来 `times` 次调用直接报错（抛在方法体之前，什么都不做）。
@@ -409,6 +443,17 @@ impl SessionStore for FakeStore {
         tokio::task::yield_now().await;
         let mut data = lk(&self.data);
         let turns = data.turns.entry(t.session_id.clone()).or_default();
+        {
+            let mut dup = lk(&self.duplicate);
+            if *dup > 0 && !turns.contains_key(&t.seq) {
+                *dup -= 1;
+                let mut other = t.clone();
+                other.role = aite_contracts::TurnRole::Assistant;
+                other.platform_user_id = None;
+                other.content = format!("（别的写者抢先写的 seq={}）", t.seq);
+                turns.insert(t.seq, other);
+            }
+        }
         if turns.contains_key(&t.seq) {
             return Err(StoreError::DuplicateTurn {
                 session_id: t.session_id.clone(),
@@ -534,6 +579,12 @@ struct PlatformData {
     started: bool,
     n: u64,
     send_text_failures: usize,
+    /// `read_history` 返回的内容（CC2 ④）；默认空，现有用例不受影响
+    history: Vec<HistoryMessage>,
+    /// `read_history` 的调用记录：`(chat_id, limit, thread_id)`
+    history_calls: Vec<(String, u32, Option<String>)>,
+    /// 覆盖 `capabilities()`（CC2 ⑥）；默认 `None` = `feishu_p0()`
+    caps: Option<PlatformCapabilities>,
 }
 
 /// 记录所有出站调用。断言全部对着这些 list 做。
@@ -553,6 +604,18 @@ impl FakePlatform {
     /// 让接下来 `times` 次 `send_text` 报错（平台抽风）。
     pub fn fail_send_text(&self, times: usize) {
         lk(&self.data).send_text_failures = times;
+    }
+
+    /// 让 `read_history` 返回这些（按给的顺序原样返回）。
+    pub fn set_history(&self, history: Vec<HistoryMessage>) {
+        lk(&self.data).history = history;
+    }
+    pub fn history_calls(&self) -> Vec<(String, u32, Option<String>)> {
+        lk(&self.data).history_calls.clone()
+    }
+    /// 覆盖能力位；不调就是 `feishu_p0()`。
+    pub fn set_capabilities(&self, caps: PlatformCapabilities) {
+        lk(&self.data).caps = Some(caps);
     }
 
     pub fn texts(&self) -> Vec<OutboundText> {
@@ -590,7 +653,7 @@ impl FakePlatform {
 #[async_trait]
 impl PlatformPort for FakePlatform {
     fn capabilities(&self) -> PlatformCapabilities {
-        feishu_p0()
+        lk(&self.data).caps.clone().unwrap_or_else(feishu_p0)
     }
 
     async fn start(&self, on_event: EventHandler) -> Result<(), PlatformError> {
@@ -665,11 +728,14 @@ impl PlatformPort for FakePlatform {
 
     async fn read_history(
         &self,
-        _chat_id: &str,
-        _limit: u32,
-        _thread_id: Option<&str>,
+        chat_id: &str,
+        limit: u32,
+        thread_id: Option<&str>,
     ) -> Result<Vec<HistoryMessage>, PlatformError> {
-        Ok(Vec::new())
+        let mut data = lk(&self.data);
+        data.history_calls
+            .push((chat_id.to_string(), limit, thread_id.map(str::to_string)));
+        Ok(data.history.clone())
     }
 
     async fn read_document(&self, url_or_token: &str) -> Result<DocumentContent, PlatformError> {
@@ -988,6 +1054,12 @@ pub enum WorkerAction {
     /// 一直等到 `is_cancelled()` 变真，再把状态落成 cancelled。
     /// 用来把任务**按在 worker 手上**，好去验 `cancel_task` 的「在跑」分支。
     WaitForCancel,
+    /// 先照 Deliver 交付（库里落 `delivered`、回帖），再一直占着 worker，等 `is_cancelled()` 变真才返回。
+    /// CC2 ②：任务已不在活跃口径里、却仍在 worker 手上 —— 这时同话题的追问会在**同一个会话**
+    /// 里新建任务，用来验「同会话串行」。
+    DeliverThenHold(String),
+    /// 卡死：永远不返回、也不看取消标志（CC2 ④ 的卡死替换靠丢掉这个 future 收场）。
+    Hang,
 }
 
 /// 按脚本出牌的 TaskWorker（真 AgentWorker 是 R5 的 crate）。
@@ -1116,6 +1188,14 @@ impl TaskWorker for ScriptedWorker {
                     self.deliver(task, &session, reply).await
                 }
             }
+            Some(WorkerAction::DeliverThenHold(reply)) => {
+                let task = self.deliver(task, &session, reply).await;
+                while !(hooks.is_cancelled)() {
+                    tokio::task::yield_now().await;
+                }
+                task
+            }
+            Some(WorkerAction::Hang) => std::future::pending().await,
             Some(WorkerAction::WaitForCancel) => {
                 loop {
                     let cancelled = (hooks.is_cancelled)();
@@ -1209,6 +1289,7 @@ impl Harness {
             sleep: never_sleep(),
             clock: None,
             model_name: "scripted".into(),
+            max_parallel: None,
         }
     }
 
@@ -1229,6 +1310,7 @@ pub struct PlaneBuilder {
     sleep: SleepFn,
     clock: Option<WallClock>,
     model_name: String,
+    max_parallel: Option<usize>,
 }
 
 impl PlaneBuilder {
@@ -1264,6 +1346,11 @@ impl PlaneBuilder {
         self.model_name = name.into();
         self
     }
+    /// 调 `with_max_parallel(n)`（CC2 ②）。不调就是默认（1）。
+    pub fn max_parallel(mut self, n: usize) -> Self {
+        self.max_parallel = Some(n);
+        self
+    }
 
     pub fn build(self) -> Arc<InProcessControlPlane> {
         let mut plane = InProcessControlPlane::new(ControlDeps {
@@ -1279,6 +1366,9 @@ impl PlaneBuilder {
         .with_sleep(self.sleep);
         if let Some(clock) = self.clock {
             plane = plane.with_clock(clock);
+        }
+        if let Some(n) = self.max_parallel {
+            plane = plane.with_max_parallel(n);
         }
         Arc::new(plane)
     }
