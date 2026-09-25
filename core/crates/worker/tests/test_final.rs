@@ -2,7 +2,10 @@
 //! 移植自 `tests/worker/test_final.py`（9 条）。
 mod common;
 
-use aite_contracts::{EvidenceKind, EvidenceWriter, Task, TaskStatus};
+use aite_contracts::{
+    EvidenceKind, EvidenceWriter, Role, SessionStore, Task, TaskStatus, TaskWorker, Turn, TurnRole,
+};
+use aite_worker::texts;
 use common::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -468,4 +471,125 @@ async fn falsy_artifact_mime_falls_back_to_guess() {
     let (_, h) =
         run_one_artifact(json!({"path": "/work/out.png", "mime": "application/x-custom"})).await;
     assert_eq!(h.platform.files()[0].mime, "application/x-custom");
+}
+
+// ---- CC3 ③ 助手回复入 transcript ------------------------------------------
+
+/// 交付之后多一条 Assistant 轮：正文 = 发出去的文字（含「产物 X 未找到」行）+ 一行已发附件标题。
+#[tokio::test]
+async fn assistant_turn_persisted_after_delivery() {
+    let mut h = Harness::new();
+    h.sandbox.put("/work/out.png", PNG);
+    h.seed("帮我出个图", Vec::new()).await;
+    let model = std::sync::Arc::new(
+        ScriptedModel::new(vec![
+            tool_turn(&[("run_python", json!({"code": "..."}))]),
+            final_turn_with(
+                "图在这里。",
+                json!([
+                    {"path": "/work/out.png", "title": "月度趋势"},
+                    {"path": "/work/missing.csv", "title": "明细"},
+                ]),
+            ),
+        ])
+        .with_clock(h.clock.clone(), 0.6),
+    );
+    let task = h.run(model).await;
+    assert_eq!(task.status, TaskStatus::Delivered);
+
+    let sent = h.platform.last_text();
+    assert_eq!(sent, "图在这里。\n产物 明细 未找到");
+    let turns = h.store.turns(&h.session.id);
+    assert_eq!(turns.len(), 2, "用户那一轮 + 助手这一轮");
+    let assistant = &turns[1];
+    assert_eq!(assistant.role, TurnRole::Assistant);
+    assert_eq!(assistant.seq, 1);
+    assert_eq!(assistant.platform_user_id, None);
+    assert!(assistant.attachments.is_empty());
+    assert_eq!(
+        assistant.content,
+        "图在这里。\n产物 明细 未找到\n[已发送附件] 月度趋势"
+    );
+    assert_eq!(
+        texts::assistant_turn_content("好", &[]),
+        "好",
+        "没有已发附件时逐字等于发出去的正文"
+    );
+}
+
+/// 写助手轮撞 `DuplicateTurn`（控制面抢先写了同一个 seq）→ 重取 seq 再写，交付照常。
+#[tokio::test]
+async fn assistant_turn_retries_duplicate_seq() {
+    let mut h = Harness::new();
+    h.seed("帮我出个图", Vec::new()).await;
+    h.store.duplicate_next_append_turn(1);
+    let task = h
+        .run(std::sync::Arc::new(ScriptedModel::new(vec![final_turn(
+            "北京今天晴。",
+        )])))
+        .await;
+    assert_eq!(task.status, TaskStatus::Delivered);
+    let turns: Vec<(u64, TurnRole, String)> = h
+        .store
+        .turns(&h.session.id)
+        .into_iter()
+        .map(|t| (t.seq, t.role, t.content))
+        .collect();
+    assert_eq!(
+        turns,
+        vec![
+            (0, TurnRole::User, "帮我出个图".to_string()),
+            (1, TurnRole::User, "（别的写者抢先写的 seq=1）".to_string()),
+            (2, TurnRole::Assistant, "北京今天晴。".to_string()),
+        ]
+    );
+    assert_eq!(
+        h.platform.texts().len(),
+        1,
+        "回复只发一次，不因为撞号多发失败通知"
+    );
+}
+
+/// 同会话第二个任务：首次 `chat` 里有一条 `Role::Assistant` = 上一轮的回复。
+#[tokio::test]
+async fn followup_context_contains_previous_answer() {
+    let mut h = Harness::new();
+    h.seed("北京今天天气怎样？", Vec::new()).await;
+    h.run(std::sync::Arc::new(ScriptedModel::new(vec![final_turn(
+        "北京今天晴，最高 28℃。",
+    )])))
+    .await;
+
+    // 控制面那一侧：同话题的追问落一条 User 轮（seq 从 store 取，别撞上助手轮）、建第二个任务
+    let seq = h.store.next_turn_seq(&h.session.id).await.expect("seq");
+    h.store.push_turn(Turn {
+        session_id: h.session.id.clone(),
+        seq,
+        role: TurnRole::User,
+        platform_user_id: Some("ou_user".into()),
+        content: "那明天呢？".into(),
+        attachments: Vec::new(),
+        created_at: chrono::Utc::now(),
+    });
+    let task2 = Task {
+        id: "t2".into(),
+        task_no: "#A2".into(),
+        title: String::new(),
+        status: TaskStatus::Created,
+        ..h.task.clone()
+    };
+    let model2 = std::sync::Arc::new(ScriptedModel::new(vec![final_turn("明天多云。")]));
+    let out = h
+        .worker(model2.clone())
+        .run(task2, h.session.clone(), Some("张三".into()), h.hooks())
+        .await;
+    assert_eq!(out.status, TaskStatus::Delivered);
+
+    let first = model2.call(0);
+    assert!(
+        first
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.content == "北京今天晴，最高 28℃。"),
+        "第二个任务看得到上一轮自己说了什么：{first:?}"
+    );
 }

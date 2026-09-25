@@ -2,7 +2,8 @@
 use std::path::Path;
 
 use aite_contracts::{
-    CardStatus, EvidenceKind, OutboundFile, OutboundText, SandboxSpec, Task, TaskStatus,
+    CardStatus, EvidenceKind, OutboundFile, OutboundText, SandboxSpec, StoreError, Task,
+    TaskStatus, Turn, TurnRole,
 };
 use chrono::Utc;
 use serde_json::{Map, Value, json};
@@ -12,7 +13,47 @@ use crate::local_tools::{is_truthy, plain_string};
 use crate::r#loop::{AgentWorker, RunContext, json_object, sha256_hex};
 use crate::{RunError, mime, texts};
 
+/// 写助手轮时撞 `DuplicateTurn` 最多写几次（含第一次）。
+pub(crate) const ASSISTANT_TURN_ATTEMPTS: u32 = 3;
+
 impl AgentWorker {
+    /// 把发出去的答复记成一条 `TurnRole::Assistant`（CC3 ③）。
+    ///
+    /// seq 取 `store.next_turn_seq`：这一笔在控制面 `turn_seq_lock` **之外**写，同一刻进来的追问可能
+    /// 抢先占了这个号 —— 撞 `DuplicateTurn` 就重取再写，至多 [`ASSISTANT_TURN_ATTEMPTS`] 次
+    /// （控制面那一侧的重试是 CC2 ⑩）。其它存储错误只记日志、交付照常：回复已经发出去了，
+    /// 这时判失败会再发一条失败通知，破 B8 的条数。`fail()` / `cancel()` 不写助手轮。
+    pub(crate) async fn append_assistant_turn(&self, ctx: &RunContext, content: &str) {
+        for attempt in 1..=ASSISTANT_TURN_ATTEMPTS {
+            let seq = match self.store.next_turn_seq(&ctx.session.id).await {
+                Ok(seq) => seq,
+                Err(err) => {
+                    tracing::error!(task = %ctx.task.id, %err, "worker.assistant_turn_failed");
+                    return;
+                }
+            };
+            let turn = Turn {
+                session_id: ctx.session.id.clone(),
+                seq,
+                role: TurnRole::Assistant,
+                platform_user_id: None,
+                content: content.to_string(),
+                attachments: Vec::new(),
+                created_at: Utc::now(),
+            };
+            match self.store.append_turn(&turn).await {
+                Ok(()) => return,
+                Err(StoreError::DuplicateTurn { .. }) if attempt < ASSISTANT_TURN_ATTEMPTS => {
+                    tracing::warn!(task = %ctx.task.id, seq, attempt, "worker.assistant_turn_retry");
+                }
+                Err(err) => {
+                    tracing::error!(task = %ctx.task.id, %err, "worker.assistant_turn_failed");
+                    return;
+                }
+            }
+        }
+    }
+
     // ---- 收尾 ----------------------------------------------------------
 
     /// W5：产物逐个 get_file → send_file → evidence artifact；然后 send_text；delivered；finalize。
@@ -33,6 +74,8 @@ impl AgentWorker {
 
         let thread_root = ctx.thread_root();
         let mut missing: Vec<String> = Vec::new();
+        // 已发出去的产物标题（CC3 ③：助手轮里记一行）
+        let mut sent: Vec<String> = Vec::new();
         for art in artifacts {
             let path = plain_string(art.get("path"));
             // Python 是 `str(art.get("title") or art.get("path", ""))`（loop.py:464）：
@@ -86,6 +129,7 @@ impl AgentWorker {
                 }),
             )
             .await?;
+            sent.push(title);
         }
 
         let mut text = reply.trim().to_string();
@@ -97,11 +141,14 @@ impl AgentWorker {
         self.platform
             .send_text(&OutboundText {
                 chat_id: ctx.session.chat_id.clone(),
-                text,
+                text: text.clone(),
                 reply_to: Some(thread_root),
                 in_thread: true,
             })
             .await?;
+        // CC3 ③：回复已经发出去了 → 记进 transcript，同话题的追问才看得到自己上一轮说了什么
+        self.append_assistant_turn(ctx, &texts::assistant_turn_content(&text, &sent))
+            .await;
 
         ctx.task.status = TaskStatus::Delivered;
         ctx.task.result_summary = clip(reply, 200);

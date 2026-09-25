@@ -663,6 +663,8 @@ struct StoreState {
 #[derive(Default)]
 pub struct FakeSessionStore {
     state: Mutex<StoreState>,
+    /// 接下来几次 `append_turn` 先替「别的写者」占掉该 seq、再报 `DuplicateTurn`（CC3 ③）
+    duplicate: Mutex<usize>,
 }
 
 impl FakeSessionStore {
@@ -694,6 +696,32 @@ impl FakeSessionStore {
             .entry(t.session_id.clone())
             .or_default()
             .push(t);
+    }
+
+    /// 这个会话的全部 turn（含角色 / seq），按写入顺序。
+    pub fn turns(&self, session_id: &str) -> Vec<Turn> {
+        self.state
+            .lock()
+            .expect("store")
+            .turns
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 只取 User turn 的正文（CC3 ③ 起交付会多一条助手轮，只关心用户说了什么的断言用这个）。
+    pub fn user_turn_texts(&self, session_id: &str) -> Vec<String> {
+        self.turns(session_id)
+            .into_iter()
+            .filter(|t| t.role == TurnRole::User)
+            .map(|t| t.content)
+            .collect()
+    }
+
+    /// 模拟控制面抢先写了一轮：接下来 `times` 次 `append_turn` 先用一条 User 轮占掉要写的 seq，
+    /// 再报 `DuplicateTurn`。
+    pub fn duplicate_next_append_turn(&self, times: usize) {
+        *self.duplicate.lock().expect("dup") = times;
     }
 
     pub fn turn_texts(&self, session_id: &str) -> Vec<String> {
@@ -772,6 +800,29 @@ impl SessionStore for FakeSessionStore {
     }
 
     async fn append_turn(&self, t: &Turn) -> Result<(), StoreError> {
+        {
+            let mut dup = self.duplicate.lock().expect("dup");
+            if *dup > 0 {
+                *dup -= 1;
+                let mut other = t.clone();
+                other.role = TurnRole::User;
+                other.platform_user_id = Some("ou_other".into());
+                other.content = format!("（别的写者抢先写的 seq={}）", t.seq);
+                drop(dup);
+                self.push_turn(other);
+            }
+        }
+        // 与真 store 同口径：(session_id, seq) 唯一
+        let taken = self
+            .turns(&t.session_id)
+            .iter()
+            .any(|existing| existing.seq == t.seq);
+        if taken {
+            return Err(StoreError::DuplicateTurn {
+                session_id: t.session_id.clone(),
+                seq: t.seq,
+            });
+        }
         self.push_turn(t.clone());
         Ok(())
     }

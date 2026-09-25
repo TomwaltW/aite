@@ -91,6 +91,15 @@ pub fn artifact_missing(title_or_path: &str) -> String {
     format!("产物 {title_or_path} 未找到")
 }
 
+/// 助手轮的正文（CC3 ③）：发出去的那条文字，原样；有已发附件时另起一行列出标题。
+/// 没有已发附件时逐字等于 `send_text` 的 `text`。DD4 依赖这个格式。
+pub fn assistant_turn_content(sent_text: &str, sent_attachments: &[String]) -> String {
+    if sent_attachments.is_empty() {
+        return sent_text.to_string();
+    }
+    format!("{sent_text}\n[已发送附件] {}", sent_attachments.join("、"))
+}
+
 pub fn run_error(task_no: &str, err: &str) -> String {
     format!("任务 {task_no} 执行出错：{err}")
 }

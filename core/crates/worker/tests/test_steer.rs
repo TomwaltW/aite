@@ -70,7 +70,11 @@ async fn steer_message_reaches_the_next_step() {
     );
 
     assert!(h.pending_steer().is_empty(), "已被消费");
-    assert_eq!(h.store.turn_texts(&h.session.id), ["按月画个图", STEER]);
+    // CC3 ③ 起交付会多一条助手轮；这里钉的是「用户说过的话」，只看 User turn
+    assert_eq!(
+        h.store.user_turn_texts(&h.session.id),
+        ["按月画个图", STEER]
+    );
 }
 
 #[tokio::test]
@@ -108,7 +112,8 @@ async fn several_steer_messages_keep_their_order_as_separate_turns() {
 
     let mut want = vec!["按月画个图".to_string()];
     want.extend(texts);
-    assert_eq!(h.store.turn_texts(&h.session.id), want);
+    // CC3 ③：同上，只看 User turn
+    assert_eq!(h.store.user_turn_texts(&h.session.id), want);
 }
 
 #[tokio::test]
