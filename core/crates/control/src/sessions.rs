@@ -1,9 +1,11 @@
 //! 会话与任务的建立、话题查找、transcript 追加、回帖。CC2 从 `plane.rs` 原样搬来。
 use serde_json::{Map, Value};
 
+use chrono::{DateTime, Utc};
+
 use aite_contracts::{
-    Anchor, EvidenceKind, IngressError, NormalizedEvent, OutboundText, ReactionKind, Session,
-    SessionKind, SessionStatus, Task, TaskStatus, Turn, TurnRole,
+    Anchor, Attachment, EvidenceKind, IngressError, NormalizedEvent, OutboundText, ReactionKind,
+    Session, SessionKind, SessionStatus, Task, TaskStatus, Turn, TurnRole,
 };
 use rand::Rng;
 
@@ -11,6 +13,10 @@ use crate::card::{MAX_TITLE_CHARS, clip};
 use crate::evidence_log::{ROUTE_NEW_TASK, event_payload};
 use crate::lock;
 use crate::plane::InProcessControlPlane;
+
+/// `!restart` 回灌话题历史时最多读这么多条（CC2 ④）。与 worker 读群历史的量级相当，
+/// 既够把一段对话接上，又不至于一次把 transcript 塞爆。
+pub(crate) const RESTART_HISTORY_LIMIT: u32 = 50;
 
 /// 32 hex（Python 的 `secrets.token_hex(16)`）。
 pub(crate) fn token_hex_16() -> String {
@@ -37,6 +43,7 @@ impl InProcessControlPlane {
         thread_id: &str,
         text: &str,
         react: bool,
+        seed_from_thread: Option<&str>,
     ) -> Result<Session, IngressError> {
         let now = self.now();
         let mut config_snapshot = Map::new();
@@ -84,11 +91,68 @@ impl InProcessControlPlane {
                 tracing::warn!(target: "aite.control", error = %e, "control.ack_failed");
             }
         }
+        // `!restart`（CC2 ④）：历史在前、`rest` 在后
+        if let Some(thread_id) = seed_from_thread {
+            self.seed_thread_history(&session, ev, thread_id).await?;
+        }
         if !text.is_empty() {
             self.append_turn(&session, ev, TurnRole::User, text).await?;
             self.start_task(&session, ev, Some(text)).await?;
         }
         Ok(session)
+    }
+
+    /// `!restart` 的新会话从原话题的历史接着往下聊（CC2 ④）。
+    ///
+    /// 平台不支持读历史（`supports_history` 为假）就不读；读失败只 warn，重开照走 ——
+    /// 回灌是锦上添花，不能让一次读失败把 `!restart` 本身弄没。按时间正序写：真人的话记成
+    /// `User`（带 `platform_user_id`），其余（机器人 / 应用 / 系统，含 Aite 自己之前的答复）
+    /// 记成 `SystemNote` 并标出发言人。`!restart` 这一条本身不写（它的 `rest` 随后单独写）。
+    async fn seed_thread_history(
+        &self,
+        session: &Session,
+        ev: &NormalizedEvent,
+        thread_id: &str,
+    ) -> Result<(), IngressError> {
+        if !self.platform.capabilities().supports_history {
+            return Ok(());
+        }
+        let history = match self
+            .platform
+            .read_history(&ev.chat_id, RESTART_HISTORY_LIMIT, Some(thread_id))
+            .await
+        {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!(target: "aite.control", thread = %thread_id, error = %e, "control.restart_history_failed");
+                return Ok(());
+            }
+        };
+        for msg in history {
+            if msg.message_id == ev.anchor.message_id || msg.text.trim().is_empty() {
+                continue;
+            }
+            let (role, content) = if msg.sender_kind == "human" {
+                (TurnRole::User, msg.text.clone())
+            } else {
+                let who = msg
+                    .sender_name
+                    .clone()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| msg.sender_id.clone());
+                (TurnRole::SystemNote, format!("[{who}] {}", msg.text))
+            };
+            self.append_turn_raw(
+                session,
+                role,
+                Some(msg.sender_id.clone()),
+                &content,
+                Vec::new(),
+                msg.created_at,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// 六步顺序严格：造 Task → `create_task` → `task_created` 证据 → `event_received`
@@ -190,6 +254,27 @@ impl InProcessControlPlane {
         role: TurnRole,
         content: &str,
     ) -> Result<(), IngressError> {
+        self.append_turn_raw(
+            session,
+            role,
+            Some(ev.sender_id.clone()),
+            content,
+            ev.attachments.clone(),
+            ev.occurred_at,
+        )
+        .await
+    }
+
+    /// `append_turn` 的本体：字段不从事件取（`!restart` 回灌历史时每一轮的发言人与时间各不相同）。
+    pub(crate) async fn append_turn_raw(
+        &self,
+        session: &Session,
+        role: TurnRole,
+        platform_user_id: Option<String>,
+        content: &str,
+        attachments: Vec<Attachment>,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), IngressError> {
         let _seq_guard = self.turn_seq_lock.lock().await;
         let recent = self.store.list_turns(&session.id, 1).await?;
         let seq = recent.last().map(|t| t.seq + 1).unwrap_or(0);
@@ -198,10 +283,10 @@ impl InProcessControlPlane {
                 session_id: session.id.clone(),
                 seq,
                 role,
-                platform_user_id: Some(ev.sender_id.clone()),
+                platform_user_id,
                 content: content.to_string(),
-                attachments: ev.attachments.clone(),
-                created_at: ev.occurred_at,
+                attachments,
+                created_at,
             })
             .await?;
         Ok(())

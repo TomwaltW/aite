@@ -24,7 +24,7 @@ impl InProcessControlPlane {
     ) -> Result<(), IngressError> {
         // 强制新建，即使已经在别的话题里：本条消息成为新话题的 root
         let thread_id = ev.anchor.message_id.clone();
-        self.new_session(ev, &thread_id, rest, !rest.is_empty())
+        self.new_session(ev, &thread_id, rest, !rest.is_empty(), None)
             .await?;
         if rest.is_empty() {
             return self.reply(ev, RESTART_EMPTY_TEXT).await;

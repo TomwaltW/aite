@@ -94,7 +94,9 @@ impl InProcessControlPlane {
             .and_then(|s| s.anchor.thread_id.clone())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| ev.anchor.message_id.clone());
-        self.new_session(ev, &thread_id, rest, !rest.is_empty())
+        // 只有真的重开了一个话题（原来有会话）才有历史可回灌
+        let seed = session.as_ref().map(|_| thread_id.as_str());
+        self.new_session(ev, &thread_id, rest, !rest.is_empty(), seed)
             .await?;
 
         let mut note = if stopped > 0 {

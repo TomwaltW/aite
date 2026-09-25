@@ -190,7 +190,7 @@ impl InProcessControlPlane {
         if ev.mentioned {
             let thread_id = ev.anchor.message_id.clone();
             let text = ev.text.clone();
-            self.new_session(ev, &thread_id, &text, true).await?;
+            self.new_session(ev, &thread_id, &text, true, None).await?;
             return Ok(());
         }
 

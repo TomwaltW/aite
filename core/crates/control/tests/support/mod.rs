@@ -534,6 +534,12 @@ struct PlatformData {
     started: bool,
     n: u64,
     send_text_failures: usize,
+    /// `read_history` 返回的内容（CC2 ④）；默认空，现有用例不受影响
+    history: Vec<HistoryMessage>,
+    /// `read_history` 的调用记录：`(chat_id, limit, thread_id)`
+    history_calls: Vec<(String, u32, Option<String>)>,
+    /// 覆盖 `capabilities()`（CC2 ⑥）；默认 `None` = `feishu_p0()`
+    caps: Option<PlatformCapabilities>,
 }
 
 /// 记录所有出站调用。断言全部对着这些 list 做。
@@ -553,6 +559,18 @@ impl FakePlatform {
     /// 让接下来 `times` 次 `send_text` 报错（平台抽风）。
     pub fn fail_send_text(&self, times: usize) {
         lk(&self.data).send_text_failures = times;
+    }
+
+    /// 让 `read_history` 返回这些（按给的顺序原样返回）。
+    pub fn set_history(&self, history: Vec<HistoryMessage>) {
+        lk(&self.data).history = history;
+    }
+    pub fn history_calls(&self) -> Vec<(String, u32, Option<String>)> {
+        lk(&self.data).history_calls.clone()
+    }
+    /// 覆盖能力位；不调就是 `feishu_p0()`。
+    pub fn set_capabilities(&self, caps: PlatformCapabilities) {
+        lk(&self.data).caps = Some(caps);
     }
 
     pub fn texts(&self) -> Vec<OutboundText> {
@@ -590,7 +608,7 @@ impl FakePlatform {
 #[async_trait]
 impl PlatformPort for FakePlatform {
     fn capabilities(&self) -> PlatformCapabilities {
-        feishu_p0()
+        lk(&self.data).caps.clone().unwrap_or_else(feishu_p0)
     }
 
     async fn start(&self, on_event: EventHandler) -> Result<(), PlatformError> {
@@ -665,11 +683,14 @@ impl PlatformPort for FakePlatform {
 
     async fn read_history(
         &self,
-        _chat_id: &str,
-        _limit: u32,
-        _thread_id: Option<&str>,
+        chat_id: &str,
+        limit: u32,
+        thread_id: Option<&str>,
     ) -> Result<Vec<HistoryMessage>, PlatformError> {
-        Ok(Vec::new())
+        let mut data = lk(&self.data);
+        data.history_calls
+            .push((chat_id.to_string(), limit, thread_id.map(str::to_string)));
+        Ok(data.history.clone())
     }
 
     async fn read_document(&self, url_or_token: &str) -> Result<DocumentContent, PlatformError> {
