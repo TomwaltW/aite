@@ -12,6 +12,9 @@ pub const NUDGE_TEXT: &str = "请调用 final 交付结果，或调用一个工�
 pub const FINAL_REPLY_REQUIRED: &str = "final.reply 必填且不能为空";
 pub const FINAL_ARTIFACTS_MUST_BE_ARRAY: &str = "final.artifacts 必须是数组";
 
+/// 同一批里 final 参数不合法时，排在它后面、没执行的那些调用的回复（CC3 ⑥）。
+pub const SKIPPED_AFTER_INVALID_FINAL: &str = "同一批的 final 参数不合法，本调用未执行";
+
 /// checklist_* 的参数错误与成功回执。
 pub const CHECKLIST_ITEMS_INVALID: &str = "items 必须是 1–8 个非空字符串";
 pub const CHECKLIST_REASON_REQUIRED: &str = "reason 必填";

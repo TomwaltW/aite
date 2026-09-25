@@ -593,3 +593,47 @@ async fn followup_context_contains_previous_answer() {
         "第二个任务看得到上一轮自己说了什么：{first:?}"
     );
 }
+
+// ---- CC3 ⑥ 每个 tool_call 都有回复 -----------------------------------------
+
+/// 一步里 `[非法 final, list_files, checklist_note]`：下一次 `chat` 里三个 call_id 各有一条 tool 消息，
+/// 后两个没执行（gateway 零调用、证据里没有它们）。
+#[tokio::test]
+async fn every_tool_call_gets_a_reply() {
+    let run = run_script(
+        vec![
+            tool_turn(&[
+                ("final", json!({})),
+                ("list_files", json!({})),
+                ("checklist_note", json!({"text": "备注"})),
+            ]),
+            final_turn("好了。"),
+        ],
+        0.0,
+    )
+    .await;
+    assert_eq!(run.task.status, TaskStatus::Delivered);
+
+    let replies = tool_messages(&run.model.call(1));
+    let ids: Vec<Option<String>> = replies.iter().map(|m| m.tool_call_id.clone()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            Some("call_0".to_string()),
+            Some("call_1".to_string()),
+            Some("call_2".to_string())
+        ]
+    );
+    assert_eq!(replies[0].content, texts::FINAL_REPLY_REQUIRED);
+    assert_eq!(replies[1].content, texts::SKIPPED_AFTER_INVALID_FINAL);
+    assert_eq!(replies[2].content, texts::SKIPPED_AFTER_INVALID_FINAL);
+    assert!(run.h.gateway.call_names().is_empty(), "list_files 没执行");
+    let called: Vec<String> = run
+        .h
+        .evidence
+        .payloads(&run.task.id, EvidenceKind::ToolCall)
+        .iter()
+        .filter_map(|p| p.get("name").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    assert_eq!(called, vec!["final", "final"], "没执行的不写证据");
+}

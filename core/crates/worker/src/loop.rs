@@ -249,7 +249,7 @@ impl AgentWorker {
                 continue;
             }
 
-            for call in &calls {
+            for (index, call) in calls.iter().enumerate() {
                 // 只认**连续**相同：中间插进别的调用说明模型还在换招，不算卡住。
                 // 一步出多张牌时按 tool_calls 的顺序逐张算 —— 同一步里出两张一样的牌算 2 次，
                 // 那比隔了一步再重复更卡。两条都跟观测侧的 repeat_loops 一个口径。
@@ -294,6 +294,15 @@ impl AgentWorker {
                                 .await?;
                             messages.push(tool_message(call, bad.content));
                             ctx.invalid_args += 1;
+                            // CC3 ⑥：同一批后面没执行的调用也要各有一条 tool 消息，否则
+                            // OpenAI 兼容接口下一轮会 400（assistant 的 tool_calls 没配齐回复）。
+                            // 不执行、不写证据、不计 invalid_args。
+                            for skipped in &calls[index + 1..] {
+                                messages.push(tool_message(
+                                    skipped,
+                                    texts::SKIPPED_AFTER_INVALID_FINAL,
+                                ));
+                            }
                             break;
                         }
                         Ok((reply, artifacts)) => {
