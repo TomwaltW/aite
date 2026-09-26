@@ -1,11 +1,14 @@
 //! `P0ToolGateway`（对应旧 `aite/gateway/tool_gateway.py`）。
 //!
-//! `call` 的顺序照 §3.2 的注释逐字执行：
+//! `call` 的顺序照 §3.2 的注释执行，CC4 在「查工具」之后插了一步调用前策略：
 //!
 //! ```text
-//! 校验 session_token → 查工具存在 → 按 ToolSpec.parameters 校验 arguments
-//! → 执行（带超时）→ 截断 content → 返回
+//! 校验 session_token → 查工具存在（含 enabled(ctx) 谓词）→ 策略 before_call
+//! → 按 ToolSpec.parameters 校验 arguments → 执行（带超时）→ 截断 content → 返回
 //! ```
+//!
+//! 工具有两个来源：P0 五个内建（`tools::Builtins`，目录里永远排在前面）与经
+//! `with_registry` 登记的外部 [`crate::registry::GatewayTool`]（按登记顺序排在后面）。
 //!
 //! 以及那条硬要求：**永远不往外抛**。`call` 的返回类型就是 `ToolResult`，工具实现 panic
 //! 也被接住翻成 `upstream`（不让一个写崩的工具带走整个 worker）。唯一"没有结果"的情形是
@@ -33,6 +36,8 @@ use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 
+use crate::policy::{AllowAll, DEFAULT_DENY_MESSAGE, PolicyDecision, ToolPolicy};
+use crate::registry::{GatewayTool, ToolRegistry};
 use crate::sandbox_key::SandboxKey;
 use crate::schema::validate_arguments;
 use crate::tools::{Builtins, ToolEnv, ToolFailure, ToolImpl, ToolOutcome};
@@ -133,6 +138,10 @@ pub struct P0ToolGateway {
     inner: Arc<Inner>,
     /// P0 五个内建工具（规格 + 实现）。CC4 ① 起集中在 `tools::Builtins`。
     builtins: Builtins,
+    /// 外部登记的工具（CC4 ②）
+    registry: ToolRegistry,
+    /// 调用前策略（CC4 ③），默认一律放行
+    policy: Arc<dyn ToolPolicy>,
     tokens: Mutex<HashMap<String, String>>,
     token_resolver: Option<TokenResolver>,
     default_timeout_sec: f64,
@@ -165,6 +174,8 @@ impl P0ToolGateway {
                 acquire_locks: Mutex::new(HashMap::new()),
             }),
             builtins: Builtins::p0(),
+            registry: ToolRegistry::new(),
+            policy: Arc::new(AllowAll),
             tokens: Mutex::new(HashMap::new()),
             token_resolver: None,
             default_timeout_sec: DEFAULT_TOOL_TIMEOUT_SEC as f64,
@@ -193,6 +204,18 @@ impl P0ToolGateway {
     /// 换掉某个工具的实现（测试用；键必须是 `gateway_tools()` 里的名字）。
     pub fn with_tool(mut self, name: impl Into<String>, implementation: ToolImpl) -> Self {
         self.builtins.impls.insert(name.into(), implementation);
+        self
+    }
+
+    /// 挂上外部登记的工具（CC4 ②）。重名在 `ToolRegistry::register` 那一刻已经拦下了，这里不再判。
+    pub fn with_registry(mut self, registry: ToolRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// 换掉调用前策略（CC4 ③）。
+    pub fn with_policy(mut self, policy: Arc<dyn ToolPolicy>) -> Self {
+        self.policy = policy;
         self
     }
 
@@ -249,6 +272,25 @@ impl P0ToolGateway {
         timeout_sec + self.run_python_grace_sec
     }
 
+    /// 这次上下文里看得见的工具：内建（`gateway_tools()` 原顺序）在前，登记的（按登记顺序）在后，
+    /// 两边都按各自的 `enabled` 谓词过滤。`catalog` 与 `dispatch` 共用这一份，保证「目录里没有」
+    /// 与「调用回 not_found」是同一件事。
+    fn visible<'a>(&'a self, ctx: &ToolContext) -> Vec<Visible<'a>> {
+        let builtins = self
+            .builtins
+            .specs
+            .iter()
+            .filter(|s| (self.builtins.enabled)(&s.name, ctx))
+            .map(|s| Visible::Builtin(s.clone()));
+        let registered = self
+            .registry
+            .tools()
+            .iter()
+            .filter(|t| t.enabled(ctx))
+            .map(|t| Visible::Registered(t.spec(), t));
+        builtins.chain(registered).collect()
+    }
+
     async fn dispatch(
         &self,
         ctx: &ToolContext,
@@ -256,27 +298,39 @@ impl P0ToolGateway {
     ) -> Result<ToolOutcome, ToolFailure> {
         self.check_token(ctx)?;
 
-        let Some(spec) = self.builtins.specs.iter().find(|t| t.name == req.name) else {
-            let mut names: Vec<&str> = self
-                .builtins
-                .specs
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect();
+        let visible = self.visible(ctx);
+        let Some(found) = visible.iter().find(|v| v.spec().name == req.name) else {
+            let mut names: Vec<&str> = visible.iter().map(|v| v.spec().name.as_str()).collect();
             names.sort_unstable();
             return Err(ToolFailure::new(
                 ToolErrorCode::NotFound,
                 format!("没有名为 {:?} 的工具；可用的是 {:?}", req.name, names),
             ));
         };
-        let Some(implementation) = self.builtins.impls.get(&req.name) else {
-            return Err(ToolFailure::new(
-                ToolErrorCode::NotFound,
-                format!("工具 {:?} 在本次运行里没有实现", req.name),
-            ));
+        let run: Runner = match found {
+            Visible::Builtin(_) => {
+                let Some(implementation) = self.builtins.impls.get(&req.name) else {
+                    return Err(ToolFailure::new(
+                        ToolErrorCode::NotFound,
+                        format!("工具 {:?} 在本次运行里没有实现", req.name),
+                    ));
+                };
+                Runner::Builtin(implementation.clone())
+            }
+            Visible::Registered(_, tool) => Runner::Registered(Arc::clone(tool)),
         };
 
-        let args = validate_arguments(&spec.parameters, &req.arguments)
+        // CC4 ③：查到工具之后、校验参数之前问策略
+        if let PolicyDecision::Deny(reason) = self.policy.before_call(ctx, req).await {
+            let message = if reason.trim().is_empty() {
+                DEFAULT_DENY_MESSAGE.to_string()
+            } else {
+                reason
+            };
+            return Err(ToolFailure::new(ToolErrorCode::Denied, message));
+        }
+
+        let args = validate_arguments(&found.spec().parameters, &req.arguments)
             .map_err(|e| ToolFailure::new(ToolErrorCode::InvalidArgs, e.to_string()))?;
 
         let budget = self.budget(&req.name, &args);
@@ -286,7 +340,10 @@ impl P0ToolGateway {
             &ctx.task_id,
         );
         let running = CatchPanic {
-            inner: implementation(env, ctx.clone(), args),
+            inner: match run {
+                Runner::Builtin(implementation) => implementation(env, ctx.clone(), args),
+                Runner::Registered(tool) => tool.call(env, ctx.clone(), args),
+            },
         };
         match tokio::time::timeout(Duration::from_secs_f64(budget), running).await {
             Err(_elapsed) => Err(ToolFailure::timeout(format!(
@@ -337,10 +394,13 @@ impl P0ToolGateway {
 
 #[async_trait]
 impl ToolGateway for P0ToolGateway {
-    fn catalog(&self, _ctx: &ToolContext) -> Vec<ToolSpec> {
-        // P0 不按 ctx 做任何裁剪（scope / access bundle 是 P1）。返回新 Vec 只是
-        // 不想让调用方改到我们手里这份，元素本身就是 gateway_tools() 里那几个。
-        self.builtins.specs.clone()
+    fn catalog(&self, ctx: &ToolContext) -> Vec<ToolSpec> {
+        // CC4 ②：内建五个（gateway_tools() 原顺序）+ 登记且 enabled(ctx) 的（登记顺序）。
+        // 没登记任何东西、内建谓词恒真时逐字等于 gateway_tools()。
+        self.visible(ctx)
+            .into_iter()
+            .map(|v| v.spec().clone())
+            .collect()
     }
 
     async fn call(&self, ctx: &ToolContext, req: &ToolCallRequest) -> ToolResult {
@@ -415,6 +475,26 @@ impl ToolGateway for P0ToolGateway {
             tracing::warn!(task_id = %task_id, sandbox_id = %sandbox_id, error = %e, "gateway.release_failed");
         }
     }
+}
+
+/// 这次上下文里看得见的一个工具。
+enum Visible<'a> {
+    Builtin(ToolSpec),
+    Registered(ToolSpec, &'a Arc<dyn GatewayTool>),
+}
+
+impl Visible<'_> {
+    fn spec(&self) -> &ToolSpec {
+        match self {
+            Visible::Builtin(spec) | Visible::Registered(spec, _) => spec,
+        }
+    }
+}
+
+/// 查到之后真正要跑的那个。
+enum Runner {
+    Builtin(ToolImpl),
+    Registered(Arc<dyn GatewayTool>),
 }
 
 /// 逐字节 xor 累加，长度不等也走完再判：别让比较耗时泄露匹配了多少位。

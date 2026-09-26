@@ -26,6 +26,12 @@ mod files;
 mod history;
 mod python_exec;
 
+// CC4 ④：未登记的桩（只有模块文档），外部按路径引用；不进 default_tools()、不进目录。
+pub mod access;
+pub mod connections;
+pub mod pages;
+pub mod shell;
+
 /// 沙箱工作目录。与 `SandboxSpec::default_workdir()` 同值，旧实现也是拿模块常量排版。
 pub(crate) const WORKDIR: &str = "/work";
 
@@ -192,13 +198,20 @@ macro_rules! tool_entry {
 pub(crate) struct Builtins {
     pub(crate) specs: Vec<ToolSpec>,
     pub(crate) impls: HashMap<String, ToolImpl>,
+    /// 内建工具也走同一个「这次上下文里露不露」的谓词（CC4 ②；默认恒真）。
+    /// DD6 以后按 access bundle 把 `run_python` 这类也藏掉，经 builder 换它。
+    pub(crate) enabled: BuiltinPredicate,
 }
+
+/// `(工具名, ctx) → 露不露`。
+pub(crate) type BuiltinPredicate = Arc<dyn Fn(&str, &ToolContext) -> bool + Send + Sync>;
 
 impl Builtins {
     pub(crate) fn p0() -> Self {
         Self {
             specs: gateway_tools().to_vec(),
             impls: default_tools(),
+            enabled: Arc::new(|_, _| true),
         }
     }
 }
