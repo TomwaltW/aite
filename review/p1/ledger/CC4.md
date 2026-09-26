@@ -266,12 +266,170 @@ thread 'policy_hook_deny_returns_denied' (3466) panicked at crates/gateway/tests
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.11s
 error: test failed, to rerun pass `-p aite-gateway --test registry`
 ---- 已还原
-<<MUT6>>
+---- 变异：stores.rs：[pub(crate) fn wire(_: &mut FeatureCtx) -> Result<(), String> {] → [pub(crate) fn wire(ctx: &mut FeatureCtx) -> Result<(), String> { ctx.gateway_options.push(Box::new(|gw| gw));]
+---- features_wire_all_is_noop_by_default stdout ----
+thread 'features_wire_all_is_noop_by_default' (4237) panicked at crates/app/tests/build_app_contract.rs:295:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.12s
+error: test failed, to rerun pass `-p aite --test build_app_contract`
+---- 已还原
+---- 变异：mod.rs：[        option(deps);] → [        drop(option); let _ = &deps;]
+---- feature_worker_option_applied_before_build stdout ----
+thread 'feature_worker_option_applied_before_build' (4317) panicked at crates/app/tests/build_app_contract.rs:358:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.16s
+error: test failed, to rerun pass `-p aite --test build_app_contract`
+---- 已还原
+---- 变异：mod.rs：[.fold(base.with_registry(registry), |gw, option| option(gw))] → [.fold(base.with_registry(registry), |gw, _option| gw)]
+---- feature_gateway_option_applied_before_build stdout ----
+thread 'feature_gateway_option_applied_before_build' (4400) panicked at crates/app/tests/build_app_contract.rs:410:5:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.15s
+error: test failed, to rerun pass `-p aite --test build_app_contract`
+---- 已还原
 ```
 
 ## 4. `check.sh` 完整输出（终版）与验收其余几条
 
-<<CHECK>>
+冷编（清过 `core/target` 之后）重跑的完整输出，只滤掉 `Compiling` / `Checking` / `Executable` 进度行：
+
+```
+
+=== A1 cargo build --workspace ===
+$ bash -c cd core && cargo build --workspace
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 22s
+-> exit 0
+
+=== A2 go build ./... ===
+$ bash -c cd edge && go build ./...
+
+-> exit 0
+
+=== A3/C2 契约锁 --check ===
+$ core/target/debug/aite contracts lock --check
+OK 25 files
+-> exit 0
+
+=== A4a cargo clippy -D warnings ===
+$ bash -c cd core && cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 52.65s
+-> exit 0
+
+=== A4b cargo fmt --check ===
+$ bash -c cd core && cargo fmt --check
+
+-> exit 0
+
+=== A4c go vet ===
+$ bash -c cd edge && go vet ./...
+
+-> exit 0
+
+=== A4d gofmt ===
+$ bash -c cd edge && test -z "$(gofmt -l .)"
+
+-> exit 0
+
+=== A5 cargo test --no-run（全部测试可编译） ===
+$ bash -c cd core && cargo test --workspace --no-run
+-> exit 0
+
+=== C1 契约测试 ===
+$ bash -c cd core && cargo test -p aite-contracts 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"contracts passed=\" p \" failed=\" f; exit (f>0)}"
+contracts passed=25 failed=0
+-> exit 0
+
+=== B 全量 cargo test ===
+$ setpriv --bounding-set=-dac_override,-dac_read_search --inh-caps=-dac_override,-dac_read_search -- bash -c cd core && o=$(cargo test --workspace --no-fail-fast 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^(---- .* stdout ----|error(: test failed|: could not compile|\[E[0-9]+\]))" | sort -u | head -n 7; printf "%s\n" "$o" | grep -E "^test result" | awk -v c="$c" "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p+0 \" failed=\" f+0; exit (c != 0 || f > 0 || NR == 0)}"
+cargo passed=946 failed=0
+-> exit 0
+
+=== B 全量 go test（-race） ===
+$ setpriv --bounding-set=-dac_override,-dac_read_search --inh-caps=-dac_override,-dac_read_search -- bash -c cd edge && o=$(go test -race ./... -count=1 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^FAIL[[:space:]]+aite/edge/" | head -n 5; ok=$(printf "%s\n" "$o" | grep -cE "^(ok|\?)[[:space:]]"); fail=$(printf "%s\n" "$o" | grep -cE "^FAIL[[:space:]]+aite/edge/"); echo "go packages ok=${ok} fail=${fail}"; exit "$c"
+go packages ok=9 fail=0
+-> exit 0
+
+=== B8 评测（passed 10/10） ===
+$ bash -c o=$(core/target/debug/aite evals run evals/p0 --platform fake --model scripted 2>&1); c=$?; printf "%s\n" "$o" | tail -n 2; [ "$c" = 0 ] && printf "%s\n" "$o" | tail -n 1 | grep -qx "passed 10/10"
+}
+passed 10/10
+-> exit 0
+
+=== B9 评测 evals/p1 ===
+B9 skip：evals/p1 尚无场景
+
+全部通过
+exit=0
+```
+
+第 7 步 `( cd edge && go test -race ./cmd/... -count=1 )`：
+
+```
+ok  	aite/edge/cmd/aite-edge	5.514s
+```
+
+第 5 步 after（去掉二进制哈希与耗时后与 before `diff`）：只多出 `tests/registry.rs` 那一块（3 条）与 `build_app_contract` 的 8 → 11，其余每个文件条数不变（lib 单测 52、bin 单测 2）。
+
+gateway after（`/tmp/cc4-gw-after.txt`）：
+
+```
+     Running unittests src/lib.rs
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/catalog.rs
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/denied.rs
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/errors.rs
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/reaped_sandbox.rs
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/registry.rs
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/schema.rs
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/tools.rs
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+app after（`/tmp/cc4-app-after.txt`）：
+
+```
+     Running unittests src/lib.rs
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running unittests src/main.rs
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/build_app_contract.rs
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/cli_smoke.rs
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/cold_start_to_delivery.rs
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/counters_exit.rs
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/crash_recovery.rs
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/evidence_created_at_repro.rs
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/evidence_on_disk.rs
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/graceful_shutdown.rs
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/guard.rs
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/preflight_e2e.rs
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/reconnect_replay.rs
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/signals.rs
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/sqlite_cross_process.rs
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running tests/startup_recovery.rs
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+第 8 步：`git diff --name-only origin/main...HEAD` 全部落在 `core/crates/gateway/src/**`、`core/crates/gateway/tests/registry.rs`、`core/crates/app/src/{app,lib,wiring}.rs`、`core/crates/app/src/features/**`、`core/crates/app/tests/build_app_contract.rs`、`review/p1/ledger/CC4.md` 之内。
+
+备注：第一次跑 check.sh 时会话磁盘额度写满（`core/target` 两份增量缓存），日志随之丢失；清掉 `core/target/debug/{incremental,deps,build}` 后冷编重跑，即上面这份。
 
 ## 5. cargo passed 增量：940 → 946（Δ = +6）
 
