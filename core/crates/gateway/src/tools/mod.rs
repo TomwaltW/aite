@@ -12,10 +12,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aite_contracts::ports::BoxFuture;
-use aite_contracts::{ArtifactRef, PlatformPort, SandboxPort, ToolContext, ToolErrorCode};
+use aite_contracts::{
+    ArtifactRef, PlatformPort, SandboxPort, ToolContext, ToolErrorCode, ToolSpec, gateway_tools,
+};
 use serde_json::{Map, Value};
 
 use crate::gateway::Inner;
+use crate::sandbox_key::SandboxKey;
 
 mod attachments;
 mod documents;
@@ -91,19 +94,23 @@ pub type ToolImpl = Arc<
 
 /// 一次 `call` 里工具能碰到的东西。
 ///
-/// 沙箱不直接给 sandbox_id，而是两个动作：Gateway 按 task_id 记着容器，
+/// 沙箱不直接给 sandbox_id，而是两个动作：Gateway 按记账键（[`SandboxKey`]，今天就是 task_id）记着容器，
 /// `acquire_sandbox()` 是「有就复用、没有才建」，`current_sandbox_id()` 是
 /// 「有就给、没有就 None」—— `list_files` 用后者，免得为了列一个空目录白建个容器。
 #[derive(Clone)]
 pub struct ToolEnv {
     inner: Arc<Inner>,
+    /// 记账键（CC4 ①）
+    key: SandboxKey,
+    /// 仍原样交给 `SandboxPort::acquire` 的第一个参数
     task_id: String,
 }
 
 impl ToolEnv {
-    pub(crate) fn new(inner: Arc<Inner>, task_id: impl Into<String>) -> Self {
+    pub(crate) fn new(inner: Arc<Inner>, key: SandboxKey, task_id: impl Into<String>) -> Self {
         Self {
             inner,
+            key,
             task_id: task_id.into(),
         }
     }
@@ -124,16 +131,16 @@ impl ToolEnv {
 
     /// 有就复用、没有才建（per-task 锁，并发两个 tool_call 不会各建一个）。
     pub async fn acquire_sandbox(&self) -> Result<String, ToolFailure> {
-        self.inner.acquire_sandbox(&self.task_id).await
+        self.inner.acquire_sandbox(&self.key, &self.task_id).await
     }
 
     pub fn current_sandbox_id(&self) -> Option<String> {
-        self.inner.current_sandbox_id(&self.task_id)
+        self.inner.current_sandbox_id(&self.key)
     }
 
     /// 把记账里那个已经不存在的容器摘掉（见 `Inner::forget_sandbox`）。
     pub fn forget_sandbox(&self) -> Option<String> {
-        self.inner.forget_sandbox(&self.task_id)
+        self.inner.forget_sandbox(&self.key)
     }
 }
 
@@ -175,6 +182,25 @@ macro_rules! tool_entry {
             ) as ToolImpl,
         )
     };
+}
+
+/// P0 五个内建工具的「规格 + 实现」（CC4 ①）。
+///
+/// 两层语义与 CC4 之前逐字一致：目录（`specs`）永远是 `gateway_tools()` 的五个、原顺序；
+/// 实现表（`impls`）可以被 `with_tool` 换掉单个、被 `with_tools` 整表换掉 —— 换掉之后目录仍列五个，
+/// 调到表里没有的走「在本次运行里没有实现」的 not_found（`tests/errors.rs` 钉着）。
+pub(crate) struct Builtins {
+    pub(crate) specs: Vec<ToolSpec>,
+    pub(crate) impls: HashMap<String, ToolImpl>,
+}
+
+impl Builtins {
+    pub(crate) fn p0() -> Self {
+        Self {
+            specs: gateway_tools().to_vec(),
+            impls: default_tools(),
+        }
+    }
 }
 
 /// 工具名 → 实现。键必须与 §3.1 `gateway_tools()` 里的 name 一一对应

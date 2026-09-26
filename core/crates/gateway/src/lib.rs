@@ -7,9 +7,11 @@
 //!
 //! 工具目录是 §3.1 冻结的 `gateway_tools()` 原样，名字与 schema 不在这里定义。
 mod gateway;
+pub mod sandbox_key;
 pub mod schema;
 pub mod tools;
 
 pub use gateway::{DEFAULT_RUN_PYTHON_GRACE_SEC, P0ToolGateway, TokenResolver};
+pub use sandbox_key::SandboxKey;
 pub use schema::{SchemaViolation, validate_arguments};
 pub use tools::{ToolEnv, ToolFailure, ToolImpl, ToolOutcome};

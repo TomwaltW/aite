@@ -27,15 +27,15 @@ use aite_contracts::ports::BoxFuture;
 use aite_contracts::{
     DEFAULT_TOOL_TIMEOUT_SEC, MAX_TOOL_CONTENT_CHARS, PlatformPort, SandboxPort, SandboxSpec,
     ToolCallRequest, ToolContext, ToolError, ToolErrorCode, ToolGateway, ToolResult, ToolSpec,
-    gateway_tools,
 };
 use async_trait::async_trait;
 use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 
+use crate::sandbox_key::SandboxKey;
 use crate::schema::validate_arguments;
-use crate::tools::{ToolEnv, ToolFailure, ToolImpl, ToolOutcome, default_tools};
+use crate::tools::{Builtins, ToolEnv, ToolFailure, ToolImpl, ToolOutcome};
 
 /// task_id → 期望的 session_token。取不到（store 抖动等）→ `Err(人话)`，Gateway 翻成 upstream。
 pub type TokenResolver = Arc<dyn Fn(&str) -> Result<Option<String>, String> + Send + Sync>;
@@ -52,10 +52,11 @@ pub(crate) struct Inner {
     platform: Option<Arc<dyn PlatformPort>>,
     sandbox: Option<Arc<dyn SandboxPort>>,
     spec: SandboxSpec,
-    /// task_id → sandbox_id（沙箱归 Gateway 记账，worker 取产物前先问 `sandbox_id_of`）
-    sandbox_ids: Mutex<HashMap<String, String>>,
-    /// task_id → 建沙箱的串行锁（并发两个 run_python 不会各建一个）
-    acquire_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 记账键 → sandbox_id（沙箱归 Gateway 记账，worker 取产物前先问 `sandbox_id_of`）。
+    /// 键见 [`SandboxKey`]（CC4 ①；今天只有按任务）。
+    sandbox_ids: Mutex<HashMap<SandboxKey, String>>,
+    /// 记账键 → 建沙箱的串行锁（并发两个 run_python 不会各建一个）
+    acquire_locks: Mutex<HashMap<SandboxKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Inner {
@@ -67,11 +68,11 @@ impl Inner {
         self.sandbox.clone()
     }
 
-    pub(crate) fn current_sandbox_id(&self, task_id: &str) -> Option<String> {
+    pub(crate) fn current_sandbox_id(&self, key: &SandboxKey) -> Option<String> {
         self.sandbox_ids
             .lock()
             .expect("sandbox_ids 锁")
-            .get(task_id)
+            .get(key)
             .cloned()
     }
 
@@ -85,16 +86,18 @@ impl Inner {
     ///
     /// 只动记账，不发 `release`：那个 id 在 edge 那边已经不存在，再 release 一次
     /// 换回来的还是一条 NotFound。
-    pub(crate) fn forget_sandbox(&self, task_id: &str) -> Option<String> {
-        self.sandbox_ids
-            .lock()
-            .expect("sandbox_ids 锁")
-            .remove(task_id)
+    pub(crate) fn forget_sandbox(&self, key: &SandboxKey) -> Option<String> {
+        self.sandbox_ids.lock().expect("sandbox_ids 锁").remove(key)
     }
 
-    /// 一个 task 一个沙箱，有就复用。
-    pub(crate) async fn acquire_sandbox(&self, task_id: &str) -> Result<String, ToolFailure> {
-        if let Some(existing) = self.current_sandbox_id(task_id) {
+    /// 一个键一个沙箱，有就复用。`task_id` 只用于 `SandboxPort::acquire` 的第一个参数
+    /// （edge 按它打 `aite.task` 标签），记账一律按 `key`。
+    pub(crate) async fn acquire_sandbox(
+        &self,
+        key: &SandboxKey,
+        task_id: &str,
+    ) -> Result<String, ToolFailure> {
+        if let Some(existing) = self.current_sandbox_id(key) {
             return Ok(existing);
         }
         let Some(sandbox) = self.sandbox() else {
@@ -104,13 +107,13 @@ impl Inner {
         let lock = {
             let mut locks = self.acquire_locks.lock().expect("acquire_locks 锁");
             locks
-                .entry(task_id.to_string())
+                .entry(key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
         let _guard = lock.lock().await;
         // 双检：等锁的这段时间里别人可能已经建好了。
-        if let Some(existing) = self.current_sandbox_id(task_id) {
+        if let Some(existing) = self.current_sandbox_id(key) {
             return Ok(existing);
         }
         let sandbox_id = sandbox
@@ -120,7 +123,7 @@ impl Inner {
         self.sandbox_ids
             .lock()
             .expect("sandbox_ids 锁")
-            .insert(task_id.to_string(), sandbox_id.clone());
+            .insert(key.clone(), sandbox_id.clone());
         Ok(sandbox_id)
     }
 }
@@ -128,8 +131,8 @@ impl Inner {
 /// ToolGateway 的 P0 实现。catalog 就是 `gateway_tools()` 原样。
 pub struct P0ToolGateway {
     inner: Arc<Inner>,
-    specs: Vec<ToolSpec>,
-    impls: HashMap<String, ToolImpl>,
+    /// P0 五个内建工具（规格 + 实现）。CC4 ① 起集中在 `tools::Builtins`。
+    builtins: Builtins,
     tokens: Mutex<HashMap<String, String>>,
     token_resolver: Option<TokenResolver>,
     default_timeout_sec: f64,
@@ -161,8 +164,7 @@ impl P0ToolGateway {
                 sandbox_ids: Mutex::new(HashMap::new()),
                 acquire_locks: Mutex::new(HashMap::new()),
             }),
-            specs: gateway_tools().to_vec(),
-            impls: default_tools(),
+            builtins: Builtins::p0(),
             tokens: Mutex::new(HashMap::new()),
             token_resolver: None,
             default_timeout_sec: DEFAULT_TOOL_TIMEOUT_SEC as f64,
@@ -190,13 +192,13 @@ impl P0ToolGateway {
 
     /// 换掉某个工具的实现（测试用；键必须是 `gateway_tools()` 里的名字）。
     pub fn with_tool(mut self, name: impl Into<String>, implementation: ToolImpl) -> Self {
-        self.impls.insert(name.into(), implementation);
+        self.builtins.impls.insert(name.into(), implementation);
         self
     }
 
     /// 整张工具表换掉（测试用：留一个工具就能验「目录里有、表里没有」走 not_found）。
     pub fn with_tools(mut self, tools: HashMap<String, ToolImpl>) -> Self {
-        self.impls = tools;
+        self.builtins.impls = tools;
         self
     }
 
@@ -254,15 +256,20 @@ impl P0ToolGateway {
     ) -> Result<ToolOutcome, ToolFailure> {
         self.check_token(ctx)?;
 
-        let Some(spec) = self.specs.iter().find(|t| t.name == req.name) else {
-            let mut names: Vec<&str> = self.specs.iter().map(|t| t.name.as_str()).collect();
+        let Some(spec) = self.builtins.specs.iter().find(|t| t.name == req.name) else {
+            let mut names: Vec<&str> = self
+                .builtins
+                .specs
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect();
             names.sort_unstable();
             return Err(ToolFailure::new(
                 ToolErrorCode::NotFound,
                 format!("没有名为 {:?} 的工具；可用的是 {:?}", req.name, names),
             ));
         };
-        let Some(implementation) = self.impls.get(&req.name) else {
+        let Some(implementation) = self.builtins.impls.get(&req.name) else {
             return Err(ToolFailure::new(
                 ToolErrorCode::NotFound,
                 format!("工具 {:?} 在本次运行里没有实现", req.name),
@@ -273,7 +280,11 @@ impl P0ToolGateway {
             .map_err(|e| ToolFailure::new(ToolErrorCode::InvalidArgs, e.to_string()))?;
 
         let budget = self.budget(&req.name, &args);
-        let env = ToolEnv::new(self.inner.clone(), &ctx.task_id);
+        let env = ToolEnv::new(
+            self.inner.clone(),
+            SandboxKey::for_task(&ctx.task_id),
+            &ctx.task_id,
+        );
         let running = CatchPanic {
             inner: implementation(env, ctx.clone(), args),
         };
@@ -329,7 +340,7 @@ impl ToolGateway for P0ToolGateway {
     fn catalog(&self, _ctx: &ToolContext) -> Vec<ToolSpec> {
         // P0 不按 ctx 做任何裁剪（scope / access bundle 是 P1）。返回新 Vec 只是
         // 不想让调用方改到我们手里这份，元素本身就是 gateway_tools() 里那几个。
-        self.specs.clone()
+        self.builtins.specs.clone()
     }
 
     async fn call(&self, ctx: &ToolContext, req: &ToolCallRequest) -> ToolResult {
@@ -380,22 +391,24 @@ impl ToolGateway for P0ToolGateway {
     }
 
     async fn sandbox_id_of(&self, task_id: &str) -> Option<String> {
-        self.inner.current_sandbox_id(task_id)
+        self.inner
+            .current_sandbox_id(&SandboxKey::for_task(task_id))
     }
 
     async fn release_task(&self, task_id: &str) {
         self.unregister_task(task_id);
+        let key = SandboxKey::for_task(task_id);
         self.inner
             .acquire_locks
             .lock()
             .expect("acquire_locks 锁")
-            .remove(task_id);
+            .remove(&key);
         let sandbox_id = self
             .inner
             .sandbox_ids
             .lock()
             .expect("sandbox_ids 锁")
-            .remove(task_id);
+            .remove(&key);
         if let (Some(sandbox_id), Some(sandbox)) = (sandbox_id, self.inner.sandbox())
             && let Err(e) = sandbox.release(&sandbox_id).await
         {
