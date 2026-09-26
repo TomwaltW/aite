@@ -1,11 +1,14 @@
 //! `P0ToolGateway`（对应旧 `aite/gateway/tool_gateway.py`）。
 //!
-//! `call` 的顺序照 §3.2 的注释逐字执行：
+//! `call` 的顺序照 §3.2 的注释执行，CC4 在「查工具」之后插了一步调用前策略：
 //!
 //! ```text
-//! 校验 session_token → 查工具存在 → 按 ToolSpec.parameters 校验 arguments
-//! → 执行（带超时）→ 截断 content → 返回
+//! 校验 session_token → 查工具存在（含 enabled(ctx) 谓词）→ 策略 before_call
+//! → 按 ToolSpec.parameters 校验 arguments → 执行（带超时）→ 截断 content → 返回
 //! ```
+//!
+//! 工具有两个来源：P0 五个内建（`tools::Builtins`，目录里永远排在前面）与经
+//! `with_registry` 登记的外部 [`crate::registry::GatewayTool`]（按登记顺序排在后面）。
 //!
 //! 以及那条硬要求：**永远不往外抛**。`call` 的返回类型就是 `ToolResult`，工具实现 panic
 //! 也被接住翻成 `upstream`（不让一个写崩的工具带走整个 worker）。唯一"没有结果"的情形是
@@ -27,15 +30,17 @@ use aite_contracts::ports::BoxFuture;
 use aite_contracts::{
     DEFAULT_TOOL_TIMEOUT_SEC, MAX_TOOL_CONTENT_CHARS, PlatformPort, SandboxPort, SandboxSpec,
     ToolCallRequest, ToolContext, ToolError, ToolErrorCode, ToolGateway, ToolResult, ToolSpec,
-    gateway_tools,
 };
 use async_trait::async_trait;
 use futures::FutureExt;
 use serde_json::{Map, Value};
 use tokio::time::Instant;
 
+use crate::policy::{AllowAll, DEFAULT_DENY_MESSAGE, PolicyDecision, ToolPolicy};
+use crate::registry::{GatewayTool, ToolRegistry};
+use crate::sandbox_key::SandboxKey;
 use crate::schema::validate_arguments;
-use crate::tools::{ToolEnv, ToolFailure, ToolImpl, ToolOutcome, default_tools};
+use crate::tools::{Builtins, ToolEnv, ToolFailure, ToolImpl, ToolOutcome};
 
 /// task_id → 期望的 session_token。取不到（store 抖动等）→ `Err(人话)`，Gateway 翻成 upstream。
 pub type TokenResolver = Arc<dyn Fn(&str) -> Result<Option<String>, String> + Send + Sync>;
@@ -52,10 +57,11 @@ pub(crate) struct Inner {
     platform: Option<Arc<dyn PlatformPort>>,
     sandbox: Option<Arc<dyn SandboxPort>>,
     spec: SandboxSpec,
-    /// task_id → sandbox_id（沙箱归 Gateway 记账，worker 取产物前先问 `sandbox_id_of`）
-    sandbox_ids: Mutex<HashMap<String, String>>,
-    /// task_id → 建沙箱的串行锁（并发两个 run_python 不会各建一个）
-    acquire_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 记账键 → sandbox_id（沙箱归 Gateway 记账，worker 取产物前先问 `sandbox_id_of`）。
+    /// 键见 [`SandboxKey`]（CC4 ①；今天只有按任务）。
+    sandbox_ids: Mutex<HashMap<SandboxKey, String>>,
+    /// 记账键 → 建沙箱的串行锁（并发两个 run_python 不会各建一个）
+    acquire_locks: Mutex<HashMap<SandboxKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Inner {
@@ -67,11 +73,11 @@ impl Inner {
         self.sandbox.clone()
     }
 
-    pub(crate) fn current_sandbox_id(&self, task_id: &str) -> Option<String> {
+    pub(crate) fn current_sandbox_id(&self, key: &SandboxKey) -> Option<String> {
         self.sandbox_ids
             .lock()
             .expect("sandbox_ids 锁")
-            .get(task_id)
+            .get(key)
             .cloned()
     }
 
@@ -85,16 +91,18 @@ impl Inner {
     ///
     /// 只动记账，不发 `release`：那个 id 在 edge 那边已经不存在，再 release 一次
     /// 换回来的还是一条 NotFound。
-    pub(crate) fn forget_sandbox(&self, task_id: &str) -> Option<String> {
-        self.sandbox_ids
-            .lock()
-            .expect("sandbox_ids 锁")
-            .remove(task_id)
+    pub(crate) fn forget_sandbox(&self, key: &SandboxKey) -> Option<String> {
+        self.sandbox_ids.lock().expect("sandbox_ids 锁").remove(key)
     }
 
-    /// 一个 task 一个沙箱，有就复用。
-    pub(crate) async fn acquire_sandbox(&self, task_id: &str) -> Result<String, ToolFailure> {
-        if let Some(existing) = self.current_sandbox_id(task_id) {
+    /// 一个键一个沙箱，有就复用。`task_id` 只用于 `SandboxPort::acquire` 的第一个参数
+    /// （edge 按它打 `aite.task` 标签），记账一律按 `key`。
+    pub(crate) async fn acquire_sandbox(
+        &self,
+        key: &SandboxKey,
+        task_id: &str,
+    ) -> Result<String, ToolFailure> {
+        if let Some(existing) = self.current_sandbox_id(key) {
             return Ok(existing);
         }
         let Some(sandbox) = self.sandbox() else {
@@ -104,13 +112,13 @@ impl Inner {
         let lock = {
             let mut locks = self.acquire_locks.lock().expect("acquire_locks 锁");
             locks
-                .entry(task_id.to_string())
+                .entry(key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
         let _guard = lock.lock().await;
         // 双检：等锁的这段时间里别人可能已经建好了。
-        if let Some(existing) = self.current_sandbox_id(task_id) {
+        if let Some(existing) = self.current_sandbox_id(key) {
             return Ok(existing);
         }
         let sandbox_id = sandbox
@@ -120,7 +128,7 @@ impl Inner {
         self.sandbox_ids
             .lock()
             .expect("sandbox_ids 锁")
-            .insert(task_id.to_string(), sandbox_id.clone());
+            .insert(key.clone(), sandbox_id.clone());
         Ok(sandbox_id)
     }
 }
@@ -128,8 +136,12 @@ impl Inner {
 /// ToolGateway 的 P0 实现。catalog 就是 `gateway_tools()` 原样。
 pub struct P0ToolGateway {
     inner: Arc<Inner>,
-    specs: Vec<ToolSpec>,
-    impls: HashMap<String, ToolImpl>,
+    /// P0 五个内建工具（规格 + 实现）。CC4 ① 起集中在 `tools::Builtins`。
+    builtins: Builtins,
+    /// 外部登记的工具（CC4 ②）
+    registry: ToolRegistry,
+    /// 调用前策略（CC4 ③），默认一律放行
+    policy: Arc<dyn ToolPolicy>,
     tokens: Mutex<HashMap<String, String>>,
     token_resolver: Option<TokenResolver>,
     default_timeout_sec: f64,
@@ -161,8 +173,9 @@ impl P0ToolGateway {
                 sandbox_ids: Mutex::new(HashMap::new()),
                 acquire_locks: Mutex::new(HashMap::new()),
             }),
-            specs: gateway_tools().to_vec(),
-            impls: default_tools(),
+            builtins: Builtins::p0(),
+            registry: ToolRegistry::new(),
+            policy: Arc::new(AllowAll),
             tokens: Mutex::new(HashMap::new()),
             token_resolver: None,
             default_timeout_sec: DEFAULT_TOOL_TIMEOUT_SEC as f64,
@@ -190,13 +203,25 @@ impl P0ToolGateway {
 
     /// 换掉某个工具的实现（测试用；键必须是 `gateway_tools()` 里的名字）。
     pub fn with_tool(mut self, name: impl Into<String>, implementation: ToolImpl) -> Self {
-        self.impls.insert(name.into(), implementation);
+        self.builtins.impls.insert(name.into(), implementation);
+        self
+    }
+
+    /// 挂上外部登记的工具（CC4 ②）。重名在 `ToolRegistry::register` 那一刻已经拦下了，这里不再判。
+    pub fn with_registry(mut self, registry: ToolRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// 换掉调用前策略（CC4 ③）。
+    pub fn with_policy(mut self, policy: Arc<dyn ToolPolicy>) -> Self {
+        self.policy = policy;
         self
     }
 
     /// 整张工具表换掉（测试用：留一个工具就能验「目录里有、表里没有」走 not_found）。
     pub fn with_tools(mut self, tools: HashMap<String, ToolImpl>) -> Self {
-        self.impls = tools;
+        self.builtins.impls = tools;
         self
     }
 
@@ -247,6 +272,25 @@ impl P0ToolGateway {
         timeout_sec + self.run_python_grace_sec
     }
 
+    /// 这次上下文里看得见的工具：内建（`gateway_tools()` 原顺序）在前，登记的（按登记顺序）在后，
+    /// 两边都按各自的 `enabled` 谓词过滤。`catalog` 与 `dispatch` 共用这一份，保证「目录里没有」
+    /// 与「调用回 not_found」是同一件事。
+    fn visible<'a>(&'a self, ctx: &ToolContext) -> Vec<Visible<'a>> {
+        let builtins = self
+            .builtins
+            .specs
+            .iter()
+            .filter(|s| (self.builtins.enabled)(&s.name, ctx))
+            .map(|s| Visible::Builtin(s.clone()));
+        let registered = self
+            .registry
+            .tools()
+            .iter()
+            .filter(|t| t.enabled(ctx))
+            .map(|t| Visible::Registered(t.spec(), t));
+        builtins.chain(registered).collect()
+    }
+
     async fn dispatch(
         &self,
         ctx: &ToolContext,
@@ -254,28 +298,52 @@ impl P0ToolGateway {
     ) -> Result<ToolOutcome, ToolFailure> {
         self.check_token(ctx)?;
 
-        let Some(spec) = self.specs.iter().find(|t| t.name == req.name) else {
-            let mut names: Vec<&str> = self.specs.iter().map(|t| t.name.as_str()).collect();
+        let visible = self.visible(ctx);
+        let Some(found) = visible.iter().find(|v| v.spec().name == req.name) else {
+            let mut names: Vec<&str> = visible.iter().map(|v| v.spec().name.as_str()).collect();
             names.sort_unstable();
             return Err(ToolFailure::new(
                 ToolErrorCode::NotFound,
                 format!("没有名为 {:?} 的工具；可用的是 {:?}", req.name, names),
             ));
         };
-        let Some(implementation) = self.impls.get(&req.name) else {
-            return Err(ToolFailure::new(
-                ToolErrorCode::NotFound,
-                format!("工具 {:?} 在本次运行里没有实现", req.name),
-            ));
+        let run: Runner = match found {
+            Visible::Builtin(_) => {
+                let Some(implementation) = self.builtins.impls.get(&req.name) else {
+                    return Err(ToolFailure::new(
+                        ToolErrorCode::NotFound,
+                        format!("工具 {:?} 在本次运行里没有实现", req.name),
+                    ));
+                };
+                Runner::Builtin(implementation.clone())
+            }
+            Visible::Registered(_, tool) => Runner::Registered(Arc::clone(tool)),
         };
 
-        let args = validate_arguments(&spec.parameters, &req.arguments)
+        // CC4 ③：查到工具之后、校验参数之前问策略
+        if let PolicyDecision::Deny(reason) = self.policy.before_call(ctx, req).await {
+            let message = if reason.trim().is_empty() {
+                DEFAULT_DENY_MESSAGE.to_string()
+            } else {
+                reason
+            };
+            return Err(ToolFailure::new(ToolErrorCode::Denied, message));
+        }
+
+        let args = validate_arguments(&found.spec().parameters, &req.arguments)
             .map_err(|e| ToolFailure::new(ToolErrorCode::InvalidArgs, e.to_string()))?;
 
         let budget = self.budget(&req.name, &args);
-        let env = ToolEnv::new(self.inner.clone(), &ctx.task_id);
+        let env = ToolEnv::new(
+            self.inner.clone(),
+            SandboxKey::for_task(&ctx.task_id),
+            &ctx.task_id,
+        );
         let running = CatchPanic {
-            inner: implementation(env, ctx.clone(), args),
+            inner: match run {
+                Runner::Builtin(implementation) => implementation(env, ctx.clone(), args),
+                Runner::Registered(tool) => tool.call(env, ctx.clone(), args),
+            },
         };
         match tokio::time::timeout(Duration::from_secs_f64(budget), running).await {
             Err(_elapsed) => Err(ToolFailure::timeout(format!(
@@ -326,10 +394,13 @@ impl P0ToolGateway {
 
 #[async_trait]
 impl ToolGateway for P0ToolGateway {
-    fn catalog(&self, _ctx: &ToolContext) -> Vec<ToolSpec> {
-        // P0 不按 ctx 做任何裁剪（scope / access bundle 是 P1）。返回新 Vec 只是
-        // 不想让调用方改到我们手里这份，元素本身就是 gateway_tools() 里那几个。
-        self.specs.clone()
+    fn catalog(&self, ctx: &ToolContext) -> Vec<ToolSpec> {
+        // CC4 ②：内建五个（gateway_tools() 原顺序）+ 登记且 enabled(ctx) 的（登记顺序）。
+        // 没登记任何东西、内建谓词恒真时逐字等于 gateway_tools()。
+        self.visible(ctx)
+            .into_iter()
+            .map(|v| v.spec().clone())
+            .collect()
     }
 
     async fn call(&self, ctx: &ToolContext, req: &ToolCallRequest) -> ToolResult {
@@ -380,28 +451,50 @@ impl ToolGateway for P0ToolGateway {
     }
 
     async fn sandbox_id_of(&self, task_id: &str) -> Option<String> {
-        self.inner.current_sandbox_id(task_id)
+        self.inner
+            .current_sandbox_id(&SandboxKey::for_task(task_id))
     }
 
     async fn release_task(&self, task_id: &str) {
         self.unregister_task(task_id);
+        let key = SandboxKey::for_task(task_id);
         self.inner
             .acquire_locks
             .lock()
             .expect("acquire_locks 锁")
-            .remove(task_id);
+            .remove(&key);
         let sandbox_id = self
             .inner
             .sandbox_ids
             .lock()
             .expect("sandbox_ids 锁")
-            .remove(task_id);
+            .remove(&key);
         if let (Some(sandbox_id), Some(sandbox)) = (sandbox_id, self.inner.sandbox())
             && let Err(e) = sandbox.release(&sandbox_id).await
         {
             tracing::warn!(task_id = %task_id, sandbox_id = %sandbox_id, error = %e, "gateway.release_failed");
         }
     }
+}
+
+/// 这次上下文里看得见的一个工具。
+enum Visible<'a> {
+    Builtin(ToolSpec),
+    Registered(ToolSpec, &'a Arc<dyn GatewayTool>),
+}
+
+impl Visible<'_> {
+    fn spec(&self) -> &ToolSpec {
+        match self {
+            Visible::Builtin(spec) | Visible::Registered(spec, _) => spec,
+        }
+    }
+}
+
+/// 查到之后真正要跑的那个。
+enum Runner {
+    Builtin(ToolImpl),
+    Registered(Arc<dyn GatewayTool>),
 }
 
 /// 逐字节 xor 累加，长度不等也走完再判：别让比较耗时泄露匹配了多少位。
