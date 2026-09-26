@@ -79,7 +79,10 @@ pub fn plane_factory() -> PlaneFactory {
         let sandbox: Arc<dyn SandboxPort> = deps.sandbox.clone();
         let gateway: Arc<dyn ToolGateway> = deps.gateway.clone();
 
-        let worker: Arc<dyn TaskWorker> = Arc::new(AgentWorker::new(WorkerDeps {
+        // CC4 ⑦：评测这一路也走同一个接缝（与 `build_app_with_features` 共用 features 的帮助函数）。
+        // 只接 worker 选项：模型与网关是场景给的替身、是断言面，模型覆盖与 gateway 槽在这里不接。
+        let feats = crate::features::wire_features(deps.config.clone(), store.clone())?;
+        let mut worker_deps = WorkerDeps {
             store: store.clone(),
             platform: platform.clone(),
             model: model.clone(),
@@ -87,7 +90,9 @@ pub fn plane_factory() -> PlaneFactory {
             config: deps.config.clone(),
             gateway: Some(gateway.clone()),
             sandbox: Some(sandbox.clone()),
-        }));
+        };
+        crate::features::apply_worker_options(&mut worker_deps, feats.worker_options);
+        let worker: Arc<dyn TaskWorker> = Arc::new(AgentWorker::new(worker_deps));
 
         let plane = InProcessControlPlane::new(ControlDeps {
             store,
@@ -225,6 +230,9 @@ fn live_model_factory(config_path: String) -> ModelFactory {
 /// 平台仍然是 `FakePlatform`（附件从它来、回执也发回它）—— 这一档验的是沙箱与 Gateway
 /// 这一段真的走通了。`resolver` 是 R7 递过来的现成货：`P0ToolGateway` 的令牌校验是
 /// 失败关闭的，不接就是每个工具调用都 `denied`，而报出来的是「denied」不是「你没接」。
+///
+/// CC4 ⑦：这一档**不接**功能接缝（登记与 `gateway_options`）—— 要接就得在同一场景里第二次跑
+/// `wire_all`（`plane_factory` 已经跑过一次）。记账转 T0c（`wiring.rs` 的下一任 R0）。
 fn docker_sandbox_factory(edge: Arc<LazyEdge>) -> SandboxFactory {
     Arc::new(move |platform, _store, config, resolver| {
         let edge = edge.connected()?;

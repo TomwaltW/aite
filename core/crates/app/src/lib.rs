@@ -16,12 +16,13 @@
 //! 整条都建立在"注入替身、测真实接线"上，隔着进程看退出码测不出来。
 pub mod app;
 pub mod cli;
+pub mod features;
 pub mod preflight;
 pub mod run;
 pub mod wiring;
 
 pub use app::{
-    AiteApp, EXIT_HARD_STOP, EXIT_STARTUP, Injections, StartupError, build_app, load_config,
-    sandbox_spec_of,
+    AiteApp, EXIT_HARD_STOP, EXIT_STARTUP, Injections, StartupError, build_app,
+    build_app_with_features, load_config, sandbox_spec_of,
 };
 pub use run::{DEFAULT_SHUTDOWN_GRACE_SEC, ServeOptions, StopSignal, run_app};

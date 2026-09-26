@@ -11,10 +11,16 @@ mod common;
 
 use common::*;
 
-use aite_app::{DEFAULT_SHUTDOWN_GRACE_SEC, Injections, ServeOptions, build_app};
-use aite_contracts::{ModelPort, SandboxPort};
+use aite_app::features::{self, FeatureCtx, StartCtx};
+use aite_app::{
+    DEFAULT_SHUTDOWN_GRACE_SEC, Injections, ServeOptions, build_app, build_app_with_features,
+};
+use aite_contracts::{ModelPort, SandboxPort, ToolCallRequest, ToolContext, gateway_tools};
+use aite_gateway::{GatewayBuilder, ToolImpl, ToolOutcome};
 use aite_testing::FakeSandbox;
+use aite_worker::WorkerDeps;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// C-TΩ-1 里 `AiteApp` 逐字写死的字段一个都在，而且都装上了。
 #[tokio::test]
@@ -267,4 +273,157 @@ async fn build_app_does_go_to_edge_when_one_injection_is_missing() {
         "只过了 {elapsed:.3}s —— 5 发 GetStatus 之间该有 4 次 sleep(1s)。\
          要么重试次数变了、要么 sleep 没了，`build_app` 注释里那个「最坏 4s」得跟着改"
     );
+}
+
+// --------------------------------------------------------------------------
+// CC4 ⑥：功能接缝（`features::wire_all` / `start_all` 与两个有序槽）
+// --------------------------------------------------------------------------
+
+/// W1 的 18 个功能文件全是空壳：默认 `wire_all` 什么都不留下，`build_app` 的网关目录
+/// 逐字等于 `gateway_tools()`，`start_all` 不碰平台。
+#[tokio::test]
+async fn features_wire_all_is_noop_by_default() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(tmp.path());
+    let store: Arc<dyn aite_contracts::SessionStore> = Arc::new(
+        aite_store::SqliteSessionStore::open(&config.storage.sqlite_path).expect("open store"),
+    );
+    let mut ctx = FeatureCtx::new(config.clone(), store);
+    features::wire_all(&mut ctx).expect("空壳的 wire 不会失败");
+    assert!(ctx.registry.is_empty(), "登记：{:?}", ctx.registry.names());
+    assert!(ctx.model_override.is_none(), "模型覆盖槽被写了");
+    assert!(ctx.gateway_options.is_empty(), "gateway 槽不空");
+    assert!(ctx.worker_options.is_empty(), "worker 槽不空");
+
+    let platform = GatedPlatform::new();
+    let app = build_with(
+        config,
+        platform.clone(),
+        RecordingModel::new(vec![final_step("没人会叫我。")]),
+        Arc::new(FakeSandbox::new(Vec::new())),
+    )
+    .await;
+    let gateway = app.gateway.as_ref().expect("gateway");
+    assert_eq!(gateway.catalog(&tool_ctx()), gateway_tools());
+
+    features::start_all(&StartCtx {
+        plane: app.plane.clone(),
+        platform: app.platform.clone(),
+    });
+    assert_eq!(
+        platform.inner.calls.len(),
+        0,
+        "start_all 碰了平台：{:?}",
+        platform.inner.calls.methods()
+    );
+}
+
+/// worker 槽在 `AgentWorker::new` **之前**应用：换掉 `deps.model` 之后，真跑一条 @，
+/// 被调的是换进去的那个，注入的那个一次都没被叫到。（build 之后再改 deps 什么都换不掉。）
+#[tokio::test]
+async fn feature_worker_option_applied_before_build() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(tmp.path());
+    let platform = GatedPlatform::new();
+    let injected = RecordingModel::new(vec![final_step("我是注入的那个。")]);
+    let swapped = RecordingModel::new(vec![final_step("我是 worker 槽换进来的。")]);
+
+    let swap = swapped.clone();
+    let app = build_app_with_features(
+        config,
+        Injections {
+            platform: Some(platform.clone()),
+            model: Some(injected.clone()),
+            sandbox: Some(Arc::new(FakeSandbox::new(Vec::new()))),
+            repo_root: Some(repo_root()),
+        },
+        move |ctx| {
+            ctx.worker_options
+                .push(Box::new(move |deps: &mut WorkerDeps| deps.model = swap));
+            Ok(())
+        },
+    )
+    .await
+    .expect("build_app_with_features");
+    let app: Arc<aite_app::AiteApp> = Arc::from(app);
+
+    let mut run = RunningApp::start(app.clone(), &platform, None).await;
+    platform.emit(&event("e1", "你好")).await;
+    let p = platform.clone();
+    wait_until(|| p.inner.count("send_text") == 1, "交付回帖").await;
+    let a = app.clone();
+    wait_until(|| a.worker.in_flight().is_empty(), "worker.run() 返回").await;
+    run.shutdown().await.expect("shutdown");
+
+    assert_eq!(swapped.call_count(), 1, "worker 槽换进来的模型没被调");
+    assert_eq!(injected.call_count(), 0, "注入的模型不该被 worker 调到");
+}
+
+/// gateway 槽在包 `Arc` **之前**应用：`with_tool("list_files", 计数器)` 之后经 `app.gateway`
+/// 调 `list_files`，走到的是计数器。
+#[tokio::test]
+async fn feature_gateway_option_applied_before_build() {
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let config = make_config(tmp.path());
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter: ToolImpl = {
+        let hits = hits.clone();
+        Arc::new(move |_env, _ctx, _args| {
+            hits.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(ToolOutcome::new("计数器")) })
+        })
+    };
+
+    let app = build_app_with_features(
+        config,
+        Injections {
+            platform: Some(GatedPlatform::new()),
+            model: Some(RecordingModel::new(vec![final_step("没人会叫我。")])),
+            sandbox: Some(Arc::new(FakeSandbox::new(Vec::new()))),
+            repo_root: Some(repo_root()),
+        },
+        move |ctx| {
+            ctx.gateway_options
+                .push(Box::new(move |gw: GatewayBuilder| {
+                    gw.with_tool("list_files", counter)
+                }));
+            Ok(())
+        },
+    )
+    .await
+    .expect("build_app_with_features");
+
+    let gateway = app.gateway.as_ref().expect("gateway");
+    let ctx = tool_ctx();
+    gateway.register_task(&ctx.task_id, &ctx.session_token);
+    let result = gateway
+        .call(
+            &ctx,
+            &ToolCallRequest {
+                call_id: "c1".into(),
+                name: "list_files".into(),
+                arguments: Default::default(),
+            },
+        )
+        .await;
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.content, "计数器");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "没走到 gateway 槽换进来的实现"
+    );
+}
+
+fn tool_ctx() -> ToolContext {
+    ToolContext {
+        tenant_id: TENANT.into(),
+        workspace_id: "cli_app".into(),
+        chat_id: "oc_cc4".into(),
+        session_id: "sess-cc4".into(),
+        task_id: "task-cc4".into(),
+        session_token: "tok-cc4".into(),
+        thread_id: None,
+        attachments_message_id: None,
+    }
 }

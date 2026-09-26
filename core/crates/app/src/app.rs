@@ -21,6 +21,8 @@ use aite_models::OpenAiCompatModel;
 use aite_store::SqliteSessionStore;
 use aite_worker::{AgentWorker, WorkerDeps, context::load_system_prompt};
 
+use crate::features::{self, FeatureCtx};
+
 /// 起飞前体检没过 / 配置读不到时的退出码。跟评测 runner 的「起不来」一个口径。
 pub const EXIT_STARTUP: i32 = 2;
 /// 第二次收到信号硬退时的退出码。
@@ -185,6 +187,24 @@ pub async fn build_app(
     config: AiteConfig,
     inject: Injections,
 ) -> Result<Box<AiteApp>, StartupError> {
+    build_app_with_features(config, inject, |_| Ok(())).await
+}
+
+/// [`build_app`] 加上功能接缝（CC4 ⑥）。`build_app` = 它 + `|_| Ok(())`。
+///
+/// 第 7 步（证据）之后、第 8 步（Gateway）之前：`features::wire_all` 先跑，`extra` 在它**之后**跑
+/// （测试往同一组有序槽里追加）；两者的 `Err` 都在这里**一次**映射成 `StartupError`。
+/// 第 1–7 步的先后一步都不动（拒绝起飞时先报哪条错是行为）。
+///
+/// 应用顺序：模型覆盖（**注入的 model 仍优先**：给了就用给的；覆盖只替掉按 config 造的那个，
+/// 同一个 model 一路给到 worker、`ControlDeps.model_name`、`AiteApp.model`）→ `P0ToolGateway::new`
+/// → 登记 → `gateway_options` 依次 → 包 `Arc` → `WorkerDeps` → `worker_options` 依次 → `AgentWorker::new`。
+/// 全程纯内存（`build_app_contract.rs` 的 2s 上限钉着），不做 I/O。
+pub async fn build_app_with_features(
+    config: AiteConfig,
+    inject: Injections,
+    extra: impl FnOnce(&mut FeatureCtx) -> Result<(), String>,
+) -> Result<Box<AiteApp>, StartupError> {
     // 1 建落盘目录
     prepare_storage(&config.storage)?;
     // 2 system prompt 必须读得到（W9 那四条铁律在 platform.md 里，缺了每个任务都会在第一步炸）
@@ -234,6 +254,7 @@ pub async fn build_app(
     };
 
     // 5 模型
+    let model_injected = inject.model.is_some();
     let model: Arc<dyn ModelPort> = match inject.model {
         Some(m) => m,
         None => Arc::new(build_model(&config)?),
@@ -252,20 +273,36 @@ pub async fn build_app(
     let evidence: Arc<dyn EvidenceWriter> =
         Arc::new(FileEvidenceWriter::new(&config.storage.evidence_dir));
 
+    // 7½ 功能接缝（CC4 ⑥）：组装前的 wire，纯内存
+    let mut feats = features::wire_features(config.clone(), store.clone())
+        .map_err(|e| StartupError::new(format!("功能接线失败：{e}")))?;
+    extra(&mut feats).map_err(|e| StartupError::new(format!("功能接线失败：{e}")))?;
+    let FeatureCtx {
+        registry,
+        model_override,
+        gateway_options,
+        worker_options,
+        ..
+    } = feats;
+    let model: Arc<dyn ModelPort> = match model_override {
+        Some(over) if !model_injected => over,
+        _ => model,
+    };
+
     // 8 Gateway。令牌校验是失败关闭的：`AgentWorker::run` 在任务真正开跑那一刻
     // `register_task(task.id, task.session_token)`（agent.rs:869，旧版 AppWorker 的活已
     // 并进 worker）。这里**不**接 `with_token_resolver` —— 它会整个替掉登记表，而
     // `TokenResolver` 是同步签名、`SessionStore::get_task` 是 async：真机上唯一的同步
     // 退路是在 async 里阻塞着读 SQLite（违反 §7.6），换来的只是一条本来就走得通的路。
     // 评测那一档不同：`FakeSessionStore` 有不记账的同步快照，所以 wiring 照 R7 的设计注入。
-    let gateway: Arc<dyn ToolGateway> = Arc::new(P0ToolGateway::new(
-        platform.clone(),
-        sandbox.clone(),
-        sandbox_spec_of(&config),
+    let gateway: Arc<dyn ToolGateway> = Arc::new(FeatureCtx::build_gateway(
+        registry,
+        gateway_options,
+        P0ToolGateway::new(platform.clone(), sandbox.clone(), sandbox_spec_of(&config)),
     ));
 
     // 9 worker
-    let worker: Arc<dyn TaskWorker> = Arc::new(AgentWorker::new(WorkerDeps {
+    let mut worker_deps = WorkerDeps {
         store: store.clone(),
         platform: platform.clone(),
         model: model.clone(),
@@ -273,7 +310,9 @@ pub async fn build_app(
         config: config.clone(),
         gateway: Some(gateway.clone()),
         sandbox: Some(sandbox.clone()),
-    }));
+    };
+    features::apply_worker_options(&mut worker_deps, worker_options);
+    let worker: Arc<dyn TaskWorker> = Arc::new(AgentWorker::new(worker_deps));
 
     // 10 控制面
     let plane: Arc<dyn ControlPlane> = Arc::new(InProcessControlPlane::new(ControlDeps {
