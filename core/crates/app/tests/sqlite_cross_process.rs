@@ -43,6 +43,10 @@ async fn second_app_on_the_same_db_resumes_the_same_thread() {
     // 建出来就定死，跑多快都一样。
     let task1 = the_only_task_from_disk(&config, "第一套组装").await;
     let session_id = task1.session_id.clone();
+    // CC3 ③：send_text 之后 worker 还要把助手轮落库。等 worker 手上空了再关库 ——
+    // CPU 吃紧的云端 VM 上不能指望 shutdown 的宽限期替我们等。
+    let w1 = app1.worker.clone();
+    wait_until(|| w1.in_flight().is_empty(), "第一个任务的助手轮落库").await;
     run1.shutdown().await.expect("run_app 正常收场");
 
     // `run_app` 的收尾把连接关了：再用它查任何东西都该报「未初始化」。
@@ -76,6 +80,9 @@ async fn second_app_on_the_same_db_resumes_the_same_thread() {
         .await;
     let p2 = platform2.clone();
     wait_until(|| p2.inner.count("send_text") == 1, "第二个任务交付").await;
+    // CC3 ③：只等 send_text 的话，第二轮的助手轮可能还没落库
+    let w2 = app2.worker.clone();
+    wait_until(|| w2.in_flight().is_empty(), "第二个任务的助手轮落库").await;
     // 同上。这会儿磁盘上有两个任务了，要的是**不是** task1 的那个。
     let task2 = tasks_from_disk(&config)
         .await
@@ -95,11 +102,20 @@ async fn second_app_on_the_same_db_resumes_the_same_thread() {
         .list_turns(&session_id, 100)
         .await
         .expect("list_turns");
+    // CC3 ③ 改写：原来是 `["第一问","第二问"]` / seq `[0,1]`；助手回复入 transcript 之后是 4 轮
     assert_eq!(
         turns.iter().map(|t| t.content.clone()).collect::<Vec<_>>(),
-        vec!["第一问", "第二问"]
+        vec![
+            "第一问",
+            "北京今天晴，最高 28℃。",
+            "第二问",
+            "好的，按季度再画一张。"
+        ]
     );
-    assert_eq!(turns.iter().map(|t| t.seq).collect::<Vec<_>>(), vec![0, 1]);
+    assert_eq!(
+        turns.iter().map(|t| t.seq).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
 
     // 关键的一条：第二个进程的模型上下文里真的带上了上一轮，不只是库里躺着一行 turn。
     assert!(
@@ -108,6 +124,14 @@ async fn second_app_on_the_same_db_resumes_the_same_thread() {
             .iter()
             .any(|ms| ms.iter().any(|t| t.contains("第一问"))),
         "第二套组装的模型上下文里没有上一轮的正文"
+    );
+    // CC3 ③ 加：上一轮的**回答**也在（助手轮跨进程读回来了）
+    assert!(
+        model2
+            .prompt_texts()
+            .iter()
+            .any(|ms| ms.iter().any(|t| t.contains("北京今天晴"))),
+        "第二套组装的模型上下文里没有上一轮的回答"
     );
     run2.shutdown().await.expect("run_app 正常收场");
 

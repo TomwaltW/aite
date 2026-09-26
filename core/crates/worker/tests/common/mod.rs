@@ -83,6 +83,8 @@ struct PlatformState {
     files: Vec<OutboundFile>,
     reactions: Vec<(String, ReactionKind)>,
     history: Vec<HistoryMessage>,
+    /// `read_history` 每次被问的 thread_id（CC3 ⑧）
+    history_threads: Vec<Option<String>>,
     downloads: Vec<(String, String)>,
     n: u64,
 }
@@ -96,6 +98,11 @@ pub struct FakePlatform {
 impl FakePlatform {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// `read_history` 每次被问的 thread_id，按先后（CC3 ⑧）。
+    pub fn history_threads(&self) -> Vec<Option<String>> {
+        self.state.lock().expect("platform").history_threads.clone()
     }
 
     pub fn set_history(&self, rows: Vec<HistoryMessage>) {
@@ -220,9 +227,10 @@ impl PlatformPort for FakePlatform {
         &self,
         _chat_id: &str,
         limit: u32,
-        _thread_id: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<Vec<HistoryMessage>, PlatformError> {
-        let st = self.state.lock().expect("platform");
+        let mut st = self.state.lock().expect("platform");
+        st.history_threads.push(thread_id.map(str::to_string));
         let start = st.history.len().saturating_sub(limit as usize);
         Ok(st.history[start..].to_vec())
     }
@@ -253,8 +261,28 @@ impl PlatformPort for FakePlatform {
 
 pub type OnCall = Arc<dyn Fn(usize) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+/// 按步脚本化的模型错误（CC3 ⑤；`ModelError` 不是 Clone，存种类）。
+#[derive(Debug, Clone)]
+pub enum FailWith {
+    Config(String),
+    Upstream(String),
+    BadResponse(String),
+}
+
+impl FailWith {
+    fn to_error(&self) -> ModelError {
+        match self {
+            FailWith::Config(s) => ModelError::Config(s.clone()),
+            FailWith::Upstream(s) => ModelError::Upstream(s.clone()),
+            FailWith::BadResponse(s) => ModelError::BadResponse(s.clone()),
+        }
+    }
+}
+
 struct ModelState {
     script: Vec<ModelTurn>,
+    /// 先于 `fail_times` 生效：前几次调用依次报这些错
+    failures: Vec<FailWith>,
     fail_times: u32,
     calls: Vec<Vec<Message>>,
     tool_catalogs: Vec<Vec<ToolSpec>>,
@@ -281,6 +309,7 @@ impl ScriptedModel {
             on_call: None,
             state: Mutex::new(ModelState {
                 script,
+                failures: Vec::new(),
                 fail_times: 0,
                 calls: Vec::new(),
                 tool_catalogs: Vec::new(),
@@ -307,6 +336,12 @@ impl ScriptedModel {
 
     pub fn with_fail_times(self, n: u32) -> Self {
         self.state.lock().expect("model").fail_times = n;
+        self
+    }
+
+    /// 前几次调用依次报这些错（CC3 ⑤），之后照脚本出牌。
+    pub fn with_failures(self, failures: Vec<FailWith>) -> Self {
+        self.state.lock().expect("model").failures = failures;
         self
     }
 
@@ -364,6 +399,10 @@ impl ModelPort for ScriptedModel {
             let mut st = self.state.lock().expect("model");
             st.calls.push(messages.to_vec());
             st.tool_catalogs.push(tools.to_vec());
+            if !st.failures.is_empty() {
+                let f = st.failures.remove(0);
+                return Err(f.to_error());
+            }
             if st.fail_times > 0 {
                 st.fail_times -= 1;
                 None
@@ -516,6 +555,8 @@ struct GatewayState {
 /// —— 跟 T17 里那个「工具成功、内容没用」的形状同构，T20 的用例正靠它。
 pub struct FakeGateway {
     results: HashMap<String, ToolResult>,
+    /// `catalog()` 的返回值（CC3 ②）；`None` = `gateway_tools()`
+    catalog: Option<Vec<ToolSpec>>,
     sandbox: Option<Arc<FakeSandbox>>,
     state: Mutex<GatewayState>,
 }
@@ -527,9 +568,16 @@ impl FakeGateway {
     pub fn new(sandbox: Option<Arc<FakeSandbox>>) -> Arc<Self> {
         Arc::new(Self {
             results: HashMap::new(),
+            catalog: None,
             sandbox,
             state: Mutex::new(GatewayState::default()),
         })
+    }
+
+    /// 让 `catalog()` 返回这一份（CC3 ②）。
+    pub fn with_catalog(mut self, catalog: Vec<ToolSpec>) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
 
     pub fn with_result(mut self, name: &str, result: ToolResult) -> Self {
@@ -568,7 +616,9 @@ impl FakeGateway {
 #[async_trait]
 impl ToolGateway for FakeGateway {
     fn catalog(&self, _ctx: &ToolContext) -> Vec<ToolSpec> {
-        gateway_tools().to_vec()
+        self.catalog
+            .clone()
+            .unwrap_or_else(|| gateway_tools().to_vec())
     }
 
     async fn call(&self, ctx: &ToolContext, req: &ToolCallRequest) -> ToolResult {
@@ -652,6 +702,8 @@ struct StoreState {
 #[derive(Default)]
 pub struct FakeSessionStore {
     state: Mutex<StoreState>,
+    /// 接下来几次 `append_turn` 先替「别的写者」占掉该 seq、再报 `DuplicateTurn`（CC3 ③）
+    duplicate: Mutex<usize>,
 }
 
 impl FakeSessionStore {
@@ -683,6 +735,32 @@ impl FakeSessionStore {
             .entry(t.session_id.clone())
             .or_default()
             .push(t);
+    }
+
+    /// 这个会话的全部 turn（含角色 / seq），按写入顺序。
+    pub fn turns(&self, session_id: &str) -> Vec<Turn> {
+        self.state
+            .lock()
+            .expect("store")
+            .turns
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 只取 User turn 的正文（CC3 ③ 起交付会多一条助手轮，只关心用户说了什么的断言用这个）。
+    pub fn user_turn_texts(&self, session_id: &str) -> Vec<String> {
+        self.turns(session_id)
+            .into_iter()
+            .filter(|t| t.role == TurnRole::User)
+            .map(|t| t.content)
+            .collect()
+    }
+
+    /// 模拟控制面抢先写了一轮：接下来 `times` 次 `append_turn` 先用一条 User 轮占掉要写的 seq，
+    /// 再报 `DuplicateTurn`。
+    pub fn duplicate_next_append_turn(&self, times: usize) {
+        *self.duplicate.lock().expect("dup") = times;
     }
 
     pub fn turn_texts(&self, session_id: &str) -> Vec<String> {
@@ -761,6 +839,29 @@ impl SessionStore for FakeSessionStore {
     }
 
     async fn append_turn(&self, t: &Turn) -> Result<(), StoreError> {
+        {
+            let mut dup = self.duplicate.lock().expect("dup");
+            if *dup > 0 {
+                *dup -= 1;
+                let mut other = t.clone();
+                other.role = TurnRole::User;
+                other.platform_user_id = Some("ou_other".into());
+                other.content = format!("（别的写者抢先写的 seq={}）", t.seq);
+                drop(dup);
+                self.push_turn(other);
+            }
+        }
+        // 与真 store 同口径：(session_id, seq) 唯一
+        let taken = self
+            .turns(&t.session_id)
+            .iter()
+            .any(|existing| existing.seq == t.seq);
+        if taken {
+            return Err(StoreError::DuplicateTurn {
+                session_id: t.session_id.clone(),
+                seq: t.seq,
+            });
+        }
         self.push_turn(t.clone());
         Ok(())
     }
@@ -1280,6 +1381,21 @@ impl Harness {
                 })),
             )
             .await;
+    }
+
+    /// 同 `push_steer`，但说话的是 `uid`（CC3 ④ 署名用例）。不写证据。
+    pub async fn push_steer_as(&self, uid: &str, text: &str) {
+        let seq = self.turn_seq.fetch_add(1, Ordering::SeqCst);
+        self.store.push_turn(Turn {
+            session_id: self.session.id.clone(),
+            seq,
+            role: TurnRole::User,
+            platform_user_id: Some(uid.to_string()),
+            content: text.to_string(),
+            attachments: Vec::new(),
+            created_at: Utc::now(),
+        });
+        self.steer.lock().expect("steer").push(text.to_string());
     }
 
     /// 控制面 `cancel_task` 的「在跑」分支：只置旗 + 清掉排队的追问，收尾归 worker。

@@ -278,3 +278,69 @@ impl CardCoalescer {
         Ok(())
     }
 }
+
+// ---- 卡片（W3 / W4）在 worker 上的三个入口 —— CC3 从 `agent.rs` 原样搬来 ----------
+
+impl crate::r#loop::AgentWorker {
+    pub(crate) async fn ensure_card(
+        &self,
+        ctx: &mut crate::r#loop::RunContext,
+    ) -> Result<(), RunError> {
+        if ctx.card.sent() {
+            return Ok(());
+        }
+        ctx.task.status = aite_contracts::TaskStatus::Working;
+        let card = render_card(
+            &ctx.task,
+            &ctx.session,
+            &ctx.initiator,
+            CardStatus::Working,
+            ctx.note.as_deref(),
+        );
+        let chat_id = ctx.session.chat_id.clone();
+        let reply_to = ctx.thread_root();
+        ctx.card
+            .ensure_card(&chat_id, Some(reply_to.as_str()), &card)
+            .await?;
+        ctx.task.card_id = ctx.card.card_id().map(str::to_string);
+        self.save(ctx).await
+    }
+
+    pub(crate) async fn refresh_card(
+        &self,
+        ctx: &mut crate::r#loop::RunContext,
+        status: CardStatus,
+    ) -> Result<(), RunError> {
+        if !ctx.card.sent() {
+            return Ok(());
+        }
+        let card = render_card(
+            &ctx.task,
+            &ctx.session,
+            &ctx.initiator,
+            status,
+            ctx.note.as_deref(),
+        );
+        ctx.card.update(card).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn close_card(
+        &self,
+        ctx: &mut crate::r#loop::RunContext,
+        status: CardStatus,
+    ) -> Result<(), RunError> {
+        if !ctx.card.sent() {
+            return Ok(());
+        }
+        let card = render_card(
+            &ctx.task,
+            &ctx.session,
+            &ctx.initiator,
+            status,
+            ctx.note.as_deref(),
+        );
+        ctx.card.force_flush(Some(card)).await?;
+        Ok(())
+    }
+}

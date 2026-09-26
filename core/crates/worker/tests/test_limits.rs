@@ -107,3 +107,57 @@ async fn text_only_after_first_step_is_nudged_not_delivered() {
     assert_eq!(run.h.platform.last_text(), "结论在这里");
     assert_eq!(systems(&run.model.last_call(), "请调用 final").len(), 1);
 }
+
+// ---- CC3 ⑤ 重试分类 -------------------------------------------------------
+
+/// 返回 (任务, 模型, harness, 这一趟在假钟上花掉的秒数)。
+async fn run_failing(
+    failures: Vec<FailWith>,
+) -> (
+    aite_contracts::Task,
+    std::sync::Arc<ScriptedModel>,
+    Harness,
+    f64,
+) {
+    let mut h = Harness::new();
+    h.seed("帮我出个图", Vec::new()).await;
+    let model =
+        std::sync::Arc::new(ScriptedModel::new(vec![final_turn("好了。")]).with_failures(failures));
+    let started = h.clock.now();
+    let task = h.run(model.clone()).await;
+    let elapsed = h.clock.now() - started;
+    (task, model, h, elapsed)
+}
+
+#[tokio::test]
+async fn config_error_not_retried() {
+    let (task, model, h, elapsed) =
+        run_failing(vec![FailWith::Config("缺 AITE_MODEL_API_KEY".into())]).await;
+    assert_eq!(model.call_count(), 1, "配置缺项再调一次也一样，不重试");
+    assert_eq!(task.status, aite_contracts::TaskStatus::Failed);
+    assert_eq!(h.platform.last_text(), "模型服务暂不可用，任务 #A1 已终止");
+    assert_eq!(elapsed, 0.0, "一秒都没等");
+}
+
+#[tokio::test]
+async fn http_4xx_not_retried() {
+    for (status, sep) in [(400, ":"), (401, "："), (403, ":"), (404, "："), (422, ":")] {
+        let (task, model, _h, _) = run_failing(vec![FailWith::Upstream(format!(
+            "HTTP {status}{sep} bad request"
+        ))])
+        .await;
+        assert_eq!(model.call_count(), 1, "HTTP {status} 不重试");
+        assert_eq!(task.status, aite_contracts::TaskStatus::Failed);
+    }
+}
+
+#[tokio::test]
+async fn http_429_backs_off_with_retry_after() {
+    let (task, model, _h, elapsed) = run_failing(vec![FailWith::Upstream(
+        "HTTP 429: rate limited retry-after-ms=1500".into(),
+    )])
+    .await;
+    assert_eq!(model.call_count(), 2, "第 2 次成功");
+    assert_eq!(task.status, aite_contracts::TaskStatus::Delivered);
+    assert_eq!(elapsed, 1.5, "恰好按 retry-after-ms 退避 1.5 秒");
+}

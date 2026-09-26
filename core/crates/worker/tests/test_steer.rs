@@ -16,6 +16,12 @@ use std::sync::Arc;
 
 const STEER: &str = "顺便加上同比";
 
+/// CC3 ④ 起进上下文的 User 行带署名。Harness 里所有 turn 都是发起人 `ou_user` 说的，
+/// `run()` 传进来的发起人显示名是「张三」。
+fn signed(text: &str) -> String {
+    format!("[张三] {text}")
+}
+
 fn three_step_script(last: &str) -> Vec<aite_contracts::ModelTurn> {
     vec![
         tool_turn(&[("checklist_add", json!({"items": ["取数"]}))]),
@@ -60,17 +66,23 @@ async fn steer_message_reaches_the_next_step() {
     assert!(
         step3
             .iter()
-            .any(|m| m.role == Role::User && m.content == STEER)
+            .any(|m| m.role == Role::User && m.content == signed(STEER))
     );
+    // CC3 ④ 改写的否定断言：原来比 `content == STEER`，署名后它永远成立（空转）；
+    // 改成「任何一条 User 行里都不含这句」，比原来还严
     assert!(
         !model
             .call(1)
             .iter()
-            .any(|m| m.role == Role::User && m.content == STEER)
+            .any(|m| m.role == Role::User && m.content.contains(STEER))
     );
 
     assert!(h.pending_steer().is_empty(), "已被消费");
-    assert_eq!(h.store.turn_texts(&h.session.id), ["按月画个图", STEER]);
+    // CC3 ③ 起交付会多一条助手轮；这里钉的是「用户说过的话」，只看 User turn
+    assert_eq!(
+        h.store.user_turn_texts(&h.session.id),
+        ["按月画个图", STEER]
+    );
 }
 
 #[tokio::test]
@@ -98,7 +110,8 @@ async fn several_steer_messages_keep_their_order_as_separate_turns() {
         .iter()
         .map(|m| m.content.clone())
         .collect();
-    assert_eq!(tail, texts, "原序，且是尾巴上连着的三条");
+    let want_tail: Vec<String> = texts.iter().map(|t| signed(t)).collect();
+    assert_eq!(tail, want_tail, "原序，且是尾巴上连着的三条（各自署名）");
     assert!(
         step3[step3.len() - 3..]
             .iter()
@@ -108,7 +121,8 @@ async fn several_steer_messages_keep_their_order_as_separate_turns() {
 
     let mut want = vec!["按月画个图".to_string()];
     want.extend(texts);
-    assert_eq!(h.store.turn_texts(&h.session.id), want);
+    // CC3 ③：同上，只看 User turn
+    assert_eq!(h.store.user_turn_texts(&h.session.id), want);
 }
 
 #[tokio::test]
@@ -146,14 +160,14 @@ async fn steer_lands_at_the_tail_after_the_history_and_attachment_blocks() {
     let a_idx = idx(ATTACHMENT_HEADER);
     let s_idx = step3
         .iter()
-        .position(|m| m.content == STEER)
+        .position(|m| m.content == signed(STEER))
         .expect("steer 没进上下文");
 
     assert!(h_idx < a_idx && a_idx < s_idx);
     assert_eq!(s_idx, step3.len() - 1, "就在最末尾");
     // transcript 那一层还是任务开跑时的样子，没被 steer 挤进去
     assert_eq!(step3[1].role, Role::User);
-    assert_eq!(step3[1].content, "按月画个图");
+    assert_eq!(step3[1].content, signed("按月画个图"));
 }
 
 #[tokio::test]
@@ -171,12 +185,13 @@ async fn steer_queued_before_the_task_starts_is_not_injected_twice() {
     h.run(model.clone()).await;
 
     let step1 = model.call(0);
-    let hits = step1.iter().filter(|m| m.content == STEER).count();
+    // CC3 ④ 改写：数「含这句话」的条数（署名后原来的 `== STEER` 会数成 0）
+    let hits = step1.iter().filter(|m| m.content.contains(STEER)).count();
     assert_eq!(hits, 1, "同一句话不许进两遍");
     assert!(h.pending_steer().is_empty());
     // 进上下文的那一份来自 transcript，位置在 system prompt 之后的第二条
-    assert_eq!(step1[1].content, "按月画个图");
-    assert_eq!(step1[2].content, STEER);
+    assert_eq!(step1[1].content, signed("按月画个图"));
+    assert_eq!(step1[2].content, signed(STEER));
 }
 
 #[tokio::test]
@@ -205,7 +220,8 @@ async fn stop_before_the_drain_keeps_the_steer_out_of_the_model() {
         !model
             .calls()
             .iter()
-            .any(|call| call.iter().any(|m| m.content == STEER))
+            // CC3 ④ 改写的否定断言：署名后 `== STEER` 会空转，改成 contains
+            .any(|call| call.iter().any(|m| m.content.contains(STEER)))
     );
     assert!(h.pending_steer().is_empty());
     assert_eq!(task.status, TaskStatus::Cancelled);
@@ -241,7 +257,7 @@ async fn steer_is_recorded_in_the_evidence_chain() {
     // 建任务那条也认得出自己是谁，两种语义在 payload 上分得开
     assert!(lines.iter().any(|l| l.contains(r#""route":"new_task""#)));
     // 模型确实看到了它 —— 证据记的和模型收到的是同一件事
-    assert!(model.call(2).iter().any(|m| m.content == STEER));
+    assert!(model.call(2).iter().any(|m| m.content == signed(STEER)));
 }
 
 #[tokio::test]
@@ -263,8 +279,45 @@ async fn a_very_long_steer_is_not_truncated() {
     let merged: Vec<aite_contracts::Message> = model
         .call(2)
         .into_iter()
-        .filter(|m| m.role == Role::User && m.content == long_text)
+        .filter(|m| m.role == Role::User && m.content == signed(&long_text))
         .collect();
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].content.chars().count(), 4200);
+    let body = merged[0].content.strip_prefix("[张三] ").expect("带署名");
+    assert_eq!(body.chars().count(), 4200, "署名之外一个字没截");
+}
+
+/// CC3 ④：steer 也署名。发言人从 transcript 里认领（控制面先落 turn 再入队）；
+/// 同一句话被不同的人说过 → 认不准，不署名。
+#[tokio::test]
+async fn steer_lines_are_attributed() {
+    let h = seeded("按月画个图", Vec::new()).await;
+    let hook_h = h.clone();
+    let model = Arc::new(
+        ScriptedModel::new(three_step_script("好了。")).with_on_call(Arc::new(move |step| {
+            let h = hook_h.clone();
+            Box::pin(async move {
+                if step == 1 {
+                    h.push_steer_as("ou_lisi", "我也要一份").await;
+                    h.push_steer_as("ou_lisi", "好").await;
+                    h.push_steer_as("ou_wangwu", "好").await;
+                }
+            })
+        })),
+    );
+    h.run(model.clone()).await;
+
+    let step3 = model.call(2);
+    let tail: Vec<String> = step3[step3.len() - 3..]
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    assert_eq!(
+        tail,
+        vec![
+            "[ou_lisi] 我也要一份".to_string(),
+            "好".to_string(),
+            "好".to_string(),
+        ],
+        "非发起人且群历史里没名字 → 署 id；同一句话两个人说过 → 不署"
+    );
 }

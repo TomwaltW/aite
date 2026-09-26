@@ -15,7 +15,7 @@ mod common;
 
 use common::*;
 
-use aite_contracts::{EvidenceKind, NormalizedEvent, Task, TaskStatus};
+use aite_contracts::{EvidenceKind, NormalizedEvent, Task, TaskStatus, Turn, TurnRole};
 use aite_testing::ScriptStep;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -759,9 +759,16 @@ async fn root_and_followup_replayed(together: bool) {
         None => Vec::new(),
     };
 
-    let contents: Vec<String> = turns.iter().map(|t| t.content.clone()).collect();
+    // CC3 ③ 改写：交付的答复也进 transcript（Assistant 轮），它排在哪取决于追问成了 steer
+    // 还是新任务。所以正文断言只看 User 轮；seq 断言「从 0 连续递增」；Assistant 轮另断言。
+    let contents: Vec<String> = turns
+        .iter()
+        .filter(|t| t.role == TurnRole::User)
+        .map(|t| t.content.clone())
+        .collect();
     let seqs: Vec<u64> = turns.iter().map(|t| t.seq).collect();
     let ignored = rig.counter("events.ignored");
+    assert_assistant_turns_match_deliveries(&turns, &tasks);
 
     // ── 两种形状都成立的那几条 ────────────────────────────────
     assert!(!tasks.is_empty(), "root 那条至少要变成一个任务");
@@ -798,14 +805,39 @@ async fn root_and_followup_replayed(together: bool) {
             rig.app.plane.counters()
         );
     }
-    if joined {
-        assert_eq!(
-            seqs,
-            vec![0, 1],
-            "两句话在同一份 transcript 里要按到达顺序排"
+    // CC3 ③ 改写：原来是 `if joined { seqs == [0, 1] }`。两句用户的话按到达顺序排由上面的
+    // `contents` 断言钉着；这里钉整份 transcript（含 Assistant 轮）的 seq 从 0 连续递增、没有空洞。
+    assert_eq!(
+        seqs,
+        (0..turns.len() as u64).collect::<Vec<_>>(),
+        "transcript 的 seq 要从 0 连续递增"
+    );
+    rig.run.shutdown().await.expect("run_app 正常收场");
+}
+
+/// CC3 ③：每个交付了的任务在 transcript 里恰好留一条 Assistant 轮，正文是它发出去的答复。
+fn assert_assistant_turns_match_deliveries(turns: &[Turn], tasks: &[Task]) {
+    let assistants: Vec<&Turn> = turns
+        .iter()
+        .filter(|t| t.role == TurnRole::Assistant)
+        .collect();
+    let delivered = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Delivered)
+        .count();
+    assert_eq!(
+        assistants.len(),
+        delivered,
+        "Assistant 轮条数 = 已交付任务数：{turns:?}"
+    );
+    if delivered > 0 {
+        assert!(
+            assistants
+                .iter()
+                .any(|t| t.content.contains("第 1 个活干完了。")),
+            "第一个任务的答复该在 transcript 里：{assistants:?}"
         );
     }
-    rig.run.shutdown().await.expect("run_app 正常收场");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -856,11 +888,17 @@ async fn a_followup_replayed_before_its_root_is_dropped() {
         .list_turns(&tasks[0].session_id, 100)
         .await
         .expect("list_turns");
+    // CC3 ③ 改写：只看 User 轮（答复现在也进 transcript）
     assert_eq!(
-        turns.iter().map(|t| t.content.clone()).collect::<Vec<_>>(),
+        turns
+            .iter()
+            .filter(|t| t.role == TurnRole::User)
+            .map(|t| t.content.clone())
+            .collect::<Vec<_>>(),
         vec!["按月画个图"],
         "追问没进 transcript —— 这正是这条要钉的边界"
     );
+    assert_assistant_turns_match_deliveries(&turns, &tasks);
     assert_eq!(rig.counter("events.ignored"), 1, "追问该是掉在 R8 上");
     // 没有异常、没有回帖：丢得**安静**，这也是它难被发现的原因
     assert_eq!(rig.app.ingress.counter("ingress.errors"), 0);
