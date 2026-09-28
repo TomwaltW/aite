@@ -1,11 +1,15 @@
 # CC8 回执：飞书适配器整理 + 新事件 + 卡片按钮开关
 
-- 分支：`claude/cc8-feishu-adapter`（本地 9 个提交：①–⑧ + 本回执）· PR：**未能开**（见「⚠ 推送与 PR」）
+- 分支：`claude/cc8-feishu-adapter`（①–⑧ + 回执提交）· PR：draft（见「⚠ 推送与 PR」，第一次推送被拒、之后已补推）
 - 代码基线：`8458435`（情形 A）· 可写面：`edge/internal/feishu/**`、`review/p1/ledger/CC8.md`
 - 结论：8 项全部做完，每项有回归测试与变异验证；`scripts/check.sh` 全部通过，`cargo passed=946`（Δ=0）；
   卡片按钮**默认关**，只有 `AITE_FEISHU_CARD_BUTTONS` 恰好等于 `"1"` 才渲染。
 
-## ⚠ 推送与 PR：没推上去
+## ⚠ 推送与 PR
+
+**后续（已解决）**：总管要求推送后，经会话工具把 `TomwaltW/aite` 以 push 权限加进本会话 sources，`git push -u origin claude/cc8-feishu-adapter` 成功；
+容器里用 `apt-get install gh` 装了 `gh`（2.45.0，只装在会话容器里，不进仓库），再用 `gh pr create --draft --body-file review/p1/ledger/CC8.md` 开了 draft PR。
+下面是第一次推送时的记录，原样保留。
 
 会话容器里的仓库**没有 `origin` 远端**，也**没有 `gh`**。我按仓库里记着的地址（`review/p1/ledger/CC2.md` 等：`TomwaltW/aite`）
 加了 `origin` 再推，被会话的 git 代理拒了（原文）：
