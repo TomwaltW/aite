@@ -3,12 +3,9 @@
 # 回执 CC7：P1 评测底座
 
 > 状态：**①–⑧ 全部完成，本地验收全绿**（`cargo passed=969 failed=0` = 946 + 23；B8 `passed 10/10`；B9 `passed 3/3`）。
-> **但没能推送、没能开 draft PR**：本会话的容器里 `git remote` 为空（`fatal: 'origin' does not appear to be a git repository`），
-> 也没有 `gh` 命令（`/bin/bash: line 1: gh: command not found`）。我从旧回执里查到仓库是 `TomwaltW/aite`，补了
-> `git remote add origin https://github.com/TomwaltW/aite.git`（`fetch main` 成功，`origin/main` = `30b00e5` = 本分支起点），但推送被代理拒了，原文：
-> `remote: access denied by the git proxy: TomwaltW/aite is not in this session's authorized repository set, so the proxy will not inject a credential for it. To fix, add the repository to the session's sources.`
-> （`fatal: … The requested URL returned error: 403`）。没有再换别的办法绕。提交只在本地分支 `claude/cc7-p1-eval-base` 上 ——
-> 请总管把仓库加进会话的 sources 后推送，或在本机推送，再 `gh pr create --draft --title "CC7: P1 评测底座" --body-file review/p1/ledger/CC7.md`。
+> **推送与 draft PR**：已推送、已开 draft PR [TomwaltW/aite#7](https://github.com/TomwaltW/aite/pull/7)。经过：容器起初 `git remote` 为空、没有 `gh`；
+> 补上 `origin` 后第一次推送被 git 代理拒（原文：`remote: access denied by the git proxy: TomwaltW/aite is not in this session's authorized repository set, so the proxy will not inject a credential for it. To fix, add the repository to the session's sources.`，`fatal: … The requested URL returned error: 403`）。
+> 人类要求重试后，经会话的 add_repo 把仓库以 push 权限加进 sources，推送成功。因为没有 `gh`，PR 是用 GitHub REST API（`POST /repos/TomwaltW/aite/pulls`，`draft: true`）开的，正文就是本文件原文（等价于 `--body-file`）。
 > 分支：`claude/cc7-p1-eval-base` · 代码基线 `8458435`（分支起点 `30b00e5` = 8458435 + D0 文档提交）
 > 提交：`f320fab` 回执骨架 · `2045dd8` 实现（本回执的定稿另起一个提交）
 
@@ -499,11 +496,10 @@ review/p1/ledger/CC7.md
 | 接上消费方时撤掉 ⑥ 的「无消费方」闸门（`deps.rs` 的 `worker_options_of`）及测试 `worker_options_label_without_consumer_is_a_wiring_error` | 同上：闸门只能在消费方接上的同一个提交里撤，否则就是静默无效 | 接线的那一轨（T0c 的面含 `core/crates/evals/**`；DD2 的面含 `evals/src/deps.rs` 与 `evals/tests/**`） |
 | 无话题平台上 R6 的行为场景 | CC2 已按 `supports_thread` 改了 R6，这条路径的断言属于新行为、会被后续轨改；CC7 的 yaml 后续轨改不了 | DD3（`DD3_dingtalk_anchor.yaml`） |
 | 钉钉 / 企微能力档（`dingtalk_v1()` / `wecom_v1()`） | 要 T0 契约 | DD2 |
-| 分支推送与开 draft PR | 本会话容器没有 `gh`；补上 remote 后推送被 git 代理拒（仓库不在本会话授权的 sources 里，见文首） | 总管（加 sources 或本机推送） |
 
 ## 8. 没做的与原因
 
-- **没推送、没开 draft PR、CI 没跑**：没有 `gh`；推送被 git 代理以「仓库不在授权 sources」拒绝（见文首）。验收里的 `git diff … origin/main...HEAD` 两条用基线 sha 跑了（§4；后来补上的 `origin/main` 就是 `30b00e5`，结果相同）。
+- **CI 结果本回执里没有**：draft PR #7 刚开，CI 以 PR 页面为准。验收里的 `git diff … origin/main...HEAD` 两条用基线 sha 跑了（§4；`origin/main` 就是 `30b00e5`，结果相同）。
 - **没单跑 `(cd edge && go test -race ./cmd/... -count=1)`**：CC1 之后 check.sh 的 Go 格已是 `go packages ok=9 fail=0` 新口径，以这行为准（派单第 4 步也这么写）。
 - **种子场景里刻意没写的断言**（判断会被别轨合法翻掉；后续轨改不了 `CC7_*.yaml`，翻了就是 main 上的 B9 红）：
   - 注入场景不断言 `HISTORY_HEADER` / 外部数据包裹的字样（CC3 的面、会改历史窗口与包裹格式）；不断言回帖全文（DD3 会加 `#A..` 可见前缀、DD5 可能加标识）；
