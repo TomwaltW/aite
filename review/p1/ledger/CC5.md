@@ -3,11 +3,11 @@
 分支 `claude/cc5-store-migrations`（本地），基于 main `30b00e5`（= `8458435` + 总管 D0 文档提交）。
 提交：`47b61f0` ① / `f5039bd` ② / `64530c1` ③ / `89cad49` ④ / 本回执一个提交。
 
-> **推送 / draft PR 没做成**：本会话的仓库**没有配置任何 git remote**（`git remote -v` 输出为空），
-> 容器里也**没有 `gh`**（`command -v gh` → 不存在）。按规则不猜 remote URL，所以分支只在本地；
-> PR 描述就用本回执（派单 §3 允许 `--body-file review/p1/ledger/CC5.md`）。
-> 需要总管配好 remote / 换一个带 GitHub 接入的会话后 `git push -u origin claude/cc5-store-migrations`
-> 再 `gh pr create --draft --title "CC5: 存储迁移机制 + Answering 孤儿恢复" --body-file review/p1/ledger/CC5.md`。见 §8。
+> **推送 / draft PR**：会话起初仓库**没有任何 git remote**、容器里**没有 `gh`**，所以第一轮只提交在本地。
+> 第二轮（人要求推送）把 `TomwaltW/aite` 挂进会话、`git remote add origin https://github.com/TomwaltW/aite`，
+> `git fetch origin main` 确认 `origin/main` = `30b00e5`（本分支起点），`git push -u origin claude/cc5-store-migrations` 成功。
+> `gh` 仍然没有，且会话代理只放行已挂仓库的 GitHub API（下载 `cli/cli` 的 release 被拒），所以 draft PR 走的是
+> `gh pr create` 背后的同一个 REST 端点 `POST /repos/TomwaltW/aite/pulls`（`draft: true`），正文逐字读自本回执文件。
 
 ## 1. 开场自检
 
@@ -342,8 +342,7 @@ exit=0
 
 ## 8. 没做的与原因
 
-- **没推送、没开 draft PR**：本会话仓库 `git remote -v` 为空、容器无 `gh`。分支 `claude/cc5-store-migrations` 与全部提交只在本地容器里；
-  PR 描述用本回执。**容器回收后本地提交会丢**——需要总管在有 remote 的会话里拉这个分支，或让我在配好 remote 后推送。
+- 推送与 draft PR 的曲折见文件头：起初无 remote / 无 `gh`；后来挂上仓库推送成功，PR 经 REST 开（`gh` 至今不在容器里）。
 - 没新增 app 层测试（派单说不新增；`run.rs` 对 answering 孤儿不改就会回帖，现有 `startup_recovery` 的 working 孤儿用例覆盖同一路径）。
 - 没做 `create_task` 写时同步的单独变异（M6 只撤了 `update_task` 那一处）；`migrates_p0_db_in_place` 末尾对 `tsk_2` 的断言钉着它。
 
