@@ -1,0 +1,10 @@
+#[derive(Debug, thiserror::Error)]
+pub enum ModelError {
+    /// 缺 base_url / model / 密钥环境变量。消息里只出现变量名，绝不出现取值。
+    #[error("模型配置不完整：{0}")]
+    Config(String),
+    #[error("模型服务错误：{0}")]
+    Upstream(String),
+    #[error("模型响应无法解析：{0}")]
+    BadResponse(String),
+}

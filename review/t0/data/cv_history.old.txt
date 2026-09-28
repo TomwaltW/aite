@@ -1,0 +1,46 @@
+impl From<HistoryMessage> for pb::HistoryMessage {
+    fn from(h: HistoryMessage) -> Self {
+        pb::HistoryMessage {
+            message_id: h.message_id,
+            sender_id: h.sender_id,
+            sender_kind: h.sender_kind,
+            sender_name: h.sender_name,
+            text: h.text,
+            thread_id: h.thread_id,
+            created_at: Some(chrono_to_ts(h.created_at)),
+        }
+    }
+}
+impl TryFrom<pb::HistoryMessage> for HistoryMessage {
+    type Error = ConvertError;
+    fn try_from(h: pb::HistoryMessage) -> Result<Self, ConvertError> {
+        Ok(HistoryMessage {
+            message_id: h.message_id,
+            sender_id: h.sender_id,
+            sender_kind: h.sender_kind,
+            sender_name: h.sender_name,
+            text: h.text,
+            thread_id: h.thread_id,
+            created_at: ts_to_chrono(h.created_at, "created_at")?,
+        })
+    }
+}
+
+impl From<DocumentContent> for pb::DocumentContent {
+    fn from(d: DocumentContent) -> Self {
+        pb::DocumentContent {
+            title: d.title,
+            text: d.text,
+            url: d.url,
+        }
+    }
+}
+impl From<pb::DocumentContent> for DocumentContent {
+    fn from(d: pb::DocumentContent) -> Self {
+        DocumentContent {
+            title: d.title,
+            text: d.text,
+            url: d.url,
+        }
+    }
+}

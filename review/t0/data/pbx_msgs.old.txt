@@ -1,0 +1,5 @@
+message DownloadFileResponse {
+  bytes data = 1;
+}
+
+// 对应旧 SandboxPort。容器打标签 aite.task=<task_id>。

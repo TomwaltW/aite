@@ -1,0 +1,9 @@
+model:
+  provider: openai_compat  # openai_compat | scripted
+  base_url: ""             # 指向百炼 / 智谱 / DeepSeek 的 OpenAI 兼容端点
+  api_key_env: AITE_MODEL_API_KEY
+  model: ""
+  max_tokens: 4096
+  temperature: 0.0
+  price_in_per_mtok: 0.0   # 元/百万 token，只用于卡片上的"已用 ¥"
+  price_out_per_mtok: 0.0

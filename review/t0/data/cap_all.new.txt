@@ -1,0 +1,153 @@
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformCapabilities {
+    /// "feishu" | "dingtalk" | "wecom" | "fake"
+    pub platform: String,
+    /// 有原生线程/话题
+    pub supports_thread: bool,
+    /// 能读群历史
+    pub supports_history: bool,
+    /// 能收到非 @ 消息
+    pub supports_passive_listen: bool,
+    /// 卡片能原地更新
+    pub supports_card_edit: bool,
+    /// 卡片可更新时长（飞书 14 天 = 1209600）
+    pub card_edit_window_sec: u32,
+    /// 群里能收文件
+    pub inbound_file_in_group: bool,
+    pub proactive_requires_prior_message: bool,
+    /// 出站限速（消息数/分钟），adapter 自己令牌桶
+    pub outbound_rate_per_min: u32,
+    // —— p1.0 新增（proto 字段 10–23）。数值 0 = 未声明，调用方按保守值处理 ——
+    /// 能收到表情回应事件
+    #[serde(default)]
+    pub supports_reactions_in: bool,
+    /// 能收到撤回事件
+    #[serde(default)]
+    pub supports_recall_event: bool,
+    /// 能收到编辑事件（飞书没有：编辑靠拉历史比对）
+    #[serde(default)]
+    pub supports_edit_event: bool,
+    #[serde(default)]
+    pub supports_pins: bool,
+    #[serde(default)]
+    pub supports_message_search: bool,
+    /// 能写平台云文档（托管页）
+    #[serde(default)]
+    pub supports_docs: bool,
+    #[serde(default)]
+    pub supports_dm: bool,
+    /// 引用带被引消息的 id
+    #[serde(default)]
+    pub supports_quote_id: bool,
+    /// 没有话题：每条回复都要带可见的 #A 编号
+    #[serde(default)]
+    pub requires_visible_anchor: bool,
+    /// 流式卡片最长持续秒数
+    #[serde(default)]
+    pub stream_max_sec: u32,
+    /// 卡片回调必须在这么多毫秒内应答
+    #[serde(default)]
+    pub card_action_deadline_ms: u32,
+    #[serde(default)]
+    pub max_card_bytes: u32,
+    #[serde(default)]
+    pub max_text_chars: u32,
+    #[serde(default)]
+    pub max_upload_bytes: u64,
+}
+
+/// 旧契约里的 FEISHU_P0 常量。每次调用返回新值：调用方可安全改 `supports_passive_listen`
+/// （§3.7 权限核实后 adapter 运行时可能改成 true），不会污染别处。
+/// p1.0 只补新能力位，前 9 个值一个不改。
+pub fn feishu_p0() -> PlatformCapabilities {
+    PlatformCapabilities {
+        platform: "feishu".to_string(),
+        supports_thread: true,
+        supports_history: true,
+        supports_passive_listen: false,
+        supports_card_edit: true,
+        card_edit_window_sec: 1_209_600,
+        inbound_file_in_group: true,
+        proactive_requires_prior_message: false,
+        outbound_rate_per_min: 60,
+        supports_reactions_in: true,
+        supports_recall_event: true,
+        supports_edit_event: false,
+        supports_pins: true,
+        // 消息搜索只收 user_access_token（要配 service_user_token_env）
+        supports_message_search: false,
+        supports_docs: true,
+        supports_dm: true,
+        supports_quote_id: true,
+        requires_visible_anchor: false,
+        // CardKit 流式开启 10 分钟后自动关
+        stream_max_sec: 600,
+        card_action_deadline_ms: 3000,
+        max_card_bytes: 30_720,
+        max_text_chars: 0,
+        max_upload_bytes: 31_457_280,
+    }
+}
+
+/// 钉钉企业内部应用机器人。前 9 个值与 edge 的 dingtalk 包（CC9）写死的保守值一致；
+/// 标 0 的是云端查不到官方数字的，DD11 / H9 实测后由 T0.1 更新。
+pub fn dingtalk_v1() -> PlatformCapabilities {
+    PlatformCapabilities {
+        platform: "dingtalk".to_string(),
+        supports_thread: false,
+        supports_history: false,
+        supports_passive_listen: false,
+        supports_card_edit: true,
+        card_edit_window_sec: 0,
+        // 群里 @ 机器人收不到文件，只有单聊能收
+        inbound_file_in_group: false,
+        proactive_requires_prior_message: false,
+        outbound_rate_per_min: 20,
+        supports_reactions_in: false,
+        supports_recall_event: false,
+        supports_edit_event: false,
+        supports_pins: false,
+        supports_message_search: false,
+        supports_docs: false,
+        supports_dm: true,
+        // 引用回复字段没有文档、官方 SDK 会丢
+        supports_quote_id: false,
+        requires_visible_anchor: true,
+        stream_max_sec: 0,
+        card_action_deadline_ms: 2000,
+        max_card_bytes: 0,
+        max_text_chars: 0,
+        max_upload_bytes: 0,
+    }
+}
+
+/// 企业微信智能机器人。前 9 个值与 edge 的 wecom 包（CC10）一致。
+pub fn wecom_v1() -> PlatformCapabilities {
+    PlatformCapabilities {
+        platform: "wecom".to_string(),
+        supports_thread: false,
+        supports_history: false,
+        supports_passive_listen: false,
+        supports_card_edit: false,
+        card_edit_window_sec: 0,
+        inbound_file_in_group: false,
+        proactive_requires_prior_message: true,
+        outbound_rate_per_min: 30,
+        // 只有 feedback_event 的赞 / 踩
+        supports_reactions_in: true,
+        supports_recall_event: false,
+        supports_edit_event: false,
+        supports_pins: false,
+        supports_message_search: false,
+        supports_docs: false,
+        supports_dm: true,
+        // 引用不带 message id：锚点只能靠可见的 #A 编号
+        supports_quote_id: false,
+        requires_visible_anchor: true,
+        stream_max_sec: 600,
+        card_action_deadline_ms: 5000,
+        max_card_bytes: 0,
+        max_text_chars: 0,
+        max_upload_bytes: 20_971_520,
+    }
+}

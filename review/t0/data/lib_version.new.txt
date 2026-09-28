@@ -1,0 +1,5 @@
+/// 契约版本。p0.1 是 Python 版；p0.2 = 同样的数据形状 + core/edge 进程边界 + 显式化的调用面；
+/// p1.0 = 对齐 Claude Tag 的 P1 批：钉钉 / 企微、出网档位、P1 领域类型（domain.rs）与五个新存储 trait
+/// （设计见 docs/p1/contract-p1.md）。新字段全部 serde(default)：旧 JSON / P0 的 SQLite 行照样能读。
+/// edge 的 EdgeStatus.contract_version 必须等于它，否则 core 拒绝起飞。
+pub const CONTRACT_VERSION: &str = "p1.0";

@@ -1,0 +1,874 @@
+        content: "[用户修改了消息] 新内容：x".into(),
+        attachments: vec![],
+        created_at: now,
+        message_id: Some("om_1".into()),
+        provider_extra: Map::new(),
+        sender_name: Some("张三".into()),
+    });
+    assert_eq!(
+        serde_json::to_value(TurnRole::SystemNote).unwrap(),
+        "system_note"
+    );
+}
+
+// ---------------------------------------------------------------- p1.0
+
+fn ts() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 9, 9, 1, 7, 0).unwrap()
+}
+
+fn obj(v: Value) -> Map<String, Value> {
+    v.as_object().unwrap().clone()
+}
+
+#[test]
+fn p0_json_without_p1_fields_still_loads() {
+    // P0 的 SQLite 行 / 旧 JSON 里没有任何 p1.0 字段：必须照样读进来，新字段取默认值
+    let s: Session = serde_json::from_value(json!({
+        "id": "s", "tenant_id": "default", "workspace_id": "w", "chat_id": "c", "kind": "task",
+        "anchor": {"platform": "feishu", "chat_id": "c", "message_id": "m"},
+        "created_by": "u", "created_at": "2026-09-09T01:07:00Z", "last_active_at": "2026-09-09T01:07:00Z"
+    }))
+    .unwrap();
+    assert!(s.meta.is_empty());
+    let t: Turn = serde_json::from_value(json!({
+        "session_id": "s", "seq": 0, "role": "user", "content": "x", "created_at": "2026-09-09T01:07:00Z"
+    }))
+    .unwrap();
+    assert_eq!((t.message_id.clone(), t.sender_name.clone()), (None, None));
+    assert!(t.provider_extra.is_empty());
+    let m: Message = serde_json::from_value(json!({"role": "assistant", "content": "x"})).unwrap();
+    assert!(m.provider_extra.is_empty());
+    let u: Usage = serde_json::from_value(json!({"input_tokens": 1})).unwrap();
+    assert_eq!(u.cache_write_tokens, 0);
+    let ev: NormalizedEvent = serde_json::from_value(json!({
+        "event_id": "e", "kind": "message", "platform": "feishu", "workspace_id": "w",
+        "chat_id": "c", "chat_type": "group", "sender_id": "s", "sender_kind": "human",
+        "text": "", "mentioned": true, "anchor": {"platform": "feishu", "chat_id": "c", "message_id": "m"},
+        "occurred_at": "2026-09-09T01:07:00Z"
+    }))
+    .unwrap();
+    assert!(ev.quote.is_none() && ev.reaction.is_none() && ev.external.is_none());
+    assert!(!ev.sender_external);
+    let card: ChecklistCard = serde_json::from_value(json!({
+        "task_id": "t", "task_no": "#A1", "title": "x", "initiator": "y", "started_at": "9:02", "status": "working"
+    }))
+    .unwrap();
+    assert!(card.links.is_empty() && card.approval.is_none());
+    let text: OutboundText = serde_json::from_value(json!({"chat_id": "c", "text": "t"})).unwrap();
+    assert!(text.mentions.is_empty() && text.dedupe_key.is_none());
+    let h: HistoryMessage = serde_json::from_value(json!({
+        "message_id": "m", "sender_id": "s", "sender_kind": "human", "text": "t",
+        "created_at": "2026-09-09T01:07:00Z"
+    }))
+    .unwrap();
+    assert!(h.updated_at.is_none() && !h.deleted && h.reply_to.is_none());
+    let ctx: ToolContext = serde_json::from_value(json!({
+        "tenant_id": "d", "workspace_id": "w", "chat_id": "c", "session_id": "s", "task_id": "t",
+        "session_token": "k"
+    }))
+    .unwrap();
+    assert!(ctx.initiator_id.is_none() && ctx.chat_type.is_none() && !ctx.initiator_external);
+    let caps: PlatformCapabilities = serde_json::from_value(json!({
+        "platform": "feishu", "supports_thread": true, "supports_history": true,
+        "supports_passive_listen": false, "supports_card_edit": true, "card_edit_window_sec": 1209600,
+        "inbound_file_in_group": true, "proactive_requires_prior_message": false,
+        "outbound_rate_per_min": 60
+    }))
+    .unwrap();
+    assert!(!caps.supports_dm && !caps.requires_visible_anchor);
+    assert_eq!(
+        (caps.card_action_deadline_ms, caps.max_upload_bytes),
+        (0, 0)
+    );
+    // 新字段为空时，Message / Turn 落盘的 JSON 与 p0.2 逐键相同
+    let v = serde_json::to_value(Message::text(Role::User, "hi")).unwrap();
+    assert!(v.get("provider_extra").is_none());
+    let v = serde_json::to_value(&t).unwrap();
+    assert!(v.get("provider_extra").is_none());
+}
+
+#[test]
+fn p1_event_shapes_round_trip() {
+    let v = rt(&event());
+    assert_eq!(v["quote"]["text"], "#A17 上次那张图");
+    assert_eq!(v["quote"]["message_id"], "om_0");
+    assert_eq!(v["sender_external"], false);
+
+    let mut r = event();
+    r.kind = EventKind::Reaction;
+    r.reaction = Some(ReactionEvent {
+        message_id: "om_bot".into(),
+        emoji: "THUMBSDOWN".into(),
+        thumbs_down: true,
+        added: true,
+    });
+    let v = rt(&r);
+    assert_eq!(v["kind"], "reaction");
+    assert_eq!(v["reaction"]["thumbs_down"], true);
+
+    let mut x = event();
+    x.kind = EventKind::External;
+    x.sender_external = true;
+    x.external = Some(ExternalEvent {
+        source: "gitlab".into(),
+        topic: "gitlab.merge_request".into(),
+        subject: "修登录".into(),
+        url: Some("https://git.example.test/mr/1".into()),
+        summary: "opened".into(),
+        payload: obj(json!({"object_attributes": {"iid": 1}})),
+    });
+    let v = rt(&x);
+    assert_eq!(v["kind"], "external");
+    assert_eq!(v["external"]["payload"]["object_attributes"]["iid"], 1);
+
+    let mut a = event();
+    a.card_action.as_mut().unwrap().action = CardActionKind::Approve;
+    assert_eq!(rt(&a)["card_action"]["action"], "approve");
+}
+
+#[test]
+fn p1_outbound_shapes_round_trip() {
+    let mut t = OutboundText::new("oc_1", "看一下");
+    t.mentions = vec!["ou_2".into()];
+    t.dedupe_key = Some("t1:final".into());
+    let v = rt(&t);
+    assert_eq!(v["mentions"], json!(["ou_2"]));
+    assert_eq!(v["dedupe_key"], "t1:final");
+
+    let h = HistoryMessage {
+        message_id: "om_2".into(),
+        sender_id: "ou_1".into(),
+        sender_kind: "human".into(),
+        sender_name: None,
+        text: "改过的".into(),
+        thread_id: None,
+        created_at: ts(),
+        updated_at: Some(ts()),
+        deleted: true,
+        reply_to: Some("om_0".into()),
+    };
+    rt(&h);
+    rt(&UserInfo {
+        user_id: "ou_1".into(),
+        name: "张三".into(),
+        is_external: false,
+        is_guest: true,
+    });
+    let c = rt(&ChatInfo {
+        chat_id: "oc_1".into(),
+        name: "研发群".into(),
+        chat_type: ChatType::Group,
+        is_public: Some(false),
+        is_external: true,
+        member_count: Some(12),
+    });
+    assert_eq!(c["chat_type"], "group");
+    rt(&SearchQuery {
+        query: "发布".into(),
+        chat_ids: vec![],
+        limit: 20,
+        since: Some(ts()),
+    });
+    rt(&SearchHit {
+        chat_id: "oc_1".into(),
+        message: h,
+        url: None,
+    });
+    let d = rt(&DocWrite {
+        doc_id: None,
+        title: "周报".into(),
+        markdown: "# 周报".into(),
+        share_chat_id: Some("oc_1".into()),
+        aigc_banner: true,
+    });
+    assert_eq!(d["aigc_banner"], true);
+    rt(&DocRef {
+        doc_id: "doxc1".into(),
+        url: "https://x.example.test/docx/doxc1".into(),
+        title: "周报".into(),
+    });
+    rt(&OAuthStart {
+        redirect_uri: "https://admin.example.test/cb".into(),
+        state: "s1".into(),
+    });
+    rt(&OAuthUrl {
+        url: "https://open.example.test/authorize?state=s1".into(),
+    });
+    rt(&OAuthCode {
+        code: "c1".into(),
+        redirect_uri: "https://admin.example.test/cb".into(),
+    });
+    assert_eq!(serde_json::to_value(ReactionKind::Muted).unwrap(), "muted");
+}
+
+#[test]
+fn sandbox_egress_shapes() {
+    assert_eq!(EgressPolicy::default().level, SandboxNetwork::None);
+    let pol = EgressPolicy {
+        level: SandboxNetwork::Trusted,
+        allow_hosts: vec!["*.example.test".into()],
+        credentials: vec![CredentialBinding {
+            host: "git.example.test".into(),
+            header: "Authorization".into(),
+            scheme: "Bearer".into(),
+            secret_ref: "gitlab_bot".into(),
+        }],
+        audit_tag: "t1".into(),
+    };
+    let v = rt(&pol);
+    assert_eq!(v["level"], "trusted");
+    assert_eq!(v["credentials"][0]["secret_ref"], "gitlab_bot");
+    let parsed: EgressPolicy = serde_json::from_value(json!({"level": "custom"})).unwrap();
+    assert!(parsed.allow_hosts.is_empty() && parsed.credentials.is_empty());
+    assert!(serde_json::from_value::<EgressPolicy>(json!({"level": "bridge"})).is_err());
+    let b = rt(&ExecRequest::bash("ls /work", 5));
+    assert_eq!(b["language"], "bash");
+}
+
+#[test]
+fn domain_types_round_trip() {
+    let org = ScopeRef {
+        kind: ScopeKind::Org,
+        id: "default".into(),
+    };
+    let chan = ScopeRef {
+        kind: ScopeKind::Channel,
+        id: "oc_1".into(),
+    };
+    let bundle = AccessBundle {
+        name: "研发".into(),
+        connections: vec![ConnectionRef {
+            id: "c1".into(),
+            kind: "gitlab".into(),
+            host: "git.example.test".into(),
+            secret_ref: "gitlab_bot".into(),
+            read_only: true,
+        }],
+        repos: vec![RepoGrant {
+            repo: "g/app".into(),
+            can_push: false,
+            default_branch: None,
+        }],
+        domains: vec!["pypi.example.test".into()],
+        skills: vec![Skill {
+            name: "周报".into(),
+            description: String::new(),
+            body: "# 周报".into(),
+        }],
+        instructions: "说中文".into(),
+        tools: vec![],
+        approval_required_tools: vec!["git_push".into()],
+    };
+    let s = ScopeSettings {
+        scope: chan.clone(),
+        enabled: Some(true),
+        respond_automatically: None,
+        network: Some(SandboxNetwork::Custom),
+        model: None,
+        external_chat_mode: None,
+        search_scope: Some(SearchScope::CurrentChat),
+        spend_limit_cny_month: Some(50.0),
+        instructions: None,
+        bundles: vec![bundle.clone()],
+        extra: Map::new(),
+        updated_by: "ou_admin".into(),
+        updated_at: Some(ts()),
+    };
+    let v = rt(&s);
+    assert_eq!(v["scope"]["kind"], "channel");
+    let parsed: ScopeSettings =
+        serde_json::from_value(json!({"scope": {"kind": "org", "id": "default"}})).unwrap();
+    assert!(parsed.enabled.is_none() && parsed.bundles.is_empty());
+
+    let mut eff = EffectiveSettings {
+        chain: vec![org, chan],
+        enabled: true,
+        respond_automatically: false,
+        network: SandboxNetwork::Custom,
+        model: String::new(),
+        external_chat_mode: ExternalChatMode::Restrict,
+        search_scope: SearchScope::JoinedChats,
+        spend_limit_cny_month: Some(50.0),
+        instructions: "说中文".into(),
+        bundle,
+        snapshot_hash: String::new(),
+    };
+    let h = eff.compute_snapshot_hash();
+    assert_eq!(h.len(), 64);
+    eff.snapshot_hash = h.clone();
+    assert_eq!(eff.compute_snapshot_hash(), h, "hash 不含它自己");
+    rt(&eff);
+    let mut other = eff.clone();
+    other.network = SandboxNetwork::Full;
+    assert_ne!(other.compute_snapshot_hash(), h, "设置变了 hash 就变");
+
+    rt(&MemoryEntry {
+        id: "m1".into(),
+        scope: MemoryScope::Channel,
+        scope_id: "oc_1".into(),
+        title: "发布流程".into(),
+        content: "周四发".into(),
+        created_by: "ou_1".into(),
+        created_at: ts(),
+        updated_at: ts(),
+        deleted_at: None,
+        deleted_by: None,
+    });
+    let r = Routine {
+        id: "r1".into(),
+        name: "日报".into(),
+        chat_id: "oc_1".into(),
+        prompt: "汇总今天的 MR".into(),
+        trigger: RoutineTrigger::Schedule {
+            schedule: Schedule {
+                kind: ScheduleKind::Cron,
+                at: None,
+                every_min: None,
+                cron: Some("0 18 * * 1-5".into()),
+                tz_name: "Asia/Shanghai".into(),
+                tz_offset_min: 480,
+            },
+        },
+        output: RoutineOutput::Chat {
+            chat_id: "oc_1".into(),
+            thread_id: None,
+        },
+        enabled: true,
+        created_by: "ou_1".into(),
+        created_at: ts(),
+        updated_at: ts(),
+        next_run_at: Some(ts()),
+        last_run_at: None,
+        last_task_id: None,
+    };
+    let v = rt(&r);
+    assert_eq!(v["trigger"]["kind"], "schedule");
+    assert_eq!(v["output"]["kind"], "chat");
+    let t: RoutineTrigger =
+        serde_json::from_value(json!({"kind": "external", "topic": "gitlab.merge_request"}))
+            .unwrap();
+    assert_eq!(
+        t,
+        RoutineTrigger::External {
+            topic: "gitlab.merge_request".into()
+        }
+    );
+    let sch: Schedule =
+        serde_json::from_value(json!({"kind": "once", "at": "2026-09-09T01:07:00Z"})).unwrap();
+    assert_eq!(
+        (sch.tz_name.as_str(), sch.tz_offset_min),
+        ("Asia/Shanghai", 480)
+    );
+    rt(&RoutineOutput::Dm {
+        user_id: "ou_1".into(),
+    });
+    rt(&RoutineTrigger::ChannelWatch {
+        chat_id: "oc_1".into(),
+        keyword: "故障".into(),
+    });
+    rt(&UsageRecord {
+        ts: ts(),
+        tenant_id: "default".into(),
+        chat_id: None,
+        user_id: "ou_1".into(),
+        task_id: Some("t1".into()),
+        kind: "model".into(),
+        model: "deepseek-chat".into(),
+        input_tokens: 10,
+        output_tokens: 5,
+        cached_tokens: 2,
+        cache_write_tokens: 1,
+        cost_cny: 0.01,
+    });
+    rt(&UsageSummary {
+        group_by: UsageGroupBy::User,
+        key: "ou_1".into(),
+        calls: 3,
+        input_tokens: 30,
+        output_tokens: 15,
+        cost_cny: 0.03,
+    });
+    let a = rt(&AuditEvent {
+        id: "a1".into(),
+        ts: ts(),
+        tenant_id: "default".into(),
+        category: AuditCategory::Memory,
+        action: "memory.update".into(),
+        actor_id: "ou_1".into(),
+        chat_id: Some("oc_1".into()),
+        target: Some("m1".into()),
+        detail: obj(json!({"before": "周三发", "after": "周四发"})),
+    });
+    assert_eq!(a["category"], "memory");
+    rt(&AuditQuery::default());
+    rt(&ApprovalDecision {
+        approval_id: "ap1".into(),
+        approved: true,
+        decided_by: "ou_lead".into(),
+        comment: None,
+        decided_at: ts(),
+    });
+    let ir = rt(&InternalRequest {
+        origin: TaskOrigin::Routine,
+        tenant_id: "default".into(),
+        workspace_id: "w".into(),
+        chat_id: "oc_1".into(),
+        thread_id: None,
+        text: "汇总今天的 MR".into(),
+        initiator_id: "ou_1".into(),
+        initiator_name: Some("张三".into()),
+        routine_id: Some("r1".into()),
+        meta: Map::new(),
+    });
+    assert_eq!(ir["origin"], "routine");
+    let q = rt(&TaskQuery {
+        statuses: OPEN_TASK_STATUSES.to_vec(),
+        ..Default::default()
+    });
+    assert_eq!(q["statuses"][4], "awaiting_approval");
+    rt(&MessageIndexEntry {
+        chat_id: "oc_1".into(),
+        message_id: "om_1".into(),
+        session_id: "s1".into(),
+        task_id: None,
+        outbound: true,
+    });
+    rt(&SteerMessage {
+        text: "换成柱状图".into(),
+        platform_user_id: "ou_2".into(),
+        sender_name: Some("李四".into()),
+        message_id: Some("om_3".into()),
+    });
+}
+
+#[test]
+fn network_event_reads_edge_jsonl_line() {
+    // edge 出网代理写出的一行（13 个键，ts 为 UTC 6 位小数 + Z）
+    let line = r#"{"ts":"2026-09-28T01:02:03.123456Z","audit_tag":"t1","level":"trusted","method":"CONNECT","host":"pypi.tuna.tsinghua.edu.cn","port":443,"decision":"allow","reason":"","status":200,"bytes_up":512,"bytes_down":40960,"duration_ms":87,"injected":false}"#;
+    let e: NetworkEvent = serde_json::from_str(line).unwrap();
+    assert_eq!((e.port, e.status, e.bytes_down), (443, 200, 40960));
+    assert_eq!(e.ts.timestamp_subsec_micros(), 123_456);
+    let v = serde_json::to_value(&e).unwrap();
+    assert_eq!(v.as_object().unwrap().len(), 13, "13 个键");
+    rt(&e);
+    let denied = r#"{"ts":"2026-09-28T01:02:03.000000Z","audit_tag":"","level":"","method":"CONNECT","host":"example.test","port":443,"decision":"deny","reason":"unknown_token","status":407,"bytes_up":0,"bytes_down":0,"duration_ms":0,"injected":false}"#;
+    let d: NetworkEvent = serde_json::from_str(denied).unwrap();
+    assert_eq!((d.level.as_str(), d.status), ("", 407));
+}
+
+#[test]
+fn services_default_and_debug() {
+    let s = Services::default();
+    assert!(s.scope.is_none() && s.memory.is_none() && s.routines.is_none());
+    assert!(s.usage.is_none() && s.audit.is_none());
+    assert_eq!(
+        format!("{:?}", s.clone()),
+        "Services { scope: false, memory: false, routines: false, usage: false, audit: false }"
+    );
+}
+
+#[test]
+fn model_error_p1_variants() {
+    let e = ModelError::RateLimited {
+        retry_after_ms: Some(1500),
+        message: "429".into(),
+    };
+    assert_eq!(e.to_string(), "模型服务限流：429");
+    assert!(matches!(
+        e,
+        ModelError::RateLimited {
+            retry_after_ms: Some(1500),
+            ..
+        }
+    ));
+    assert_eq!(
+        ModelError::Auth("401".into()).to_string(),
+        "模型服务鉴权失败：401"
+    );
+    assert_eq!(
+        ModelError::BadRequest("400".into()).to_string(),
+        "模型服务拒绝请求：400"
+    );
+}
+
+// —— 只实现 p0.2 方法的替身：p1.0 的新方法全靠默认实现，照样编得过 ——
+
+struct OldPlatform;
+
+#[async_trait::async_trait]
+impl PlatformPort for OldPlatform {
+    fn capabilities(&self) -> PlatformCapabilities {
+        feishu_p0()
+    }
+    async fn start(&self, _on_event: EventHandler) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    async fn stop(&self) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    async fn send_text(&self, _msg: &OutboundText) -> Result<SendResult, PlatformError> {
+        unreachable!()
+    }
+    async fn send_card(
+        &self,
+        _chat_id: &str,
+        _reply_to: Option<&str>,
+        _card: &ChecklistCard,
+    ) -> Result<SendResult, PlatformError> {
+        unreachable!()
+    }
+    async fn update_card(
+        &self,
+        _card_id: &str,
+        _card: &ChecklistCard,
+    ) -> Result<(), PlatformError> {
+        unreachable!()
+    }
+    async fn send_file(&self, _msg: &OutboundFile) -> Result<SendResult, PlatformError> {
+        unreachable!()
+    }
+    async fn add_reaction(
+        &self,
+        _message_id: &str,
+        _kind: ReactionKind,
+    ) -> Result<(), PlatformError> {
+        unreachable!()
+    }
+    async fn read_history(
+        &self,
+        _chat_id: &str,
+        _limit: u32,
+        _thread_id: Option<&str>,
+    ) -> Result<Vec<HistoryMessage>, PlatformError> {
+        unreachable!()
+    }
+    async fn read_document(&self, _url_or_token: &str) -> Result<DocumentContent, PlatformError> {
+        unreachable!()
+    }
+    async fn download_file(
+        &self,
+        _message_id: &str,
+        _file_key: &str,
+    ) -> Result<Vec<u8>, PlatformError> {
+        unreachable!()
+    }
+}
+
+struct OldStore;
+
+#[async_trait::async_trait]
+impl SessionStore for OldStore {
+    async fn init(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn close(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn get_session(&self, _session_id: &str) -> Result<Option<Session>, StoreError> {
+        Ok(None)
+    }
+    async fn find_session_by_thread(
+        &self,
+        _chat_id: &str,
+        _thread_id: &str,
+    ) -> Result<Option<Session>, StoreError> {
+        Ok(None)
+    }
+    async fn create_session(&self, _s: &Session) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn update_session(&self, _s: &Session) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn append_turn(&self, _t: &Turn) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn list_turns(&self, _session_id: &str, _limit: u32) -> Result<Vec<Turn>, StoreError> {
+        Ok(vec![])
+    }
+    async fn next_turn_seq(&self, _session_id: &str) -> Result<u64, StoreError> {
+        Ok(0)
+    }
+    async fn create_task(&self, _t: &Task) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn update_task(&self, _t: &Task) -> Result<(), StoreError> {
+        Ok(())
+    }
+    async fn get_task(&self, _task_id: &str) -> Result<Option<Task>, StoreError> {
+        Ok(None)
+    }
+    async fn list_active_tasks(&self, _chat_id: &str) -> Result<Vec<Task>, StoreError> {
+        Ok(vec![])
+    }
+    async fn next_task_no(&self, _tenant_id: &str) -> Result<String, StoreError> {
+        Ok("#A1".into())
+    }
+    async fn seen_event(&self, _event_id: &str) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+    async fn recover_orphan_tasks(&self) -> Result<Vec<Task>, StoreError> {
+        Ok(vec![])
+    }
+}
+
+struct OldSandbox;
+
+#[async_trait::async_trait]
+impl SandboxPort for OldSandbox {
+    async fn acquire(&self, task_id: &str, _spec: &SandboxSpec) -> Result<String, SandboxError> {
+        Ok(format!("sb-{task_id}"))
+    }
+    async fn exec(
+        &self,
+        _sandbox_id: &str,
+        _req: &ExecRequest,
+    ) -> Result<ExecResult, SandboxError> {
+        unreachable!()
+    }
+    async fn put_file(
+        &self,
+        _sandbox_id: &str,
+        _path: &str,
+        _data: &[u8],
+    ) -> Result<(), SandboxError> {
+        unreachable!()
+    }
+    async fn get_file(&self, _sandbox_id: &str, _path: &str) -> Result<Vec<u8>, SandboxError> {
+        unreachable!()
+    }
+    async fn list_files(&self, _sandbox_id: &str) -> Result<Vec<String>, SandboxError> {
+        unreachable!()
+    }
+    async fn touch(&self, _sandbox_id: &str) -> Result<(), SandboxError> {
+        Ok(())
+    }
+    async fn release(&self, _sandbox_id: &str) -> Result<(), SandboxError> {
+        Ok(())
+    }
+    async fn reap_idle(&self, _idle_sec: u32) -> Result<Vec<String>, SandboxError> {
+        Ok(vec![])
+    }
+}
+
+struct OldPlane;
+
+#[async_trait::async_trait]
+impl ControlPlane for OldPlane {
+    async fn handle_event(&self, _ev: NormalizedEvent) -> Result<(), IngressError> {
+        Ok(())
+    }
+    async fn run_forever(&self) {}
+    async fn run_pending(&self) {}
+    fn pending(&self) -> usize {
+        0
+    }
+    async fn join(&self) {}
+    async fn cancel_task(
+        &self,
+        task: Task,
+        _reply_to: Option<String>,
+        _chat_id: Option<String>,
+        _notify: bool,
+    ) -> Task {
+        task
+    }
+    fn counters(&self) -> Map<String, Value> {
+        Map::new()
+    }
+}
+
+#[test]
+fn old_impls_compile_and_new_methods_are_unimplemented() {
+    use futures::executor::block_on;
+
+    fn unimpl(e: PlatformError) -> String {
+        assert_eq!(e.code, "unimplemented");
+        assert!(!e.retryable);
+        e.message.split(':').next().unwrap().to_string()
+    }
+    let p = OldPlatform;
+    let text = OutboundText::new("c", "t");
+    let doc = DocRef {
+        doc_id: "d".into(),
+        url: "u".into(),
+        title: String::new(),
+    };
+    let names = [
+        unimpl(block_on(p.edit_text("om", &text)).unwrap_err()),
+        unimpl(block_on(p.send_dm("ou", &text)).unwrap_err()),
+        unimpl(block_on(p.get_user("ou")).unwrap_err()),
+        unimpl(block_on(p.get_chat("oc")).unwrap_err()),
+        unimpl(block_on(p.is_member("oc", "ou")).unwrap_err()),
+        unimpl(block_on(p.list_chats()).unwrap_err()),
+        unimpl(block_on(p.list_pins("oc")).unwrap_err()),
+        unimpl(
+            block_on(p.search_messages(&SearchQuery {
+                query: "q".into(),
+                chat_ids: vec![],
+                limit: 0,
+                since: None,
+            }))
+            .unwrap_err(),
+        ),
+        unimpl(
+            block_on(p.write_doc(&DocWrite {
+                doc_id: None,
+                title: "t".into(),
+                markdown: String::new(),
+                share_chat_id: None,
+                aigc_banner: false,
+            }))
+            .unwrap_err(),
+        ),
+        unimpl(block_on(p.delete_doc(&doc)).unwrap_err()),
+        unimpl(
+            block_on(p.oauth_authorize_url(&OAuthStart {
+                redirect_uri: "r".into(),
+                state: "s".into(),
+            }))
+            .unwrap_err(),
+        ),
+        unimpl(
+            block_on(p.oauth_exchange(&OAuthCode {
+                code: "c".into(),
+                redirect_uri: "r".into(),
+            }))
+            .unwrap_err(),
+        ),
+    ];
+    assert_eq!(
+        names,
+        [
+            "edit_text",
+            "send_dm",
+            "get_user",
+            "get_chat",
+            "is_member",
+            "list_chats",
+            "list_pins",
+            "search_messages",
+            "write_doc",
+            "delete_doc",
+            "oauth_authorize_url",
+            "oauth_exchange"
+        ]
+    );
+
+    let s = OldStore;
+    let now = ts();
+    let task: Task = serde_json::from_value(json!({
+        "id": "t", "session_id": "s", "task_no": "#A1", "session_token": "x", "created_by": "u",
+        "created_at": "2026-09-09T01:07:00Z", "updated_at": "2026-09-09T01:07:00Z"
+    }))
+    .unwrap();
+    let turn: Turn = serde_json::from_value(json!({
+        "session_id": "s", "seq": 0, "role": "user", "content": "x", "created_at": "2026-09-09T01:07:00Z"
+    }))
+    .unwrap();
+    let entry = MessageIndexEntry {
+        chat_id: "c".into(),
+        message_id: "m".into(),
+        session_id: "s".into(),
+        task_id: None,
+        outbound: false,
+    };
+    let errs = [
+        block_on(s.find_task_by_no("c", "#A1"))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.list_open_tasks("c")).unwrap_err().to_string(),
+        block_on(s.index_message(&entry)).unwrap_err().to_string(),
+        block_on(s.find_session_by_message("c", "m"))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.recent_sessions_by_sender("c", "u", now))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.find_open_session("c", SessionKind::Dm))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.list_sessions_inactive_since(now))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.get_turn_by_message("s", "m"))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.update_turn(&turn)).unwrap_err().to_string(),
+        block_on(s.list_tasks(&TaskQuery::default()))
+            .unwrap_err()
+            .to_string(),
+        block_on(s.purge_chat_content("c")).unwrap_err().to_string(),
+        block_on(s.prune_seen_events(now)).unwrap_err().to_string(),
+        block_on(s.unsee_event("e")).unwrap_err().to_string(),
+        block_on(s.update_task_if(&task, &[TaskStatus::Working]))
+            .unwrap_err()
+            .to_string(),
+    ];
+    assert_eq!(
+        errs,
+        [
+            "unimplemented: find_task_by_no",
+            "unimplemented: list_open_tasks",
+            "unimplemented: index_message",
+            "unimplemented: find_session_by_message",
+            "unimplemented: recent_sessions_by_sender",
+            "unimplemented: find_open_session",
+            "unimplemented: list_sessions_inactive_since",
+            "unimplemented: get_turn_by_message",
+            "unimplemented: update_turn",
+            "unimplemented: list_tasks",
+            "unimplemented: purge_chat_content",
+            "unimplemented: prune_seen_events",
+            "unimplemented: unsee_event",
+            "unimplemented: update_task_if"
+        ]
+    );
+
+    // SandboxPort::acquire_scoped：none 档转调 acquire，其余档位 Unavailable
+    let sb = OldSandbox;
+    let spec = SandboxSpec::new("img:1");
+    assert_eq!(
+        block_on(sb.acquire_scoped("s1", &spec, &EgressPolicy::default())).unwrap(),
+        "sb-s1"
+    );
+    for level in [
+        SandboxNetwork::Trusted,
+        SandboxNetwork::Custom,
+        SandboxNetwork::Full,
+    ] {
+        let pol = EgressPolicy {
+            level,
+            ..Default::default()
+        };
+        let err = block_on(sb.acquire_scoped("s1", &spec, &pol)).unwrap_err();
+        assert_eq!(err.kind, SandboxErrorKind::Unavailable, "{level}");
+    }
+
+    let cp = OldPlane;
+    let req = InternalRequest {
+        origin: TaskOrigin::Followup,
+        tenant_id: "default".into(),
+        workspace_id: "w".into(),
+        chat_id: "c".into(),
+        thread_id: None,
+        text: "跟进".into(),
+        initiator_id: "u".into(),
+        initiator_name: None,
+        routine_id: None,
+        meta: Map::new(),
+    };
+    let e = block_on(cp.submit_internal(&req)).unwrap_err();
+    assert_eq!(e.to_string(), "unimplemented: submit_internal");
+
+    let hooks = RunHooks::none();
+    assert!((hooks.drain_steer)().is_empty());
+    assert!(!(hooks.is_cancelled)());
+    assert_eq!((hooks.cancelled_by)(), None);
+    assert!((hooks.take_decision)().is_none());
+}
+
+#[test]
+fn protocol_gateway_sandbox_evidence_models() {
+    rt(&Message {

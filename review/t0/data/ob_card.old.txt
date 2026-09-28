@@ -1,0 +1,21 @@
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChecklistCard {
+    pub task_id: String,
+    /// "#A17"
+    pub task_no: String,
+    /// 任务一句话（≤40 字，worker 截断）
+    pub title: String,
+    /// 发起人显示名
+    pub initiator: String,
+    /// "9:02"
+    pub started_at: String,
+    pub status: CardStatus,
+    #[serde(default)]
+    pub items: Vec<ChecklistItemView>,
+    /// "预计 2 分钟 · 已用 ¥0.12"
+    #[serde(default)]
+    pub footer: String,
+    /// 默认 [stop]
+    #[serde(default = "default_actions")]
+    pub actions: Vec<CardActionKind>,
+}

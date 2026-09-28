@@ -1,0 +1,3 @@
+        "core/crates/contracts/Cargo.toml",
+        "core/crates/contracts/src/domain.rs",
+        "core/crates/proto/Cargo.toml",

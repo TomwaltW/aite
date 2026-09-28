@@ -1,0 +1,3 @@
+    /// 顺序：校验 session_token → 查工具（含注册表的 enabled 谓词）→ before_call 策略钩子
+    /// → 按 ToolSpec.parameters 校验 arguments → 执行（带超时）→ 截断 content → 返回
+    /// 永远不失败：所有失败以 ToolResult{ok:false, error} 表达（策略拒绝 = error.code denied）

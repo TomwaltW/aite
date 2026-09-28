@@ -1,0 +1,139 @@
+#[test]
+fn constants() {
+    assert_eq!(CONTRACT_VERSION, "p1.0");
+    assert_eq!(MAX_TOOL_CONTENT_CHARS, 12_000);
+    assert_eq!(DEFAULT_TOOL_TIMEOUT_SEC, 60);
+    assert_eq!(MAX_EXEC_OUTPUT_CHARS, 20_000);
+    assert_eq!(sandbox::EXEC_TIMEOUT_EXIT_CODE, 124);
+    assert_eq!(
+        ACTIVE_TASK_STATUSES,
+        [
+            TaskStatus::Created,
+            TaskStatus::Planning,
+            TaskStatus::Working
+        ]
+    );
+}
+
+#[test]
+fn open_task_statuses_are_frozen() {
+    assert_eq!(
+        OPEN_TASK_STATUSES,
+        [
+            TaskStatus::Created,
+            TaskStatus::Planning,
+            TaskStatus::Answering,
+            TaskStatus::Working,
+            TaskStatus::AwaitingApproval,
+        ]
+    );
+    assert!(TaskStatus::AwaitingApproval.is_open() && TaskStatus::Answering.is_open());
+    assert!(!TaskStatus::Delivered.is_open() && !TaskStatus::Cancelled.is_open());
+    // 孤儿恢复的口径不变：待审批任务不是「活跃」任务
+    assert!(!TaskStatus::AwaitingApproval.is_active());
+}
+
+#[test]
+fn p1_enum_string_forms() {
+    assert_eq!(EventKind::ALL.len(), 8);
+    assert_eq!(EventKind::Reaction.as_str(), "reaction");
+    assert_eq!(
+        "external".parse::<EventKind>().unwrap(),
+        EventKind::External
+    );
+    assert_eq!(CardActionKind::ALL.len(), 5);
+    assert_eq!(
+        [
+            CardActionKind::Approve.as_str(),
+            CardActionKind::Reject.as_str(),
+            CardActionKind::Submit.as_str()
+        ],
+        ["approve", "reject", "submit"]
+    );
+    assert_eq!(ReactionKind::ALL.len(), 4);
+    assert_eq!(ReactionKind::Muted.as_str(), "muted");
+    let nets: Vec<&str> = SandboxNetwork::ALL.iter().map(|n| n.as_str()).collect();
+    assert_eq!(nets, ["none", "trusted", "custom", "full"]);
+    assert_eq!(ExecLanguage::ALL.len(), 2);
+    assert_eq!(ExecLanguage::Bash.as_str(), "bash");
+    assert_eq!(ModelVendor::ALL.len(), 8);
+    assert_eq!(
+        "selfhost".parse::<ModelVendor>().unwrap(),
+        ModelVendor::Selfhost
+    );
+    let vendors: Vec<&str> = ModelVendor::ALL.iter().map(|v| v.as_str()).collect();
+    assert_eq!(
+        vendors,
+        [
+            "generic", "deepseek", "qwen", "glm", "kimi", "doubao", "minimax", "selfhost"
+        ]
+    );
+    assert_eq!(ThinkingMode::ALL.len(), 3);
+    let platforms: Vec<&str> = PlatformChoice::ALL.iter().map(|p| p.as_str()).collect();
+    assert_eq!(platforms, ["feishu", "dingtalk", "wecom", "fake"]);
+    assert_eq!(SearchProvider::ALL.len(), 4);
+    assert_eq!(GitProvider::ALL.len(), 6);
+    assert_eq!(PagesProvider::PlatformDoc.as_str(), "platform_doc");
+    assert_eq!(ScopeKind::ALL.len(), 4);
+    assert_eq!(ExternalChatMode::ChannelOnly.as_str(), "channel_only");
+    assert_eq!(SearchScope::JoinedChats.as_str(), "joined_chats");
+    assert_eq!(MemoryScope::ALL.len(), 3);
+    assert_eq!(ScheduleKind::ALL.len(), 3);
+    assert_eq!(BudgetScope::ALL.len(), 4);
+    assert_eq!(UsageGroupBy::ALL.len(), 3);
+    assert_eq!(AuditCategory::ALL.len(), 9);
+    let origins: Vec<&str> = TaskOrigin::ALL.iter().map(|o| o.as_str()).collect();
+    assert_eq!(
+        origins,
+        [
+            "routine", "followup", "ambient", "fork", "external", "admin"
+        ]
+    );
+}
+
+#[test]
+fn capability_profiles_p1() {
+    // feishu_p0：前 9 个值由 feishu_p0_capabilities 钉；这里钉 p1.0 的 14 个新位
+    let f = feishu_p0();
+    assert!(f.supports_reactions_in && f.supports_recall_event && !f.supports_edit_event);
+    assert!(f.supports_pins && !f.supports_message_search && f.supports_docs && f.supports_dm);
+    assert!(f.supports_quote_id && !f.requires_visible_anchor);
+    assert_eq!(
+        (
+            f.stream_max_sec,
+            f.card_action_deadline_ms,
+            f.max_card_bytes,
+            f.max_text_chars,
+            f.max_upload_bytes
+        ),
+        (600, 3000, 30_720, 0, 31_457_280)
+    );
+
+    let d = dingtalk_v1();
+    assert_eq!(d.platform, "dingtalk");
+    assert!(!d.supports_thread && !d.supports_history && !d.supports_passive_listen);
+    assert!(d.supports_card_edit && !d.inbound_file_in_group);
+    assert!(!d.proactive_requires_prior_message);
+    assert_eq!((d.card_edit_window_sec, d.outbound_rate_per_min), (0, 20));
+    assert!(!d.supports_reactions_in && !d.supports_quote_id && d.requires_visible_anchor);
+    assert!(d.supports_dm && !d.supports_docs && !d.supports_pins);
+    assert_eq!(d.card_action_deadline_ms, 2000);
+    assert_eq!((d.stream_max_sec, d.max_upload_bytes), (0, 0));
+
+    let w = wecom_v1();
+    assert_eq!(w.platform, "wecom");
+    assert!(!w.supports_thread && !w.supports_history && !w.supports_passive_listen);
+    assert!(!w.supports_card_edit && !w.inbound_file_in_group);
+    assert!(w.proactive_requires_prior_message);
+    assert_eq!((w.card_edit_window_sec, w.outbound_rate_per_min), (0, 30));
+    assert!(w.supports_reactions_in && !w.supports_quote_id && w.requires_visible_anchor);
+    assert!(w.supports_dm);
+    assert_eq!(
+        (
+            w.stream_max_sec,
+            w.card_action_deadline_ms,
+            w.max_upload_bytes
+        ),
+        (600, 5000, 20 * 1024 * 1024)
+    );
+}

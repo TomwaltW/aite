@@ -1,0 +1,32 @@
+str_enum! {
+    ModelProvider { OpenaiCompat => "openai_compat", Scripted => "scripted" }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelConfig {
+    pub provider: ModelProvider,
+    pub base_url: String,
+    pub api_key_env: String,
+    pub model: String,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    /// 元/百万 token，只用于卡片上的"已用 ¥"
+    pub price_in_per_mtok: f64,
+    pub price_out_per_mtok: f64,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            provider: ModelProvider::OpenaiCompat,
+            base_url: String::new(),
+            api_key_env: "AITE_MODEL_API_KEY".into(),
+            model: String::new(),
+            max_tokens: 4096,
+            temperature: 0.0,
+            price_in_per_mtok: 0.0,
+            price_out_per_mtok: 0.0,
+        }
+    }
+}

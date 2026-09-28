@@ -1,0 +1,16 @@
+  rpc DownloadFile(DownloadFileRequest) returns (DownloadFileResponse);
+
+  // —— p1.0 新增。adapter 做不到的回 UNIMPLEMENTED（core 映射成 code "unimplemented"、不重试）——
+  rpc EditText(EditTextRequest) returns (EditTextResponse);           // 原地改一条已发出的文本消息
+  rpc SendDirect(SendDirectRequest) returns (SendResult);             // 私聊某人
+  rpc GetUser(GetUserRequest) returns (UserInfo);
+  rpc GetChat(GetChatRequest) returns (ChatInfo);
+  rpc CheckMember(CheckMemberRequest) returns (CheckMemberResponse);
+  rpc ListChats(ListChatsRequest) returns (ListChatsResponse);        // bot 所在的群
+  rpc ListPins(ListPinsRequest) returns (ListPinsResponse);
+  rpc SearchMessages(SearchQuery) returns (SearchMessagesResponse);
+  rpc WriteDoc(DocWrite) returns (DocRef);                            // 写 / 更新平台云文档
+  rpc DeleteDoc(DeleteDocRequest) returns (DeleteDocResponse);        // 删除应用建的云文档，至少撤销群共享
+  rpc OAuthAuthorizeUrl(OAuthStart) returns (OAuthUrl);               // 管理台登录：授权地址
+  rpc OAuthExchange(OAuthCode) returns (UserInfo);                    // 管理台登录：换回用户
+}

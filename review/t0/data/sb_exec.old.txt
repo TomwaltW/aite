@@ -1,0 +1,15 @@
+impl ExecRequest {
+    pub fn python(code: impl Into<String>, timeout_sec: u32) -> Self {
+        Self {
+            language: ExecLanguage::Python,
+            code: code.into(),
+            timeout_sec,
+        }
+    }
+    fn default_language() -> ExecLanguage {
+        ExecLanguage::Python
+    }
+    fn default_timeout_sec() -> u32 {
+        120
+    }
+}

@@ -1,0 +1,12 @@
+        footer: "已用 1 步 · ¥0.00".into(),
+        actions: vec![CardActionKind::Stop, CardActionKind::Evidence],
+        links: vec![CardLink {
+            label: "配置".into(),
+            url: "https://admin.example/chats/oc_1".into(),
+        }],
+        approval: Some(ApprovalPrompt {
+            approval_id: "ap1".into(),
+            summary: "推送到 main".into(),
+            detail: None,
+        }),
+    };

@@ -1,0 +1,17 @@
+/// 控制面注入给 worker 的两个同步回调。
+#[derive(Clone)]
+pub struct RunHooks {
+    /// 取走并清空该任务排队中的追问（steer），每步开始前调用
+    pub drain_steer: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// 任务是否已被 !stop / 卡片停止
+    pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl RunHooks {
+    pub fn none() -> Self {
+        Self {
+            drain_steer: Arc::new(Vec::new),
+            is_cancelled: Arc::new(|| false),
+        }
+    }
+}

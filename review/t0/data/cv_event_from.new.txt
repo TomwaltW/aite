@@ -1,0 +1,93 @@
+impl From<Quote> for pb::Quote {
+    fn from(q: Quote) -> Self {
+        pb::Quote {
+            message_id: q.message_id,
+            sender_id: q.sender_id,
+            text: q.text,
+        }
+    }
+}
+impl From<pb::Quote> for Quote {
+    fn from(q: pb::Quote) -> Self {
+        Quote {
+            message_id: q.message_id,
+            sender_id: q.sender_id,
+            text: q.text,
+        }
+    }
+}
+
+impl From<ReactionEvent> for pb::ReactionEvent {
+    fn from(r: ReactionEvent) -> Self {
+        pb::ReactionEvent {
+            message_id: r.message_id,
+            emoji: r.emoji,
+            thumbs_down: r.thumbs_down,
+            added: r.added,
+        }
+    }
+}
+impl From<pb::ReactionEvent> for ReactionEvent {
+    fn from(r: pb::ReactionEvent) -> Self {
+        ReactionEvent {
+            message_id: r.message_id,
+            emoji: r.emoji,
+            thumbs_down: r.thumbs_down,
+            added: r.added,
+        }
+    }
+}
+
+impl From<ExternalEvent> for pb::ExternalEvent {
+    fn from(x: ExternalEvent) -> Self {
+        pb::ExternalEvent {
+            source: x.source,
+            topic: x.topic,
+            subject: x.subject,
+            url: x.url,
+            summary: x.summary,
+            payload: Some(map_to_struct(&x.payload)),
+        }
+    }
+}
+impl From<pb::ExternalEvent> for ExternalEvent {
+    fn from(x: pb::ExternalEvent) -> Self {
+        ExternalEvent {
+            source: x.source,
+            topic: x.topic,
+            subject: x.subject,
+            url: x.url,
+            summary: x.summary,
+            payload: struct_to_map(x.payload),
+        }
+    }
+}
+
+impl From<NormalizedEvent> for pb::NormalizedEvent {
+    fn from(e: NormalizedEvent) -> Self {
+        pb::NormalizedEvent {
+            event_id: e.event_id,
+            kind: pb::EventKind::from(e.kind) as i32,
+            platform: e.platform,
+            tenant_id: e.tenant_id,
+            workspace_id: e.workspace_id,
+            chat_id: e.chat_id,
+            chat_type: pb::ChatType::from(e.chat_type) as i32,
+            sender_id: e.sender_id,
+            sender_kind: pb::SenderKind::from(e.sender_kind) as i32,
+            sender_name: e.sender_name,
+            text: e.text,
+            raw_text: e.raw_text,
+            mentioned: e.mentioned,
+            anchor: Some(e.anchor.into()),
+            attachments: e.attachments.into_iter().map(Into::into).collect(),
+            card_action: e.card_action.map(Into::into),
+            occurred_at: Some(chrono_to_ts(e.occurred_at)),
+            raw: Some(map_to_struct(&e.raw)),
+            quote: e.quote.map(Into::into),
+            reaction: e.reaction.map(Into::into),
+            external: e.external.map(Into::into),
+            sender_external: e.sender_external,
+        }
+    }
+}

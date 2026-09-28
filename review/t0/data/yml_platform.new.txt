@@ -1,0 +1,1 @@
+platform: feishu          # feishu | dingtalk | wecom | fake（一部署一个平台，选哪个就读哪一段）

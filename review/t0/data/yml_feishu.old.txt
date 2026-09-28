@@ -1,0 +1,6 @@
+feishu:
+  app_id_env: FEISHU_APP_ID
+  app_secret_env: FEISHU_APP_SECRET
+  bot_name: Aite
+  bot_open_id_env: FEISHU_BOT_OPEN_ID
+  history_window: 50

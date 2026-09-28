@@ -1,0 +1,4 @@
+  string platform = 6;                 // "feishu" | "dingtalk" | "wecom" | "fake"
+  bool egress_ok = 7;                  // 出网代理在跑
+  bool http_ingress_ok = 8;            // HTTP 入口（外部 webhook）在听；没配就是 false
+}

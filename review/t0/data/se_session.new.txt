@@ -1,0 +1,7 @@
+    pub last_active_at: DateTime<Utc>,
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
+    /// 开放通道：muted / page_id / forked_from / 频道会话计数……（键登记在 docs/p1/contract-p1.md §11）
+    #[serde(default)]
+    pub meta: Map<String, Value>,
+}

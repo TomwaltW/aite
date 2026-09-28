@@ -1,0 +1,6 @@
+  CARD_ACTION_KIND_STOP = 1;
+  CARD_ACTION_KIND_EVIDENCE = 2;
+  CARD_ACTION_KIND_APPROVE = 3;        // 审批通过
+  CARD_ACTION_KIND_REJECT = 4;         // 审批拒绝
+  CARD_ACTION_KIND_SUBMIT = 5;         // 表单提交（value 里带表单）
+}

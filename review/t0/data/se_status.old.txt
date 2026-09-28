@@ -1,0 +1,19 @@
+/// SessionStore.list_active_tasks 的口径：status in (created, planning, working)。
+pub const ACTIVE_TASK_STATUSES: [TaskStatus; 3] = [
+    TaskStatus::Created,
+    TaskStatus::Planning,
+    TaskStatus::Working,
+];
+
+impl TaskStatus {
+    pub fn is_active(self) -> bool {
+        ACTIVE_TASK_STATUSES.contains(&self)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Delivered | TaskStatus::Failed | TaskStatus::Cancelled
+        )
+    }
+}

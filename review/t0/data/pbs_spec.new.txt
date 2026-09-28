@@ -1,0 +1,23 @@
+message SandboxSpec {
+  string image = 1;
+  double cpu = 2;                      // 默认 1.0
+  int32 mem_mb = 3;                    // 默认 1024
+  string network = 4;                  // "none"（空串同此）| "trusted" | "custom" | "full"；其余拒。出网细节在 EgressPolicy
+  string workdir = 5;                  // 默认 "/work"
+}
+
+// 出网代理替沙箱注入的凭证：只有名字，取值由 edge 持有，永不过 gRPC。
+message CredentialBinding {
+  string host = 1;                     // 目标主机（精确主机名，可带 :端口）
+  string header = 2;                   // 注入哪个请求头，如 "Authorization"
+  string scheme = 3;                   // 头值前缀，如 "Bearer"；空 = 原样
+  string secret_ref = 4;               // edge 侧密钥的名字
+}
+
+// 一个沙箱的出网策略。level 取值同 SandboxSpec.network。
+message EgressPolicy {
+  string level = 1;
+  repeated string allow_hosts = 2;     // 精确主机名或 "*.后缀"，可带 :端口；不带端口 = 只放 80/443
+  repeated CredentialBinding credentials = 3;
+  string audit_tag = 4;                // 审计行里的归属标签
+}

@@ -1,0 +1,10 @@
+str_enum! {
+    EventKind {
+        Message => "message",
+        MessageEdited => "message_edited",
+        MessageDeleted => "message_deleted",
+        CardAction => "card_action",
+        BotAdded => "bot_added",
+        MemberChanged => "member_changed",
+    }
+}

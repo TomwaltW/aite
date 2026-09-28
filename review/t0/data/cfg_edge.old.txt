@@ -1,0 +1,24 @@
+/// core ↔ edge 的进程边界（proto/aite/v1/edge.proto）。socket 路径相对仓库根。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EdgeConfig {
+    /// edge 监听：PlatformService / SandboxService / EdgeStatusService
+    pub edge_socket: String,
+    /// core 监听：IngressService
+    pub core_socket: String,
+    /// edge 调 HandleEvent 的 deadline（§3.3 "on_event 1s 内返回"）
+    pub handle_event_deadline_ms: u64,
+    /// 两边 gRPC 的最大消息体（文件走 bytes）
+    pub max_message_mb: u32,
+}
+
+impl Default for EdgeConfig {
+    fn default() -> Self {
+        Self {
+            edge_socket: "data/run/aite-edge.sock".into(),
+            core_socket: "data/run/aite-core.sock".into(),
+            handle_event_deadline_ms: 1000,
+            max_message_mb: 64,
+        }
+    }
+}

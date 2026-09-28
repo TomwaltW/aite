@@ -1,0 +1,13 @@
+        footer: "f".into(),
+        actions: vec![CardActionKind::Stop, CardActionKind::Evidence],
+    };
+    let p: pb::ChecklistCard = card.clone().into();
+    assert_eq!(p.status(), pb::CardStatus::Delivered);
+    assert_eq!(ChecklistCard::try_from(p).unwrap(), card);
+
+    let t = OutboundText {
+        chat_id: "c".into(),
+        text: "t".into(),
+        reply_to: Some("r".into()),
+        in_thread: false,
+    };

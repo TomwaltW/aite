@@ -1,0 +1,12 @@
+    assert!(
+        SandboxSpec::try_from(pb::SandboxSpec {
+            network: "bridge".into(),
+            ..Default::default()
+        })
+        .is_err()
+    );
+    let req = ExecRequest::python("print(1)", 5);
+    assert_eq!(
+        ExecRequest::try_from(pb::ExecRequest::from(req.clone())).unwrap(),
+        req
+    );

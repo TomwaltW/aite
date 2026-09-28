@@ -1,0 +1,24 @@
+        footer: "f".into(),
+        actions: vec![CardActionKind::Stop, CardActionKind::Evidence],
+        links: vec![CardLink {
+            label: "配置".into(),
+            url: "https://admin.example.test/chats/oc_1".into(),
+        }],
+        approval: Some(ApprovalPrompt {
+            approval_id: "ap1".into(),
+            summary: "推送到 main".into(),
+            detail: Some("git push origin main".into()),
+        }),
+    };
+    let p: pb::ChecklistCard = card.clone().into();
+    assert_eq!(p.status(), pb::CardStatus::Delivered);
+    assert_eq!(ChecklistCard::try_from(p).unwrap(), card);
+
+    let t = OutboundText {
+        chat_id: "c".into(),
+        text: "t".into(),
+        reply_to: Some("r".into()),
+        in_thread: false,
+        mentions: vec!["ou_2".into()],
+        dedupe_key: Some("t1:final".into()),
+    };

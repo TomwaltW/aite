@@ -1,0 +1,34 @@
+/// SessionStore.list_active_tasks 的口径：status in (created, planning, working)。
+pub const ACTIVE_TASK_STATUSES: [TaskStatus; 3] = [
+    TaskStatus::Created,
+    TaskStatus::Planning,
+    TaskStatus::Working,
+];
+
+/// 「还没结束的任务」：!status、SessionStore.list_open_tasks 的口径。
+/// 与 ACTIVE_TASK_STATUSES 的区别：含 answering 与 awaiting_approval。
+/// 孤儿恢复不用它（待审批任务绝不能被当成孤儿收掉）。
+pub const OPEN_TASK_STATUSES: [TaskStatus; 5] = [
+    TaskStatus::Created,
+    TaskStatus::Planning,
+    TaskStatus::Answering,
+    TaskStatus::Working,
+    TaskStatus::AwaitingApproval,
+];
+
+impl TaskStatus {
+    pub fn is_active(self) -> bool {
+        ACTIVE_TASK_STATUSES.contains(&self)
+    }
+
+    pub fn is_open(self) -> bool {
+        OPEN_TASK_STATUSES.contains(&self)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Delivered | TaskStatus::Failed | TaskStatus::Cancelled
+        )
+    }
+}

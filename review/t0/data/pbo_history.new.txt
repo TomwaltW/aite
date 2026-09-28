@@ -1,0 +1,77 @@
+message HistoryMessage {
+  string message_id = 1;
+  string sender_id = 2;
+  string sender_kind = 3;              // "human" | "bot" | "app" | "system"（沿用旧契约的字符串形态）
+  optional string sender_name = 4;
+  string text = 5;
+  optional string thread_id = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8; // 被编辑过时的最后编辑时间；没编辑过不填
+  bool deleted = 9;                    // 已撤回 / 删除
+  optional string reply_to = 10;       // 它回复 / 引用的消息
+}
+
+message DocumentContent {
+  string title = 1;
+  string text = 2;                     // markdown
+  string url = 3;
+}
+
+message UserInfo {
+  string user_id = 1;
+  string name = 2;
+  bool is_external = 3;                // 外部联系人
+  bool is_guest = 4;                   // 访客 / 未激活成员
+}
+
+message ChatInfo {
+  string chat_id = 1;
+  string name = 2;
+  ChatType chat_type = 3;
+  optional bool is_public = 4;         // 平台不给就不填
+  bool is_external = 5;                // 外部群
+  optional uint32 member_count = 6;
+}
+
+message SearchQuery {
+  string query = 1;
+  repeated string chat_ids = 2;        // 空 = 按 access.search_scope
+  uint32 limit = 3;                    // 0 = adapter 默认
+  google.protobuf.Timestamp since = 4; // 不填 = 不限
+}
+
+message SearchHit {
+  string chat_id = 1;
+  HistoryMessage message = 2;          // 必填
+  optional string url = 3;
+}
+
+// 写一篇平台云文档（托管页）。doc_id 有值 = 更新同一页。
+message DocWrite {
+  optional string doc_id = 1;
+  string title = 2;
+  string markdown = 3;
+  optional string share_chat_id = 4;   // 写完共享给哪个群
+  bool aigc_banner = 5;                // 页首放 AIGC 标识横幅
+}
+
+message DocRef {
+  string doc_id = 1;
+  string url = 2;
+  string title = 3;
+}
+
+// 管理台 OAuth 登录（平台密钥只在 edge）
+message OAuthStart {
+  string redirect_uri = 1;
+  string state = 2;
+}
+
+message OAuthUrl {
+  string url = 1;
+}
+
+message OAuthCode {
+  string code = 1;
+  string redirect_uri = 2;
+}

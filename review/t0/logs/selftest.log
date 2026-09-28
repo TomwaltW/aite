@@ -1,0 +1,254 @@
+[PASS] a. git clone --local /home/user/repo → /tmp/aite-t0-scratch（HEAD 16f7afcc，有 .git）
+    $ python3 review/aa4-proto-patch.py --root /tmp/aite-t0-scratch  → exit 0
+      [命中 1 条] edge.proto: EdgeStatusService 的 leading comment：换掉「给 !status / preflight 用」
+      [命中 1 条] main.go: statusSource.Status 里 platform_connected 那句：换掉「别让 !status 误报」
+      [  合法] edge.proto: protoc 认
+      [  合法] main.go: gofmt 认
+      写了 /tmp/aite-t0-scratch/proto/aite/v1/edge.proto
+      写了 /tmp/aite-t0-scratch/edge/cmd/aite-edge/main.go
+      [读回 OK] edge.proto: 新注释在、旧锚点 0 条
+      [读回 OK] main.go: 新注释在、旧锚点 0 条
+    $ python3 review/bb2-created-at-chain-patch.py --root /tmp/aite-t0-scratch  → exit 0
+      [ 1/23 命中 1 条] evidence.rs: 新增 canonical_created_at / chain_hash_at，旧 chain_hash 留着并注明何时用
+      [ 2/23 命中 1 条] evidence.rs: EvidenceEvent 的 hash / created_at 两个字段注释改口径
+      [ 3/23 命中 1 条] evidence.rs: 文件末尾的测试向量表补上新口径那两组
+      [ 4/23 命中 1 条] lib.rs: 导出 canonical_created_at / chain_hash_at
+      [ 5/23 命中 1 条] evidence_vectors.rs: 契约测试：新口径的冻结向量 + 「动时间戳就换链」两条
+      [ 6/23 命中 1 条] evidence_vectors.rs: 契约测试：追加两个新测试函数
+      [ 7/23 命中 1 条] writer.rs: writer 引入 chain_hash_at
+      [ 8/23 命中 1 条] writer.rs: now_micros 的精度注释：从「好看」升级成校验前提
+      [ 9/23 命中 1 条] writer.rs: 残行自愈里那处链校验换新口径（两处 verify 之一）
+      [10/23 命中 1 条] writer.rs: append 落盘：created_at 先定下来再进 hash
+      [11/23 命中 1 条] writer.rs: verify_sync 的 doc：写明旧口径在这里是 false 且原因归 cli 报
+      [12/23 命中 1 条] writer.rs: verify_sync 换新口径（两处 verify 之二）
+      [13/23 命中 1 条] cli.rs: cli 引入 chain_hash_at（旧的留着认「这是旧口径」）
+      [14/23 命中 1 条] cli.rs: load_timeline 的 doc 改口径
+      [15/23 命中 1 条] cli.rs: load_timeline 里加「旧口径只报头一条」的计数器
+      [16/23 命中 1 条] cli.rs: load_timeline 换新口径，并把「旧口径」单独报成人话
+      [17/23 命中 1 条] chain.rs: B7 向量测试引入两个 hash 函数
+      [18/23 命中 1 条] chain.rs: B7：hash 向量改成按现行口径重算 + 新增两条 created_at 用例
+      [19/23 命中 1 条] chain.rs: B7：「进程重启接得住旧文件」那条也别再钉旧口径常量
+      [20/23 命中 1 条] evidence_on_disk.rs: 贯通用例 1 的 import
+      [21/23 命中 1 条] evidence_on_disk.rs: 贯通用例 1 里逐行重算链那一行
+      [22/23 命中 1 条] cold_start_to_delivery.rs: 贯通用例 2 的 import
+      [23/23 命中 1 条] cold_start_to_delivery.rs: 贯通用例 2 里逐行重算链那一行
+      [  合法] cold_start_to_delivery.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] evidence_on_disk.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] evidence.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] lib.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] evidence_vectors.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] cli.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] writer.rs: rustfmt 认，且已是 rustfmt 形态
+      [  合法] chain.rs: rustfmt 认，且已是 rustfmt 形态
+      写了 /tmp/aite-t0-scratch/core/crates/app/tests/cold_start_to_delivery.rs
+      写了 /tmp/aite-t0-scratch/core/crates/app/tests/evidence_on_disk.rs
+      写了 /tmp/aite-t0-scratch/core/crates/contracts/src/evidence.rs
+      写了 /tmp/aite-t0-scratch/core/crates/contracts/src/lib.rs
+      写了 /tmp/aite-t0-scratch/core/crates/contracts/tests/evidence_vectors.rs
+      写了 /tmp/aite-t0-scratch/core/crates/evidence/src/cli.rs
+      写了 /tmp/aite-t0-scratch/core/crates/evidence/src/writer.rs
+      写了 /tmp/aite-t0-scratch/core/crates/evidence/tests/chain.rs
+      [读回 OK] 23 处新内容全部在盘上
+    $ python3 review/bb4-guard-patch.py --root /tmp/aite-t0-scratch  → exit 0
+      [  命中 1] guard_bash.py: 锚点 A 在第 332 行（data）
+      [  命中 1] guard_bash.py: 锚点 B（import 段结束）在第 26 行，注入点在它之前
+      [  命中 1] guard.rs: cargo fmt 的五条查询选项从 blocked 里摘掉
+      [  命中 1] guard.rs: 同五条挪进 allowed
+      [  命中 1] guard.rs: cd 矩阵从「放行」改成「拦」
+      [  命中 1] guard.rs: cwd 那条（core 下写契约）
+      [  命中 1] guard.rs: cwd 那条（src 下写 lib.rs）
+      [  命中 1] guard.rs: cwd 那条（core 下 Write 相对路径）
+      [  命中 1] guard.rs: cwd 那条（src 下 Write lib.rs）
+      写了 /tmp/aite-t0-scratch/.claude/hooks/guard_bash.py
+      写了 /tmp/aite-t0-scratch/core/crates/app/tests/guard.rs
+[PASS] b. 情形 A：AA4 + BB2 + BB4 经各自 --root 套上（{'BB2 chain_hash_at': True, 'BB4 _bb4_precheck': True, 'AA4 新注释': True}）
+[PASS] c. 副本 cargo build -p aite（CARGO_TARGET_DIR=/tmp/aite-t0-scratch/core/target）→ 拷到 /tmp/aite-t0-prelock/aite（= 补丁前的二进制）
+[PASS] d. 套 T0 前：contracts passed=27 failed=0（constants 钉 p0.2、rejects_bad_shapes 拒 dingtalk）
+    （对照）套 T0 前：proto passed=5 failed=0
+    [ 1/85 命中 1 条] lib.rs: pub mod domain;
+    [ 2/85 命中 1 条] lib.rs: CONTRACT_VERSION p0.2 → p1.0 与文档串
+    [ 3/85 命中 1 条] lib.rs: 导出：capabilities / config / domain / events 的新公开项（不碰 evidence 那段）
+    [ 4/85 命中 1 条] lib.rs: 导出：outbound / ports / sandbox / session 的新公开项
+    [ 5/85 命中 1 条] config.rs: import domain / sandbox 的类型
+    [ 6/85 命中 1 条] config.rs: FeishuConfig += api_base / card_buttons / service_user_token_env；新 DingtalkConfig / WecomConfig
+    [ 7/85 命中 1 条] config.rs: ModelVendor（含 selfhost）/ ThinkingMode；ModelConfig += 11 个字段；新 ModelsConfig
+    [ 8/85 命中 1 条] config.rs: SandboxConfig += 出网与 linger 六个字段
+    [ 9/85 命中 1 条] config.rs: WorkerConfig += max_parallel_tasks / context_max_tokens / approval_timeout_sec / stuck_after_sec
+    [10/85 命中 1 条] config.rs: EdgeConfig += http_listen / webhook_secret_env；新段 Search…Admin
+    [11/85 命中 1 条] config.rs: PlatformChoice += dingtalk / wecom；AiteConfig += 13 段
+    [12/85 命中 1 条] events.rs: EventKind += Reaction / External
+    [13/85 命中 1 条] events.rs: CardActionKind += Approve / Reject / Submit
+    [14/85 命中 1 条] events.rs: Anchor.task_no 注释：core 按它路由
+    [15/85 命中 1 条] events.rs: NormalizedEvent += quote / reaction / external / sender_external；新 Quote / ReactionEvent / ExternalEvent
+    [16/85 命中 1 条] outbound.rs: import ChatType
+    [17/85 命中 1 条] outbound.rs: OutboundText += mentions / dedupe_key（new() 同步）
+    [18/85 命中 1 条] outbound.rs: 新 CardLink / ApprovalPrompt；ChecklistCard += links / approval
+    [19/85 命中 1 条] outbound.rs: ReactionKind += Muted
+    [20/85 命中 1 条] outbound.rs: HistoryMessage += updated_at / deleted / reply_to；新 UserInfo…OAuthCode
+    [21/85 命中 1 条] capabilities.rs: 能力位 +14；feishu_p0 旧 9 值不动；新 dingtalk_v1 / wecom_v1
+    [22/85 命中 1 条] sandbox.rs: SandboxNetwork += trusted/custom/full；ExecLanguage += bash；新 CredentialBinding / EgressPolicy
+    [23/85 命中 1 条] sandbox.rs: ExecRequest::bash
+    [24/85 命中 1 条] protocol.rs: Message += provider_extra（Message::text 同步）
+    [25/85 命中 1 条] protocol.rs: Usage += cache_write_tokens
+    [26/85 命中 1 条] session.rs: OPEN_TASK_STATUSES + is_open（ACTIVE_TASK_STATUSES 一字不动）
+    [27/85 命中 1 条] session.rs: Turn += message_id / provider_extra / sender_name
+    [28/85 命中 1 条] session.rs: Session += meta
+    [29/85 命中 1 条] gateway.rs: import ChatType
+    [30/85 命中 1 条] gateway.rs: ToolContext += initiator_id / chat_type / initiator_external
+    [31/85 命中 1 条] errors.rs: ModelError += RateLimited / Auth / BadRequest
+    [32/85 命中 1 条] ports.rs: import chrono 与新类型
+    [33/85 命中 1 条] ports.rs: PlatformPort +12 个默认方法（含 delete_doc）
+    [34/85 命中 1 条] ports.rs: SandboxPort += acquire_scoped（none 档转调 acquire）
+    [35/85 命中 1 条] ports.rs: ToolGateway::call 的顺序注释补上策略钩子
+    [36/85 命中 1 条] ports.rs: SessionStore +14 个默认方法；recover_orphan_tasks 文档串改 CC5 口径
+    [37/85 命中 1 条] ports.rs: RunHooks：drain_steer 带发言人、+ cancelled_by / take_decision
+    [38/85 命中 1 条] ports.rs: ControlPlane += submit_internal；新 trait ScopeStore / MemoryStore / RoutineStore / UsageLedger / AuditLog
+    [39/85 命中 1 条] frozen_values.rs: p1.0；OPEN_TASK_STATUSES、新枚举与三份能力档
+    [40/85 命中 1 条] config.rs: dingtalk / wecom 可用、slack 仍拒；新默认值；新段拒未知键
+    [41/85 命中 1 条] roundtrip.rs: event() 补新字段
+    [42/85 命中 1 条] roundtrip.rs: ChecklistCard 字面量补 links / approval
+    [43/85 命中 1 条] roundtrip.rs: HistoryMessage 字面量补新字段
+    [44/85 命中 1 条] roundtrip.rs: Session 字面量补 meta
+    [45/85 命中 1 条] roundtrip.rs: Turn 字面量补新字段 + p1.0 新测试
+    [46/85 命中 1 条] roundtrip.rs: Message 字面量补 provider_extra
+    [47/85 命中 1 条] roundtrip.rs: Usage 字面量补 cache_write_tokens
+    [48/85 命中 1 条] roundtrip.rs: ToolContext 字面量补新字段
+    [49/85 命中 1 条] layout.rs: frozen_paths_exist 的 must += domain.rs
+    [50/85 命中 1 条] events.proto: EVENT_KIND_REACTION = 7 / EXTERNAL = 8
+    [51/85 命中 1 条] events.proto: CARD_ACTION_KIND_APPROVE / REJECT / SUBMIT
+    [52/85 命中 1 条] events.proto: task_no 注释
+    [53/85 命中 1 条] events.proto: NormalizedEvent 19–22；新 Quote / ReactionEvent / ExternalEvent
+    [54/85 命中 1 条] outbound.proto: OutboundText 5 / 6
+    [55/85 命中 1 条] outbound.proto: 新 CardLink / ApprovalPrompt；ChecklistCard 10 / 11
+    [56/85 命中 1 条] outbound.proto: REACTION_KIND_MUTED = 4
+    [57/85 命中 1 条] outbound.proto: HistoryMessage 8 / 9 / 10；新 UserInfo…OAuthCode
+    [58/85 命中 1 条] capabilities.proto: 能力位 10–23
+    [59/85 命中 1 条] sandbox.proto: network 注释；新 CredentialBinding / EgressPolicy
+    [60/85 命中 1 条] sandbox.proto: language 注释
+    [61/85 命中 1 条] edge.proto: PlatformService +12 RPC
+    [62/85 命中 1 条] edge.proto: 12 个 RPC 的请求 / 响应消息
+    [63/85 命中 1 条] edge.proto: AcquireRequest += EgressPolicy egress = 3
+    [64/85 命中 1 条] edge.proto: EdgeStatus += egress_ok = 7 / http_ingress_ok = 8
+    [65/85 命中 1 条] convert.rs: import 新类型
+    [66/85 命中 1 条] convert.rs: enum_pair 补新取值
+    [67/85 命中 1 条] convert.rs: Quote / ReactionEvent / ExternalEvent 互转；NormalizedEvent → pb 补新字段
+    [68/85 命中 1 条] convert.rs: pb → NormalizedEvent 补新字段
+    [69/85 命中 1 条] convert.rs: OutboundText 补 mentions / dedupe_key
+    [70/85 命中 1 条] convert.rs: CardLink / ApprovalPrompt 互转；ChecklistCard 补 links / approval
+    [71/85 命中 1 条] convert.rs: HistoryMessage 补新字段；UserInfo…OAuthCode 互转
+    [72/85 命中 1 条] convert.rs: 能力位 +14；network 认 none|trusted|custom|full、language 认 python|bash；EgressPolicy 互转
+    [73/85 命中 1 条] convert.rs: event() 补新字段
+    [74/85 命中 1 条] convert.rs: 卡片 / OutboundText 字面量补新字段
+    [75/85 命中 1 条] convert.rs: HistoryMessage 字面量补新字段
+    [76/85 命中 1 条] convert.rs: bridge 仍拒；bash 往返、node 拒
+    [77/85 命中 1 条] convert.rs: p1.0 新测试
+    [78/85 命中 1 条] server.go: ContractVersion = "p1.0"（只改这一行）
+    [79/85 命中 1 条] aite.example.yaml: platform 注释
+    [80/85 命中 1 条] aite.example.yaml: feishu 新键；dingtalk / wecom 段
+    [81/85 命中 1 条] aite.example.yaml: model 新键；models 段
+    [82/85 命中 1 条] aite.example.yaml: sandbox 新键
+    [83/85 命中 1 条] aite.example.yaml: worker 新键
+    [84/85 命中 1 条] aite.example.yaml: edge 新键；search…admin 各段
+    [85/85 新建 1 个] domain.rs: 新文件 domain.rs：P1 领域类型与 Services
+    [  合法] 5 份 .proto：protoc 一起解析通过
+    [  合法] 18 个 .rs：rustfmt 认，且已是 rustfmt 形态
+    [  合法] server.go：gofmt 认
+    写了 25 个文件（新建 1 个）
+    [读回 OK] 84 处新内容全在盘上、旧锚点 0 条；新文件 1 个内容一致
+    
+    接着必须跑（每步期望见 review/t0/APPLY.md）：make proto-gen → 两个 crate 的测试 → 用补丁前的二进制重锁。
+[PASS] e. --root 副本 → exit 0；84 处锚点全部命中 1 次 + 新建 1 个，0 miss
+[PASS] f. 第二次 --root → exit 1「已经打过」；25 个补丁面文件 sha256 前后一致
+[PASS] g. contracts passed=42 failed=0（= 27 + 15）；proto passed=10 failed=0（= 5 + 5）
+    新增契约测试 K=15：capability_profiles_p1, dingtalk_and_wecom_platforms_accepted, domain_types_round_trip, model_error_p1_variants, network_event_reads_edge_jsonl_line, old_impls_compile_and_new_methods_are_unimplemented, open_task_statuses_are_frozen, p0_json_without_p1_fields_still_loads, p1_defaults_match_spec, p1_enum_string_forms, p1_event_shapes_round_trip, p1_outbound_shapes_round_trip, p1_sections_reject_unknown_keys_and_bad_values, sandbox_egress_shapes, services_default_and_debug
+    新增 proto 测试 M'=5：capability_profiles_round_trip_through_pb, network_levels_and_egress_policy, p1_enum_values_map_both_ways, p1_event_shapes_round_trip_through_pb, p1_outbound_messages_round_trip_through_pb
+    变异 lib.rs：pub const CONTRACT_VERSION: &str = "p1.0"; → pub const CONTRACT_VERSION: &str = "p0.2";
+      红：aite-contracts passed=19 failed=1；FAILED = ['constants']
+        ---- constants stdout ----
+        
+        thread 'constants' (29245) panicked at crates/contracts/tests/frozen_values.rs:5:5:
+        assertion `left == right` failed
+          left: "p0.2"
+         right: "p1.0"
+        stack backtrace:
+      还原后绿：aite-contracts passed=42 failed=0
+    变异 session.rs：]; → ];
+      红：aite-contracts passed=19 failed=1；FAILED = ['open_task_statuses_are_frozen']
+        ---- open_task_statuses_are_frozen stdout ----
+        
+        thread 'open_task_statuses_are_frozen' (30695) panicked at crates/contracts/tests/frozen_values.rs:22:5:
+        assertion `left == right` failed
+          left: [Created, Planning, Answering, Working, Delivered]
+         right: [Created, Planning, Answering, Working, AwaitingApproval]
+        stack backtrace:
+      还原后绿：aite-contracts passed=42 failed=0
+    变异 convert.rs："trusted" => Ok(SandboxNetwork::Trusted), →         }),
+      红：aite-proto passed=9 failed=1；FAILED = ['network_levels_and_egress_policy']
+        ---- network_levels_and_egress_policy stdout ----
+        
+        thread 'network_levels_and_egress_policy' (31801) panicked at crates/proto/tests/convert.rs:404:10:
+        called `Result::unwrap()` on an `Err` value: Invalid { field: "network", value: "trusted" }
+        stack backtrace:
+           0: __rustc::rust_begin_unwind
+                     at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/panicking.rs:679:5
+      还原后绿：aite-proto passed=10 failed=0
+    变异 config.rs：            allow_overseas_endpoint: false, →             allow_overseas_endpoint: true,
+      红：aite-contracts passed=6 failed=2；FAILED = ['example_yaml_equals_defaults', 'p1_defaults_match_spec']
+        ---- p1_defaults_match_spec stdout ----
+        
+        thread 'p1_defaults_match_spec' (32716) panicked at crates/contracts/tests/config.rs:114:5:
+        海外端点默认拒绝
+        stack backtrace:
+           0: __rustc::rust_begin_unwind
+                     at /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/panicking.rs:679:5
+        ---- example_yaml_equals_defaults stdout ----
+        
+        thread 'example_yaml_equals_defaults' (32715) panicked at crates/contracts/tests/config.rs:16:5:
+        assertion `left == right` failed
+          left: AiteConfig { tenant_id: "default", platform: Feishu, feishu: FeishuConfig { app_id_env: "FEISHU_APP_ID", app_secret_env: "FEISHU_APP_SECRET", bot_name: "Aite", bot_open_id_env: "FEISHU_BOT_OPEN_ID", history_window: 50, api_base: "https://open.feishu.cn", card_buttons: false, service_user_token_env: "" }, model: ModelConfig { provider: OpenaiCompat, base_url: "", api_key_env: "AITE_MODEL_API_KEY", model: "", max_tokens: 4096, temperature: 0.0, price_in_per_mtok: 0.0, price_out_per_mtok: 0.0, name: "primary", display_name: "", filing_no: "", vendor: Generic, thinking: Auto, timeout_sec: 600, stream: false, price_cached_in_per_mtok: 0.0, price_cache_write_per_mtok: 0.0, offpeak_price_multiplier: 1.0, allow_overseas_endpoint: false }, sandbox: SandboxConfig { image: "aite-sandbox:p0", cpu: 1.0, mem_mb: 1024, idle_sec: 300, exec_timeout_sec: 120, network_default: None, proxy_url: "", trusted_preset: "china", extra_trusted_hosts: [], allow_full: false, linger_sec: 600 }, worker: WorkerConfig { max_steps: 40, max_wall_sec: 1200, card_update_min_interval_ms: 500, system_prompt_path: "core/crates/worker/prompts/platform.md", max_parallel_tasks: 4, context_max_tokens: 96000, approval_timeout_sec: 1800, stuck_after_sec: 900 }, storage: StorageConfig { sqlite_path: "data/aite.db", evidence_dir: "data/evidence", artifacts_dir: "data/artifacts" }, edge: EdgeConfig { edge_socket: "data/run/aite-edge.sock", core_socket: "data/run/aite-core.sock", handle_event_deadline_ms: 1000, max_message_mb: 64, http_listen: "", webhook_secret_env: "AITE_WEBHOOK_SECRET" }, dingtalk: DingtalkConfig { client_id_env: "DINGTALK_CLIENT_ID", client_secret_env: "DINGTALK_CLIENT_SECRET", robot_code_env: "DINGTALK_ROBOT_CODE", card_template_id_env: "DINGTALK_CARD_TEMPLATE_ID", api_base: "https://api.dingtalk.com", bot_name: "Aite" }, wecom: WecomConfig { bot_id_env: "WECOM_BOT_ID", bot_secret_env: "WECOM_BOT_SECRET", ws_url: "wss://openws.work.weixin.qq.com", corp_id_env: "", app_secret_env: "", bot_name: "Aite" }, models: ModelsConfig { fallback: "", fast: "", catalog: [] }, search: SearchConfig { provider: None, api_key_env: "AITE_SEARCH_API_KEY", endpoint: "", max_results: 5, timeout_sec: 15 }, git: GitConfig { provider: None, base_url: "", token_env: "AITE_GIT_TOKEN", bot_name: "aite-bot", draft_prefix: "Draft: ", webhook_secret_env: "AITE_GIT_WEBHOOK_SECRET" }, pages: PagesConfig { provider: None, folder_token_env: "" }, memory: MemoryConfig { enabled: true, max_entries_per_scope: 200, auto_extract: false }, routines: RoutinesConfig { enabled: true, max_per_chat: 20, min_interval_min: 15, default_tz: "Asia/Shanghai", default_tz_offset_min: 480, tick_sec: 30 }, ambient: AmbientConfig { respond_automatically_default: false, daily_cap_per_chat: 20, stop_reading_after_msgs: 100, channel_session_idle_min: 60, channel_session_max_age_h: 24, stalled_followup_h: 24, max_consecutive_bot_turns: 3 }, access: AccessConfig { dm_enabled: true, external_chat_mode: Restrict, allow_chats: [], block_chats: [], member_allowlist: [], search_scope: JoinedChats, require_setup: false }, budget: BudgetConfig { org_monthly_limit_cny: 0.0, channel_monthly_limit_cny: 0.0, task_limit_cny: 0.0, warn_ratio: 0.8, month_start_day: 1 }, compliance: ComplianceConfig { aigc_label: true, label_text: "内容由 AI 生成", implicit_metadata: true, producer: "Aite", service_filing_no: "", audit_retention_days: 190, content_retention_days: 0, registration_scope_confirmed: false, content_safety_filter: false }, admin: AdminConfig { listen: "", public_base_url: "", owner_ids: [], session_secret_env: "AITE_ADMIN_SECRET", bootstrap_token_env: "AITE_ADMIN_BOOTSTRAP_TOKEN" } }
+         right: AiteConfig { tenant_id: "default", platform: Feishu, feishu: FeishuConfig { app_id_env: "FEISHU_APP_ID", app_secret_env: "FEISHU_APP_SECRET", bot_name: "Aite", bot_open_id_env: "FEISHU_BOT_OPEN_ID", history_window: 50, api_base: "https://open.feishu.cn", card_buttons: false, service_user_token_env: "" }, model: ModelConfig { provider: OpenaiCompat, base_url: "", api_key_env: "AITE_MODEL_API_KEY", model: "", max_tokens: 4096, temperature: 0.0, price_in_per_mtok: 0.0, price_out_per_mtok: 0.0, name: "primary", display_name: "", filing_no: "", vendor: Generic, thinking: Auto, timeout_sec: 600, stream: false, price_cached_in_per_mtok: 0.0, price_cache_write_per_mtok: 0.0, offpeak_price_multiplier: 1.0, allow_overseas_endpoint: true }, sandbox: SandboxConfig { image: "aite-sandbox:p0", cpu: 1.0, mem_mb: 1024, idle_sec: 300, exec_timeout_sec: 120, network_default: None, proxy_url: "", trusted_preset: "china", extra_trusted_hosts: [], allow_full: false, linger_sec: 600 }, worker: WorkerConfig { max_steps: 40, max_wall_sec: 1200, card_update_min_interval_ms: 500, system_prompt_path: "core/crates/worker/prompts/platform.md", max_parallel_tasks: 4, context_max_tokens: 96000, approval_timeout_sec: 1800, stuck_after_sec: 900 }, storage: StorageConfig { sqlite_path: "data/aite.db", evidence_dir: "data/evidence", artifacts_dir: "data/artifacts" }, edge: EdgeConfig { edge_socket: "data/run/aite-edge.sock", core_socket: "data/run/aite-core.sock", handle_event_deadline_ms: 1000, max_message_mb: 64, http_listen: "", webhook_secret_env: "AITE_WEBHOOK_SECRET" }, dingtalk: DingtalkConfig { client_id_env: "DINGTALK_CLIENT_ID", client_secret_env: "DINGTALK_CLIENT_SECRET", robot_code_env: "DINGTALK_ROBOT_CODE", card_template_id_env: "DINGTALK_CARD_TEMPLATE_ID", api_base: "https://api.dingtalk.com", bot_name: "Aite" }, wecom: WecomConfig { bot_id_env: "WECOM_BOT_ID", bot_secret_env: "WECOM_BOT_SECRET", ws_url: "wss://openws.work.weixin.qq.com", corp_id_env: "", app_secret_env: "", bot_name: "Aite" }, models: ModelsConfig { fallback: "", fast: "", catalog: [] }, search: SearchConfig { provider: None, api_key_env: "AITE_SEARCH_API_KEY", endpoint: "", max_results: 5, timeout_sec: 15 }, git: GitConfig { provider: None, base_url: "", token_env: "AITE_GIT_TOKEN", bot_name: "aite-bot", draft_prefix: "Draft: ", webhook_secret_env: "AITE_GIT_WEBHOOK_SECRET" }, pages: PagesConfig { provider: None, folder_token_env: "" }, memory: MemoryConfig { enabled: true, max_entries_per_scope: 200, auto_extract: false }, routines: RoutinesConfig { enabled: true, max_per_chat: 20, min_interval_min: 15, default_tz: "Asia/Shanghai", default_tz_offset_min: 480, tick_sec: 30 }, ambient: AmbientConfig { respond_automatically_default: false, daily_cap_per_chat: 20, stop_reading_after_msgs: 100, channel_session_idle_min: 60, channel_session_max_age_h: 24, stalled_followup_h: 24, max_consecutive_bot_turns: 3 }, access: AccessConfig { dm_enabled: true, external_chat_mode: Restrict, allow_chats: [], block_chats: [], member_allowlist: [], search_scope: JoinedChats, require_setup: false }, budget: BudgetConfig { org_monthly_limit_cny: 0.0, channel_monthly_limit_cny: 0.0, task_limit_cny: 0.0, warn_ratio: 0.8, month_start_day: 1 }, compliance: ComplianceConfig { aigc_label: true, label_text: "内容由 AI 生成", implicit_metadata: true, producer: "Aite", service_filing_no: "", audit_retention_days: 190, content_retention_days: 0, registration_scope_confirmed: false, content_safety_filter: false }, admin: AdminConfig { listen: "", public_base_url: "", owner_ids: [], session_secret_env: "AITE_ADMIN_SECRET", bootstrap_token_env: "AITE_ADMIN_BOOTSTRAP_TOKEN" } }
+        stack backtrace:
+      还原后绿：aite-contracts passed=42 failed=0
+[PASS] h. 变异 4 处：各自点名的测试变红，还原后重跑变绿
+    protoc-gen-go 候选 /usr/local/bin/protoc-gen-go → protoc-gen-go v1.36.12
+    protoc-gen-go-grpc 候选 /usr/local/bin/protoc-gen-go-grpc → protoc-gen-go-grpc 1.6.2
+    $ protoc -I <proto> --go_out=edge --go_opt=module=aite/edge --go-grpc_out=edge --go-grpc_opt=module=aite/edge <5 份 .proto>
+    edge/gen 变动 6 个文件（只留在副本，永不提交）：
+       M edge/gen/aitepb/capabilities.pb.go
+       M edge/gen/aitepb/edge.pb.go
+       M edge/gen/aitepb/edge_grpc.pb.go
+       M edge/gen/aitepb/events.pb.go
+       M edge/gen/aitepb/outbound.pb.go
+       M edge/gen/aitepb/sandbox.pb.go
+    文件头 protoc 版本行有变（云端 protoc 与本机不同，预期内）：-// 	protoc        v7.36.1
+[PASS] i. --codegen：protoc + 钉版本的两个插件，生成物只留在副本
+[PASS] j. 副本 edge/：go build ./... → exit 0；go vet ./... → exit 0（不跑 go test：main_test.go 的 p0.2 钉归 T0c）
+    $ /tmp/aite-t0-prelock/aite contracts lock --check --repo /tmp/aite-t0-scratch  → exit 1
+    MISMATCH 23 file(s):
+      changed  core/crates/contracts/src/capabilities.rs
+      changed  core/crates/contracts/src/config.rs
+      added    core/crates/contracts/src/domain.rs（新文件未入锁）
+      changed  core/crates/contracts/src/errors.rs
+      changed  core/crates/contracts/src/events.rs
+      changed  core/crates/contracts/src/evidence.rs
+      changed  core/crates/contracts/src/gateway.rs
+      changed  core/crates/contracts/src/lib.rs
+      changed  core/crates/contracts/src/outbound.rs
+      changed  core/crates/contracts/src/ports.rs
+      changed  core/crates/contracts/src/protocol.rs
+      changed  core/crates/contracts/src/sandbox.rs
+      changed  core/crates/contracts/src/session.rs
+      changed  core/crates/contracts/tests/config.rs
+      changed  core/crates/contracts/tests/evidence_vectors.rs
+      changed  core/crates/contracts/tests/frozen_values.rs
+      changed  core/crates/contracts/tests/layout.rs
+      changed  core/crates/contracts/tests/roundtrip.rs
+      changed  proto/aite/v1/capabilities.proto
+      changed  proto/aite/v1/edge.proto
+      changed  proto/aite/v1/events.proto
+      changed  proto/aite/v1/outbound.proto
+      changed  proto/aite/v1/sandbox.proto
+[PASS] k. 情形 A：期望 MISMATCH 23（changed 22 + added 1），实得 changed 22 + added 1 + deleted 0，按路径集合相等
+[PASS] l. review/t0/data/ 共 169 个文件，名字含受保护子串的：无
+[T0 self-test] 全部通过
+exit=0

@@ -1,0 +1,7 @@
+message SandboxSpec {
+  string image = 1;
+  double cpu = 2;                      // 默认 1.0
+  int32 mem_mb = 3;                    // 默认 1024
+  string network = 4;                  // P0 只允许 "none"：凭证/平台调用都不在沙箱里发生
+  string workdir = 5;                  // 默认 "/work"
+}

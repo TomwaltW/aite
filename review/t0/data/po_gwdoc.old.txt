@@ -1,0 +1,2 @@
+    /// 顺序：校验 session_token → 查工具存在 → 按 ToolSpec.parameters 校验 arguments → 执行（带超时）→ 截断 content → 返回
+    /// 永远不失败：所有失败以 ToolResult{ok:false, error} 表达

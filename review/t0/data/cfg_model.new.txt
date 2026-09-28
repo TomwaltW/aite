@@ -1,0 +1,92 @@
+str_enum! {
+    ModelProvider { OpenaiCompat => "openai_compat", Scripted => "scripted" }
+}
+
+str_enum! {
+    /// 模型厂商档（D9）。显式取值永远优先于按模型名 / 端点的推断，generic 才推断。
+    /// selfhost = 客户自托管的 vLLM / SGLang / MindIE：不发任何云厂商专有参数。
+    ModelVendor {
+        Generic => "generic",
+        Deepseek => "deepseek",
+        Qwen => "qwen",
+        Glm => "glm",
+        Kimi => "kimi",
+        Doubao => "doubao",
+        Minimax => "minimax",
+        Selfhost => "selfhost",
+    }
+}
+
+str_enum! {
+    /// 思考模式；auto = 按厂商默认
+    ThinkingMode { Auto => "auto", On => "on", Off => "off" }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelConfig {
+    pub provider: ModelProvider,
+    pub base_url: String,
+    pub api_key_env: String,
+    pub model: String,
+    pub max_tokens: u32,
+    pub temperature: f32,
+    /// 元/百万 token，只用于卡片上的"已用 ¥"
+    pub price_in_per_mtok: f64,
+    pub price_out_per_mtok: f64,
+    /// catalog 里的引用名（models.fallback / models.fast 按它找）
+    pub name: String,
+    /// 卡片页脚与 !about 显示的名字；空 = 用 model
+    pub display_name: String,
+    /// 这个模型服务的备案号 / 上线编号（catalog 每项各带各的）
+    pub filing_no: String,
+    pub vendor: ModelVendor,
+    pub thinking: ThinkingMode,
+    pub timeout_sec: u32,
+    /// SSE 流式
+    pub stream: bool,
+    /// 缓存命中的输入价（元/百万 token）
+    pub price_cached_in_per_mtok: f64,
+    pub price_cache_write_per_mtok: f64,
+    /// 错峰时段的价格倍数；1.0 = 不打折
+    pub offpeak_price_multiplier: f64,
+    /// false（默认）：base_url 指到海外端点是配置错；true 才降为告警（D9）
+    pub allow_overseas_endpoint: bool,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            provider: ModelProvider::OpenaiCompat,
+            base_url: String::new(),
+            api_key_env: "AITE_MODEL_API_KEY".into(),
+            model: String::new(),
+            max_tokens: 4096,
+            temperature: 0.0,
+            price_in_per_mtok: 0.0,
+            price_out_per_mtok: 0.0,
+            name: "primary".into(),
+            display_name: String::new(),
+            filing_no: String::new(),
+            vendor: ModelVendor::Generic,
+            thinking: ThinkingMode::Auto,
+            timeout_sec: 600,
+            stream: false,
+            price_cached_in_per_mtok: 0.0,
+            price_cache_write_per_mtok: 0.0,
+            offpeak_price_multiplier: 1.0,
+            allow_overseas_endpoint: false,
+        }
+    }
+}
+
+/// 多模型（DD7 的 ModelRouter）：`model` 段是主模型；这里按 `catalog[].name` 引用备用档与快速档。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelsConfig {
+    /// 限流 / 5xx 时切过去的；空 = 不切
+    pub fallback: String,
+    /// 轻活用的；空 = 用主模型
+    pub fast: String,
+    pub catalog: Vec<ModelConfig>,
+}

@@ -1,0 +1,11 @@
+enum_pair!(SenderKind, pb::SenderKind, "sender_kind", { Human <=> Human, Bot <=> Bot, App <=> App, System <=> System });
+enum_pair!(EventKind, pb::EventKind, "kind", {
+    Message <=> Message, MessageEdited <=> MessageEdited, MessageDeleted <=> MessageDeleted,
+    CardAction <=> CardAction, BotAdded <=> BotAdded, MemberChanged <=> MemberChanged,
+});
+enum_pair!(ChatType, pb::ChatType, "chat_type", { Group <=> Group, P2p <=> P2p });
+enum_pair!(AttachmentKind, pb::AttachmentKind, "attachments[].kind", { Image <=> Image, File <=> File });
+enum_pair!(CardActionKind, pb::CardActionKind, "card_action.action", { Stop <=> Stop, Evidence <=> Evidence });
+enum_pair!(ChecklistState, pb::ChecklistState, "items[].state", { Todo <=> Todo, Doing <=> Doing, Done <=> Done, Failed <=> Failed });
+enum_pair!(CardStatus, pb::CardStatus, "status", { Working <=> Working, Delivered <=> Delivered, Failed <=> Failed, Cancelled <=> Cancelled });
+enum_pair!(ReactionKind, pb::ReactionKind, "kind", { Ack <=> Ack, Done <=> Done, Fail <=> Fail });

@@ -1,0 +1,30 @@
+  google.protobuf.Timestamp occurred_at = 17;
+  google.protobuf.Struct raw = 18;     // 原始事件，仅供审计；任何逻辑不得依赖 raw
+  optional Quote quote = 19;           // 这条消息引用 / 回复了哪条
+  optional ReactionEvent reaction = 20; // kind == REACTION 时有
+  optional ExternalEvent external = 21; // kind == EXTERNAL 时有
+  bool sender_external = 22;           // 发送者不是本企业成员
+}
+
+// 被引用的消息。企微的引用不带 message id，只有文本。
+message Quote {
+  optional string message_id = 1;
+  optional string sender_id = 2;
+  string text = 3;
+}
+
+message ReactionEvent {
+  string message_id = 1;               // 被回应的消息
+  string emoji = 2;                    // 平台原始表情名
+  bool thumbs_down = 3;                // adapter 判定为「踩 / 不满意」
+  bool added = 4;                      // true = 加上，false = 撤掉
+}
+
+message ExternalEvent {
+  string source = 1;                   // "gitlab" | "feishu_doc" | "feishu_approval" | ...
+  string topic = 2;                    // 路由键：例程按它匹配
+  string subject = 3;
+  optional string url = 4;
+  string summary = 5;
+  google.protobuf.Struct payload = 6;  // 原始事件体（开放通道）
+}

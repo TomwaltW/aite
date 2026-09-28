@@ -1,0 +1,10 @@
+    /// status in ACTIVE_TASK_STATUSES，按 (created_at, id) 正序
+    async fn list_active_tasks(&self, chat_id: &str) -> Result<Vec<Task>, StoreError>;
+    /// 原子递增 + encode_task_no
+    async fn next_task_no(&self, tenant_id: &str) -> Result<String, StoreError>;
+    /// 去重：首次调用记录并返回 false，之后 true。写失败必须返回 Err，不许假装 false。
+    async fn seen_event(&self, event_id: &str) -> Result<bool, StoreError>;
+    /// 起飞时收上一条命的残局：所有活跃态任务改 failed + result_summary，返回被收拾的任务。
+    /// 故意不在 init() 里自动调用（回帖与 evidence 归调用方）。
+    async fn recover_orphan_tasks(&self) -> Result<Vec<Task>, StoreError>;
+}

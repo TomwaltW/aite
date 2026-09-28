@@ -1,0 +1,3 @@
+  SandboxSpec spec = 2;
+  EgressPolicy egress = 3;             // 不填 = level none（完全不出网）
+}

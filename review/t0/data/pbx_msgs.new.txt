@@ -1,0 +1,53 @@
+message DownloadFileResponse {
+  bytes data = 1;
+}
+
+message EditTextRequest {
+  string message_id = 1;
+  OutboundText msg = 2;
+}
+message EditTextResponse {}
+
+message SendDirectRequest {
+  string user_id = 1;
+  OutboundText msg = 2;                // msg.chat_id 忽略
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message GetChatRequest {
+  string chat_id = 1;
+}
+
+message CheckMemberRequest {
+  string chat_id = 1;
+  string user_id = 2;
+}
+message CheckMemberResponse {
+  bool is_member = 1;
+}
+
+message ListChatsRequest {}
+message ListChatsResponse {
+  repeated ChatInfo chats = 1;
+}
+
+message ListPinsRequest {
+  string chat_id = 1;
+}
+message ListPinsResponse {
+  repeated HistoryMessage messages = 1;
+}
+
+message SearchMessagesResponse {
+  repeated SearchHit hits = 1;
+}
+
+message DeleteDocRequest {
+  DocRef doc = 1;
+}
+message DeleteDocResponse {}
+
+// 对应旧 SandboxPort。容器打标签 aite.task=<task_id>。

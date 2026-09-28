@@ -1,0 +1,5 @@
+worker:
+  max_steps: 40
+  max_wall_sec: 1200
+  card_update_min_interval_ms: 500
+  system_prompt_path: core/crates/worker/prompts/platform.md

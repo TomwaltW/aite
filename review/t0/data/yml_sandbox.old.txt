@@ -1,0 +1,6 @@
+sandbox:
+  image: aite-sandbox:p0
+  cpu: 1.0
+  mem_mb: 1024
+  idle_sec: 300
+  exec_timeout_sec: 120

@@ -1,0 +1,100 @@
+impl From<PlatformCapabilities> for pb::PlatformCapabilities {
+    fn from(c: PlatformCapabilities) -> Self {
+        pb::PlatformCapabilities {
+            platform: c.platform,
+            supports_thread: c.supports_thread,
+            supports_history: c.supports_history,
+            supports_passive_listen: c.supports_passive_listen,
+            supports_card_edit: c.supports_card_edit,
+            card_edit_window_sec: c.card_edit_window_sec as i32,
+            inbound_file_in_group: c.inbound_file_in_group,
+            proactive_requires_prior_message: c.proactive_requires_prior_message,
+            outbound_rate_per_min: c.outbound_rate_per_min as i32,
+        }
+    }
+}
+impl From<pb::PlatformCapabilities> for PlatformCapabilities {
+    fn from(c: pb::PlatformCapabilities) -> Self {
+        PlatformCapabilities {
+            platform: c.platform,
+            supports_thread: c.supports_thread,
+            supports_history: c.supports_history,
+            supports_passive_listen: c.supports_passive_listen,
+            supports_card_edit: c.supports_card_edit,
+            card_edit_window_sec: c.card_edit_window_sec.max(0) as u32,
+            inbound_file_in_group: c.inbound_file_in_group,
+            proactive_requires_prior_message: c.proactive_requires_prior_message,
+            outbound_rate_per_min: c.outbound_rate_per_min.max(0) as u32,
+        }
+    }
+}
+
+impl From<SandboxSpec> for pb::SandboxSpec {
+    fn from(s: SandboxSpec) -> Self {
+        pb::SandboxSpec {
+            image: s.image,
+            cpu: s.cpu,
+            mem_mb: s.mem_mb as i32,
+            network: s.network.as_str().to_string(),
+            workdir: s.workdir,
+        }
+    }
+}
+impl TryFrom<pb::SandboxSpec> for SandboxSpec {
+    type Error = ConvertError;
+    fn try_from(s: pb::SandboxSpec) -> Result<Self, ConvertError> {
+        let network = match s.network.as_str() {
+            "" | "none" => SandboxNetwork::None,
+            other => {
+                return Err(ConvertError::Invalid {
+                    field: "network",
+                    value: other.to_string(),
+                });
+            }
+        };
+        Ok(SandboxSpec {
+            image: s.image,
+            cpu: if s.cpu > 0.0 { s.cpu } else { 1.0 },
+            mem_mb: if s.mem_mb > 0 { s.mem_mb as u32 } else { 1024 },
+            network,
+            workdir: if s.workdir.is_empty() {
+                "/work".to_string()
+            } else {
+                s.workdir
+            },
+        })
+    }
+}
+
+impl From<ExecRequest> for pb::ExecRequest {
+    fn from(r: ExecRequest) -> Self {
+        pb::ExecRequest {
+            language: r.language.as_str().to_string(),
+            code: r.code,
+            timeout_sec: r.timeout_sec as i32,
+        }
+    }
+}
+impl TryFrom<pb::ExecRequest> for ExecRequest {
+    type Error = ConvertError;
+    fn try_from(r: pb::ExecRequest) -> Result<Self, ConvertError> {
+        let language = match r.language.as_str() {
+            "" | "python" => ExecLanguage::Python,
+            other => {
+                return Err(ConvertError::Invalid {
+                    field: "language",
+                    value: other.to_string(),
+                });
+            }
+        };
+        Ok(ExecRequest {
+            language,
+            code: r.code,
+            timeout_sec: if r.timeout_sec > 0 {
+                r.timeout_sec as u32
+            } else {
+                120
+            },
+        })
+    }
+}

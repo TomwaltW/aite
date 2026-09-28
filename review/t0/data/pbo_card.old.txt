@@ -1,0 +1,11 @@
+message ChecklistCard {
+  string task_id = 1;
+  string task_no = 2;                  // "#A17"
+  string title = 3;                    // 任务一句话（≤40 字，worker 截断）
+  string initiator = 4;                // 发起人显示名
+  string started_at = 5;               // "9:02"
+  CardStatus status = 6;
+  repeated ChecklistItemView items = 7;
+  string footer = 8;                   // "预计 2 分钟 · 已用 ¥0.12"
+  repeated CardActionKind actions = 9; // domain 默认 [stop]；core 总是显式写
+}

@@ -1,0 +1,32 @@
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Message {
+    pub role: Role,
+    #[serde(default)]
+    pub content: String,
+    /// assistant
+    #[serde(default)]
+    pub tool_calls: Option<Vec<ToolCallRequest>>,
+    /// tool
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// tool
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 厂商专有字段原样携带（reasoning_content / encrypted_content / reasoning_details……），
+    /// 回放时照原样发回；换模型 / 换厂商时丢弃。空则不序列化。
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub provider_extra: Map<String, Value>,
+}
+
+impl Message {
+    pub fn text(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            provider_extra: Map::new(),
+        }
+    }
+}

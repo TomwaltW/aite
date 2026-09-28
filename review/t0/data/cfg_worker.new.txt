@@ -1,0 +1,32 @@
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerConfig {
+    pub max_steps: u32,
+    pub max_wall_sec: u32,
+    pub card_update_min_interval_ms: u64,
+    /// 相对仓库根
+    pub system_prompt_path: String,
+    /// 同时在跑的任务上限（同一会话内仍串行）
+    pub max_parallel_tasks: u32,
+    /// 进模型的上下文预算（token）
+    pub context_max_tokens: u32,
+    /// 等审批多久算超时（超时即取消）
+    pub approval_timeout_sec: u32,
+    /// 任务多久没有进展算卡死、可被新请求替换
+    pub stuck_after_sec: u32,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            max_steps: 40,
+            max_wall_sec: 1200,
+            card_update_min_interval_ms: 500,
+            system_prompt_path: "core/crates/worker/prompts/platform.md".into(),
+            max_parallel_tasks: 4,
+            context_max_tokens: 96_000,
+            approval_timeout_sec: 1800,
+            stuck_after_sec: 900,
+        }
+    }
+}

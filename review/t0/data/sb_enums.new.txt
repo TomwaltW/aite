@@ -1,0 +1,49 @@
+str_enum! {
+    /// 出网档位。none = 完全不出网（P0 唯一档）；trusted = 可信预设（国内镜像站）∪ allow_hosts；
+    /// custom = 只有 allow_hosts；full = 任意主机的 80/443（要 sandbox.allow_full）。
+    /// 除 none 外都经 edge 的出网代理，每请求一行审计（domain::NetworkEvent）。
+    SandboxNetwork { None => "none", Trusted => "trusted", Custom => "custom", Full => "full" }
+}
+
+str_enum! {
+    ExecLanguage { Python => "python", Bash => "bash" }
+}
+
+/// 出网代理替沙箱注入的凭证：只有名字，取值由 edge 持有，永不过 gRPC。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialBinding {
+    /// 目标主机（精确主机名，可带 :端口）
+    pub host: String,
+    /// 注入哪个请求头，如 "Authorization"
+    pub header: String,
+    /// 头值前缀，如 "Bearer"；空 = 原样
+    #[serde(default)]
+    pub scheme: String,
+    /// edge 侧密钥的名字
+    pub secret_ref: String,
+}
+
+/// 一个沙箱的出网策略（对齐 edge 出网代理的 Policy）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressPolicy {
+    pub level: SandboxNetwork,
+    /// 精确主机名或 "*.后缀"，可带 :端口；不带端口 = 只放 80/443
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    #[serde(default)]
+    pub credentials: Vec<CredentialBinding>,
+    /// 审计行里的归属标签（如 task / session id）
+    #[serde(default)]
+    pub audit_tag: String,
+}
+
+impl Default for EgressPolicy {
+    fn default() -> Self {
+        Self {
+            level: SandboxNetwork::None,
+            allow_hosts: Vec::new(),
+            credentials: Vec::new(),
+            audit_tag: String::new(),
+        }
+    }
+}

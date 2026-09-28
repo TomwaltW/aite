@@ -1,0 +1,31 @@
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundText {
+    pub chat_id: String,
+    /// markdown（飞书 post/markdown 由 adapter 转）
+    pub text: String,
+    /// 回复哪条消息
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// reply_to 存在时是否进话题（默认 true）
+    #[serde(default = "default_true")]
+    pub in_thread: bool,
+    /// 要 @ 的平台用户 id（adapter 负责渲染成平台的 @ 语法）
+    #[serde(default)]
+    pub mentions: Vec<String>,
+    /// 去重键：同一个键 adapter 只发一次（重试 / 重放时防重复发帖）
+    #[serde(default)]
+    pub dedupe_key: Option<String>,
+}
+
+impl OutboundText {
+    pub fn new(chat_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            chat_id: chat_id.into(),
+            text: text.into(),
+            reply_to: None,
+            in_thread: true,
+            mentions: Vec::new(),
+            dedupe_key: None,
+        }
+    }
+}

@@ -1,0 +1,2 @@
+  int32 outbound_rate_per_min = 9;           // 出站限速（消息数/分钟），adapter 自己令牌桶
+}

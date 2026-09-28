@@ -1,0 +1,9 @@
+        card_action: None,
+        occurred_at: Utc.with_ymd_and_hms(2026, 9, 9, 1, 7, 0).unwrap(),
+        raw:
+            json!({"header": {"event_id": "e1", "n": 3, "f": 1.5, "arr": [true, null], "s": "文"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+    }
+}

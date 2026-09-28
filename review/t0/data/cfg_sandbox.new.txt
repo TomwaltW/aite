@@ -1,0 +1,38 @@
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SandboxConfig {
+    pub image: String,
+    pub cpu: f64,
+    pub mem_mb: u32,
+    pub idle_sec: u32,
+    pub exec_timeout_sec: u32,
+    /// 没有 scope 设置时的出网档位
+    pub network_default: SandboxNetwork,
+    /// edge 出网代理地址；空 = edge 自己起
+    pub proxy_url: String,
+    /// trusted 档用哪份预设
+    pub trusted_preset: String,
+    pub extra_trusted_hosts: Vec<String>,
+    /// false：full 档一律拒
+    pub allow_full: bool,
+    /// 按线程沙箱空闲多久回收；0 = 仍按任务释放
+    pub linger_sec: u32,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            image: "aite-sandbox:p0".into(),
+            cpu: 1.0,
+            mem_mb: 1024,
+            idle_sec: 300,
+            exec_timeout_sec: 120,
+            network_default: SandboxNetwork::None,
+            proxy_url: String::new(),
+            trusted_preset: "china".into(),
+            extra_trusted_hosts: Vec::new(),
+            allow_full: false,
+            linger_sec: 600,
+        }
+    }
+}
