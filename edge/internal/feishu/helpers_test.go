@@ -436,6 +436,19 @@ func sampleCard() *pb.ChecklistCard {
 // defaultFeishuConfig 是 config 契约的默认 feishu 段。
 func defaultFeishuConfig() config.Feishu { return config.Default().Feishu }
 
+// registerTestEvent 在分发表里临时登记一个事件类型，测试结束时撤销（别污染其它测试）。
+func registerTestEvent(t *testing.T, eventType string, entry eventEntry) {
+	t.Helper()
+	registerEvent(eventType, entry)
+	t.Cleanup(func() { unregisterTestEvent(eventType) })
+}
+
+func unregisterTestEvent(eventType string) {
+	eventTableMu.Lock()
+	defer eventTableMu.Unlock()
+	delete(eventTable, eventType)
+}
+
 // strptr 是 optional string 字段的取址助手。
 func strptr(s string) *string { return &s }
 

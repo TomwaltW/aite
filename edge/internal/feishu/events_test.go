@@ -25,6 +25,8 @@ import (
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+
+	pb "aite/edge/gen/aitepb"
 )
 
 var cardActionPayload = map[string]any{
@@ -571,4 +573,121 @@ func TestSlowHandlerIsReported(t *testing.T) {
 	if capture2.has("feishu.on_event_slow") {
 		t.Error("没超预算不该打 feishu.on_event_slow")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 事件分发表
+// ---------------------------------------------------------------------------
+
+// sampleEnvelopes 给分发表里的每一类事件备一份样例信封。表里多了一类、这里没跟上，
+// TestHandlerTableDrivesDispatcherAndNormalize 会红 —— 逼着新事件带着样例进来。
+func sampleEnvelopes(t *testing.T) map[string]map[string]any {
+	t.Helper()
+	return map[string]map[string]any{
+		eventMessageReceive: loadFixture(t, "message_at_bot_toplevel", ".json"),
+		eventCardAction:     cardActionPayload,
+	}
+}
+
+// droppedByDesign 是表里登记了、但归一化后故意不上送的事件类型。
+var droppedByDesign = map[string]bool{}
+
+// dispatchThroughSDK 把一份信封经 buildDispatcher().Do 投一遍，返回 onRaw 收到的信封。
+func dispatchThroughSDK(t *testing.T, envelope map[string]any) ([]map[string]any, error) {
+	t.Helper()
+	var got []map[string]any
+	_, logger := newLogCapture()
+	conn := newLarkConnection("cli_test", "secret", DefaultDomain,
+		func(_ context.Context, raw map[string]any) error {
+			got = append(got, raw)
+			return nil
+		}, logger)
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = conn.buildDispatcher().Do(context.Background(), payload)
+	return got, err
+}
+
+// TestHandlerTableDrivesDispatcherAndNormalize 钉住分发表是唯一的注册面：
+// 表里每一项都经 buildDispatcher().Do 到 onRaw、且被 Normalize 认；
+// 临时登记一个假事件类型，不改 events.go 就能被投递和归一化（EE11 要的接口）。
+func TestHandlerTableDrivesDispatcherAndNormalize(t *testing.T) {
+	samples := sampleEnvelopes(t)
+	for eventType := range eventTableSnapshot() {
+		t.Run(eventType, func(t *testing.T) {
+			envelope, ok := samples[eventType]
+			if !ok {
+				t.Fatalf("分发表里有 %s，但 sampleEnvelopes 没给样例", eventType)
+			}
+			got, err := dispatchThroughSDK(t, envelope)
+			if err != nil {
+				t.Fatalf("buildDispatcher().Do 没认出 %s：%v", eventType, err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("该投递 1 条，得到 %d 条", len(got))
+			}
+			event := Normalize(got[0], testBotOpenID, testAppID, "default")
+			if droppedByDesign[eventType] {
+				if event != nil {
+					t.Errorf("%s 该被归一化成 nil（暂不上送），得到 %v", eventType, event)
+				}
+				return
+			}
+			if event == nil {
+				t.Fatalf("Normalize 没认出 %s", eventType)
+			}
+		})
+	}
+
+	const fakeType = "test.fake_event_v1"
+	fakeEnvelope := map[string]any{
+		"schema": "2.0",
+		"header": map[string]any{"event_id": "evt_fake_0001", "event_type": fakeType, "app_id": testAppID},
+		"event":  map[string]any{"chat_id": testChatID},
+	}
+	if _, err := dispatchThroughSDK(t, fakeEnvelope); err == nil {
+		t.Fatal("没登记的类型 Do 该报 NotFound —— 否则下面那半证明不了什么")
+	}
+
+	registerTestEvent(t, fakeType, eventEntry{
+		normalize: func(raw map[string]any, _, workspaceID, tenantID string) *pb.NormalizedEvent {
+			return &pb.NormalizedEvent{
+				EventId: mapStr(asMap(raw["header"]), "event_id"),
+				Kind:    pb.EventKind_EVENT_KIND_MESSAGE,
+				ChatId:  mapStr(asMap(raw["event"]), "chat_id"),
+			}
+		},
+	})
+	got, err := dispatchThroughSDK(t, fakeEnvelope)
+	if err != nil {
+		t.Fatalf("登记之后 Do 该认出假事件：%v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("假事件该投递 1 条，得到 %d 条", len(got))
+	}
+	event := Normalize(got[0], testBotOpenID, testAppID, "default")
+	if event.GetEventId() != "evt_fake_0001" || event.GetChatId() != testChatID {
+		t.Errorf("假事件归一化结果 = %v", event)
+	}
+
+	sink := &recordingSink{}
+	p, _ := dispatchPlatform(t, sink, 0, nil)
+	if err := p.dispatchRaw(context.Background(), got[0]); err != nil {
+		t.Fatalf("dispatchRaw 失败：%v", err)
+	}
+	if len(sink.seen()) != 1 {
+		t.Errorf("假事件该进 sink，得到 %d 条", len(sink.seen()))
+	}
+}
+
+// TestDuplicateEventRegistrationPanics 钉住重复登记会炸。
+func TestDuplicateEventRegistrationPanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("重复登记 im.message.receive_v1 该 panic")
+		}
+	}()
+	registerEvent(eventMessageReceive, eventEntry{normalize: NormalizeMessage})
 }

@@ -25,6 +25,17 @@ import (
 
 const platformName = "feishu"
 
+// init 把本文件归一化的事件登记进分发表（events.go）。
+func init() {
+	registerEvent(eventMessageReceive, eventEntry{normalize: NormalizeMessage})
+	registerEvent(eventCardAction, eventEntry{
+		normalize: func(raw map[string]any, _, workspaceID, tenantID string) *pb.NormalizedEvent {
+			return NormalizeCardAction(raw, workspaceID, tenantID)
+		},
+		callback: true,
+	})
+}
+
 // senderKindByType 是飞书 sender.sender_type → 契约 SenderKind。
 //
 // 飞书有两套 sender_type 枚举，取值不一样，这张表要同时吃下（T16 核过）：

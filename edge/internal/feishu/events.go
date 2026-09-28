@@ -35,6 +35,70 @@ const (
 	eventCardAction     = "card.action.trigger"
 )
 
+// ---------------------------------------------------------------------------
+// 事件分发表
+// ---------------------------------------------------------------------------
+
+// normalizeFunc 把一份事件信封归一化；返回 nil = 认识这类事件但这一条不上送。
+type normalizeFunc func(raw map[string]any, botOpenID, workspaceID, tenantID string) *pb.NormalizedEvent
+
+// eventEntry 是分发表里的一项：一个事件类型怎么归一化、在 SDK 的哪张表上注册。
+//
+// 表里有的类型 buildDispatcher 都会注册 —— 控制台订阅了、代码里没注册的事件，
+// SDK 的 dispatcher.Do 返回 NotFoundEventHandlerErr，长连接回 500，平台就会一直重推。
+type eventEntry struct {
+	normalize normalizeFunc
+	// callback=true 走 OnP2CardActionTrigger：卡片回传只能注册在 SDK 的 callback 表上
+	// （callback 表优先于 event 表，OnCustomizedEvent 注册不到它）。目前只有 card.action.trigger。
+	callback bool
+	// onDropped 在 normalize 返回 nil 时由 dispatchRaw 调用，打这一类事件自己的日志；
+	// nil = 照旧打 feishu.event_ignored。
+	onDropped func(logger *slog.Logger, raw map[string]any)
+}
+
+// eventTable 是包级可变状态：各文件在 init() 里登记，测试运行期也会临时登记 / 撤销，
+// 而 SDK 的 websocket goroutine 同时在经 buildDispatcher / Normalize 读它 —— 所以要锁。
+var (
+	eventTableMu sync.RWMutex
+	eventTable   = map[string]eventEntry{}
+)
+
+// registerEvent 往分发表里登记一个事件类型。重复登记 panic：两个文件抢同一个类型
+// 一定是写错了，启动时炸出来比静默覆盖好。
+func registerEvent(eventType string, entry eventEntry) {
+	if entry.normalize == nil {
+		panic(fmt.Sprintf("feishu: 事件 %s 登记时没给 normalize", eventType))
+	}
+	if entry.callback && eventType != eventCardAction {
+		panic(fmt.Sprintf("feishu: SDK 只有 %s 一条 callback 注册面，%s 登记不上", eventCardAction, eventType))
+	}
+	eventTableMu.Lock()
+	defer eventTableMu.Unlock()
+	if _, dup := eventTable[eventType]; dup {
+		panic(fmt.Sprintf("feishu: 事件 %s 重复登记", eventType))
+	}
+	eventTable[eventType] = entry
+}
+
+// lookupEvent 查一个事件类型的登记项。
+func lookupEvent(eventType string) (eventEntry, bool) {
+	eventTableMu.RLock()
+	defer eventTableMu.RUnlock()
+	entry, ok := eventTable[eventType]
+	return entry, ok
+}
+
+// eventTableSnapshot 返回分发表的快照，读侧拿着快照用，不在锁里调 SDK。
+func eventTableSnapshot() map[string]eventEntry {
+	eventTableMu.RLock()
+	defer eventTableMu.RUnlock()
+	out := make(map[string]eventEntry, len(eventTable))
+	for k, v := range eventTable {
+		out[k] = v
+	}
+	return out
+}
+
 // RawEventHandler 是原始事件（信封 map）的消费者。
 type RawEventHandler func(ctx context.Context, raw map[string]any) error
 
@@ -116,23 +180,28 @@ func newLarkConnection(appID, appSecret, domain string, onRaw RawEventHandler, l
 	}
 }
 
-// buildDispatcher 注册 P0 订阅的两类事件。
+// buildDispatcher 把分发表里的每一类事件注册到 SDK 的 dispatcher 上。
 //
-// im.message.receive_v1 走 OnCustomizedEvent：我们要的是原始信封而不是 SDK 的
+// 普通事件走 OnCustomizedEvent：我们要的是原始信封而不是 SDK 的
 // 类型对象（raw 要原样进审计，过一遍 SDK 模型再吐回来只会丢字段）。
 // card.action.trigger 走 OnP2CardActionTrigger：它是 SDK 里唯一一条卡片回传的注册面
 // （dispatcher 内部分两张表，callback 表优先于 event 表，自定义事件注册不到它）。
 func (c *larkConnection) buildDispatcher() *dispatcher.EventDispatcher {
 	d := dispatcher.NewEventDispatcher("", "")
-	d.OnCustomizedEvent(eventMessageReceive, func(ctx context.Context, event *larkevent.EventReq) error {
-		return c.deliver(ctx, event.Body)
-	})
-	d.OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
-		if event == nil || event.EventReq == nil {
-			return nil, nil
+	for eventType, entry := range eventTableSnapshot() {
+		if entry.callback {
+			d.OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+				if event == nil || event.EventReq == nil {
+					return nil, nil
+				}
+				return nil, c.deliver(ctx, event.EventReq.Body)
+			})
+			continue
 		}
-		return nil, c.deliver(ctx, event.EventReq.Body)
-	})
+		d.OnCustomizedEvent(eventType, func(ctx context.Context, event *larkevent.EventReq) error {
+			return c.deliver(ctx, event.Body)
+		})
+	}
 	return d
 }
 
@@ -241,7 +310,12 @@ func (p *Platform) dispatchRaw(ctx context.Context, raw map[string]any) error {
 	}
 	event := Normalize(raw, p.opts.BotOpenID, p.opts.AppID, p.opts.TenantID)
 	if event == nil {
-		p.logger.Debug("feishu.event_ignored", "type", mapStr(asMap(raw["header"]), "event_type"))
+		eventType := mapStr(asMap(raw["header"]), "event_type")
+		if entry, ok := lookupEvent(eventType); ok && entry.onDropped != nil {
+			entry.onDropped(p.logger, raw)
+			return nil
+		}
+		p.logger.Debug("feishu.event_ignored", "type", eventType)
 		return nil
 	}
 
@@ -261,14 +335,11 @@ func (p *Platform) dispatchRaw(ctx context.Context, raw map[string]any) error {
 	return nil
 }
 
-// Normalize 是事件总入口：认识就归一化，不认识返回 nil。
+// Normalize 是事件总入口：查分发表，认识就归一化，不认识返回 nil。
 func Normalize(raw map[string]any, botOpenID, workspaceID, tenantID string) *pb.NormalizedEvent {
-	switch mapStr(asMap(raw["header"]), "event_type") {
-	case eventMessageReceive:
-		return NormalizeMessage(raw, botOpenID, workspaceID, tenantID)
-	case eventCardAction:
-		return NormalizeCardAction(raw, workspaceID, tenantID)
-	default:
+	entry, ok := lookupEvent(mapStr(asMap(raw["header"]), "event_type"))
+	if !ok {
 		return nil
 	}
+	return entry.normalize(raw, botOpenID, workspaceID, tenantID)
 }
