@@ -1,0 +1,33 @@
+{
+  "id": "chatcmpl-kimi-1",
+  "object": "chat.completion",
+  "created": 1790000000,
+  "model": "kimi-k2-turbo-preview",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "search:0",
+            "index": 0,
+            "type": "function",
+            "function": {
+              "name": "search",
+              "arguments": "{\"q\":\"北京天气\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 800,
+    "completion_tokens": 18,
+    "total_tokens": 818,
+    "cached_tokens": 640
+  }
+}

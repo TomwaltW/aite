@@ -32,9 +32,12 @@ impl RecordedRequest {
     }
 }
 
+/// (状态码, 响应体, 额外响应头)
+pub type Canned = (u16, String, Vec<(String, String)>);
+
 struct ServerState {
     requests: Vec<RecordedRequest>,
-    responses: Vec<(u16, String)>,
+    responses: Vec<Canned>,
     next: usize,
 }
 
@@ -54,6 +57,15 @@ impl FakeServer {
     }
 
     pub async fn start_raw(responses: Vec<(u16, String)>) -> Self {
+        let canned = responses
+            .into_iter()
+            .map(|(code, body)| (code, body, Vec::new()))
+            .collect();
+        Self::start_with_headers(canned).await
+    }
+
+    /// 同 `start_raw`，每条响应另带几个响应头（如 `Retry-After`）。
+    pub async fn start_with_headers(responses: Vec<Canned>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let state = Arc::new(Mutex::new(ServerState {
@@ -73,19 +85,22 @@ impl FakeServer {
                         return;
                     };
                     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
-                    let (code, payload) = {
+                    let (code, payload, extra) = {
                         let mut st = state.lock().expect("server");
                         st.requests.push(RecordedRequest { body, ..req });
                         let idx = st.next.min(st.responses.len().saturating_sub(1));
                         st.next += 1;
-                        st.responses
-                            .get(idx)
-                            .cloned()
-                            .unwrap_or((200, "{}".to_string()))
+                        st.responses.get(idx).cloned().unwrap_or((
+                            200,
+                            "{}".to_string(),
+                            Vec::new(),
+                        ))
                     };
                     let reason = if code == 200 { "OK" } else { "Error" };
+                    let extra: String =
+                        extra.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
                     let head = format!(
-                        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n",
                         payload.len()
                     );
                     let _ = sock.write_all(head.as_bytes()).await;
