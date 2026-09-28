@@ -1,7 +1,7 @@
 //go:build docker
 
 // DockerSandbox 真跑容器的测试（对应旧 tests/sandbox/test_docker_sandbox.py 的 18 条
-// + 镜像的三条硬要求）。`go test ./...` 不带 tag 时整份不编译，碰不到 daemon。
+// + 镜像的硬要求：P0 三条 + CC12 四条）。`go test ./...` 不带 tag 时整份不编译，碰不到 daemon。
 //
 // B4 原文两条硬判据：
 //   - 跑 matplotlib 生成 /work/out.png → GetFile 返回的前 8 字节是 PNG 魔数
@@ -13,8 +13,13 @@
 package sandbox
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -602,7 +607,7 @@ func TestB4MatplotlibPNGAndReapLeavesNothing(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------------ 镜像的三条硬要求
+// ------------------------------------------------------------------ 镜像的硬要求（P0 三条 + CC12 四条）
 
 // 镜像里四个库都在（docker/sandbox/requirements.txt 钉死的版本）。
 func TestImageHasPythonDataStack(t *testing.T) {
@@ -647,4 +652,178 @@ func TestImageHasNoNetworkEgress(t *testing.T) {
 	if !strings.Contains(res.GetStderr(), "URLError") && !strings.Contains(res.GetStderr(), "urlopen error") {
 		t.Fatalf("失败原因不像是没网：%s", res.GetStderr())
 	}
+}
+
+// CC12（D12）：镜像里有 git / curl / jq / unzip / bash 与系统 CA 包。
+func TestImageHasShellTools(t *testing.T) {
+	d, _ := newSandbox(t)
+	id := mustAcquire(t, d, taskID("image-tools"))
+
+	cmd := []string{"sh", "-c", "git --version && curl --version && jq --version && unzip -v && bash --version"}
+	code, stdout, stderr, err := d.execRun(context.Background(), id, cmd, Workdir)
+	if err != nil {
+		t.Fatalf("execRun 失败：%v", err)
+	}
+	if code != 0 {
+		t.Fatalf("shell 工具不全，退出码 %d：stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	code, _, stderr, err = d.execRun(context.Background(), id, []string{"test", "-f", "/etc/ssl/certs/ca-certificates.crt"}, Workdir)
+	if err != nil {
+		t.Fatalf("execRun 失败：%v", err)
+	}
+	if code != 0 {
+		t.Fatalf("镜像里没有 /etc/ssl/certs/ca-certificates.crt（退出码 %d）：%s", code, stderr)
+	}
+}
+
+// 镜像的运行身份是 uid/gid 1000 —— docker.go 的 PutFile / Exec tar 头写死 1000，两边必须一致。
+func TestImageRunsAsUID1000(t *testing.T) {
+	d, _ := newSandbox(t)
+	id := mustAcquire(t, d, taskID("image-uid"))
+
+	for _, flag := range []string{"-u", "-g"} {
+		code, stdout, stderr, err := d.execRun(context.Background(), id, []string{"id", flag}, Workdir)
+		if err != nil {
+			t.Fatalf("execRun 失败：%v", err)
+		}
+		if code != 0 {
+			t.Fatalf("id %s 退出码 %d：%s", flag, code, stderr)
+		}
+		if got := strings.TrimSpace(stdout); got != "1000" {
+			t.Fatalf("id %s = %s，想要 1000（docker.go 的 tar 头写死 1000）", flag, got)
+		}
+	}
+}
+
+// 镜像内的标识器 unittest 套件在真沙箱里全绿（network none、CapDrop ALL、镜像的 USER aite）。
+// 直接 execRun、不走 mustExec：Exec 把脚本以 0600 / 属主 1000 写进 /tmp，uid 一变它先红，
+// 就证明不了套件本身。
+func TestImageLabelerSuitePasses(t *testing.T) {
+	d, _ := newSandbox(t)
+	id := mustAcquire(t, d, taskID("image-labeler"))
+
+	cmd := []string{"python", "-m", "unittest", "discover", "-s", "/opt/aite/tests"}
+	code, _, stderr, err := d.execRun(context.Background(), id, cmd, Workdir)
+	if err != nil {
+		t.Fatalf("execRun 失败：%v", err)
+	}
+	lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if code == 0 && strings.HasPrefix(last, "OK") {
+		return
+	}
+	var bad []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "FAIL:") || strings.HasPrefix(l, "ERROR:") {
+			bad = append(bad, l)
+		}
+	}
+	tail := lines[max(0, len(lines)-8):]
+	t.Fatalf("标识器套件没全绿：退出码 %d\n%s\n…末尾：\n%s", code, strings.Join(bad, "\n"), strings.Join(tail, "\n"))
+}
+
+// DD5 将来走的路：沙箱里画一张带中文标题的图 → 调标识器 → GetFile 取回，PNG 里有 AIGC 块且恰好 5 个键。
+func TestImageLabelsPNGBeforeFetch(t *testing.T) {
+	d, _ := newSandbox(t)
+	id := mustAcquire(t, d, taskID("image-label-png"))
+	ctx := context.Background()
+
+	res := mustExec(t, d, id, ""+
+		"import subprocess, sys\n"+
+		"import matplotlib\n"+
+		"matplotlib.use('Agg')\n"+
+		"import matplotlib.pyplot as plt\n"+
+		"fig, ax = plt.subplots()\n"+
+		"ax.bar(['一月', '二月'], [3, 5])\n"+
+		"ax.set_title('生成文件标识')\n"+
+		"fig.savefig('/work/out.png')\n"+
+		"r = subprocess.run(['python', '/opt/aite/aite_label.py', '/work/out.png'], capture_output=True, text=True)\n"+
+		"print(r.stdout, end='')\n"+
+		"print(r.stderr, end='', file=sys.stderr)\n"+
+		"sys.exit(r.returncode)\n", 120)
+	if res.GetExitCode() != 0 {
+		t.Fatalf("标识器退出码 %d：stdout=%s stderr=%s", res.GetExitCode(), res.GetStdout(), res.GetStderr())
+	}
+	var line map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(res.GetStdout())), &line); err != nil || line["status"] != "labeled" {
+		t.Fatalf("标识器输出行不对（%v）：%q", err, res.GetStdout())
+	}
+
+	png, err := d.GetFile(ctx, id, "/work/out.png")
+	if err != nil {
+		t.Fatalf("GetFile 失败：%v", err)
+	}
+	payload, err := pngTextChunk(png, "AIGC")
+	if err != nil {
+		t.Fatalf("解析 PNG 失败：%v", err)
+	}
+	if payload == nil {
+		t.Fatalf("找不到 AIGC 块（iTXt / tEXt，keyword=AIGC）：PNG %d 字节", len(png))
+	}
+	var fields map[string]string
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatalf("AIGC 块不是 JSON 对象：%v（%q）", err, payload)
+	}
+	want := []string{"Label", "ContentProducer", "ProduceID", "ContentPropagator", "PropagateID"}
+	if len(fields) != len(want) {
+		t.Fatalf("AIGC 载荷有 %d 个键，想要恰好 %d 个：%v", len(fields), len(want), fields)
+	}
+	for _, k := range want {
+		if _, ok := fields[k]; !ok {
+			t.Fatalf("AIGC 载荷缺 %s：%v", k, fields)
+		}
+	}
+	if fields["Label"] != "1" || fields["ContentProducer"] != "Aite" {
+		t.Fatalf("AIGC 默认值不对：%v", fields)
+	}
+}
+
+// pngTextChunk 用标准库逐块扫 PNG，返回第一个 keyword 匹配的 tEXt / iTXt 块的文字；没有返回 nil。
+func pngTextChunk(data []byte, keyword string) ([]byte, error) {
+	if len(data) < 8 || !bytes.Equal(data[:8], pngMagic) {
+		return nil, errors.New("不是 PNG")
+	}
+	for pos := 8; pos+12 <= len(data); {
+		n := int(binary.BigEndian.Uint32(data[pos : pos+4]))
+		typ := string(data[pos+4 : pos+8])
+		if pos+12+n > len(data) {
+			return nil, errors.New("PNG 块越界")
+		}
+		body := data[pos+8 : pos+8+n]
+		pos += 12 + n
+		key, rest, ok := bytes.Cut(body, []byte{0})
+		if !ok || string(key) != keyword {
+			if typ == "IEND" {
+				break
+			}
+			continue
+		}
+		switch typ {
+		case "tEXt":
+			return rest, nil
+		case "iTXt":
+			// 压缩标志 1 字节 + 压缩方法 1 字节 + 语言\0 + 译名\0 + 文字
+			if len(rest) < 2 {
+				return nil, errors.New("iTXt 块太短")
+			}
+			compressed := rest[0] == 1
+			rest = rest[2:]
+			if _, rest, ok = bytes.Cut(rest, []byte{0}); !ok {
+				return nil, errors.New("iTXt 缺语言标签")
+			}
+			if _, rest, ok = bytes.Cut(rest, []byte{0}); !ok {
+				return nil, errors.New("iTXt 缺译名")
+			}
+			if compressed {
+				r, err := zlib.NewReader(bytes.NewReader(rest))
+				if err != nil {
+					return nil, err
+				}
+				defer r.Close()
+				return io.ReadAll(r)
+			}
+			return rest, nil
+		}
+	}
+	return nil, nil
 }

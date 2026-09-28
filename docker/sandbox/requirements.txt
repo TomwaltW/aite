@@ -11,3 +11,5 @@ matplotlib==3.9.2
 openpyxl==3.1.5
 python-docx==1.1.2
 pillow==11.0.0
+# 2026-09-28 CC12（D12 批）：AIGC 标识器给 PDF 写文档信息字典用；纯 Python wheel，aarch64 不受影响。
+pypdf==6.19.0
