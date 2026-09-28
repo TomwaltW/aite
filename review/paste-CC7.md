@@ -1,8 +1,9 @@
 # 派单 CC7：P1 评测底座 —— 新场景集、新检查项、替身旋钮、按实际目录判未知工具（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC7.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC7）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC7.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC7）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -58,7 +59,7 @@ FF9（依赖 CC7）的 live 矩阵读 `ModelProbe` 的观测；CC1 的 B9 门在
   **回执与 PR 描述一律用 Write 工具写成文件**（`review/p1/ledger/CC7.md`），不要走 Bash heredoc / 多行 `--body`
   （守卫把跨行的 ASCII 引号判「无法解析」，`CLAUDE.md:39`；heredoc 正文里的受保护路径名也会被扫到 —— 回执要逐字贴的守卫拦截原文就带这些名字）。
   开 PR：先用 Write 写出回执骨架，再 `gh pr create --draft --title "CC7: P1 评测底座" --body-file review/p1/ledger/CC7.md`；之后每次更新用 `gh pr edit --body-file review/p1/ledger/CC7.md`。
-- 代码基线：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- 代码基线：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（卡片原样）：
   - `core/crates/evals/**`（已存在）。`core/crates/evals/Cargo.toml` 在面内但**一个依赖都不许加**（加了就动 `core/Cargo.lock`，那是 CC1 的）；正则只用本 crate 的 `regex_mini`。
   - `core/crates/testing/**`（已存在）。它的 `Cargo.toml` 同样一个依赖都不许加（理由同上；D12 没有给 CC7 批任何依赖）。
@@ -86,10 +87,10 @@ FF9（依赖 CC7）的 live 矩阵读 `ModelProbe` 的观测；CC1 的 B9 门在
 
 ## 4. 开场自检（全部对上才开工；对不上就写回执停下）
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -227,7 +228,7 @@ core/target/debug/aite evals run evals/p0 --platform fake --model scripted
 scripts/check.sh
 #   不接 | tail；可能超过 Bash 单条 600 秒 → 同第 4 节第 4 步：run_in_background 落日志、Read 读全文
 #   末行「全部通过」，退出码 0；逐行：
-#   cargo passed=<897|901>+Δ failed=0   （A=897 / B=901；Δ 在回执里按测试名逐条列，本轨不解冻任何钉）
+#   cargo passed=<946|950>+Δ failed=0   （A=946 / B=950；Δ 在回执里按测试名逐条列，本轨不解冻任何钉）
 #   contracts passed=<25|27> failed=0   OK 25 files   passed 10/10
 #   Go 那格 8 行 = 6 行 ok + 2 行 ? … [no test files]（gen/aitepb、internal/pin），没有 FAIL；
 #   另单跑 (cd edge && go test -race ./cmd/... -count=1) → ok（cmd/aite-edge 被截掉的那包；合计 9 包）

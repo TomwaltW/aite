@@ -1,8 +1,9 @@
 # 派单 CC12：沙箱镜像中国版 + AIGC 隐式标识器（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC12.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC12，含 `[REVISION 2026-09-25]` 的 `BASE_REGISTRY` 一条）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC12.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC12，含 `[REVISION 2026-09-25]` 的 `BASE_REGISTRY` 一条）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -12,7 +13,7 @@
 `AIGC{Label, ContentProducer, ProduceID, ContentPropagator, PropagateID…}`（CC12 标识器、DD5 调用），图片可见水印（CC12 可选）。
 依赖审批是 §3 的 **D12**：apt `git curl jq unzip` + Python `pypdf`。
 
-**今天的样子（`98e4460`）**：
+**今天的样子（`8458435`）**：
 
 - `docker/sandbox/Dockerfile:15` 是写死的 `FROM python:3.11-slim`，没有任何 `ARG`；`:20-28` apt 只装 `fontconfig` + 两套文泉驿字体，
   并当场自检 `fc-list :lang=zh` 非空、有 `timeout`；**没有 git / curl / jq / unzip**（CT12 行写着「镜像无 git」）。
@@ -53,7 +54,7 @@
 ## 3. 工作区
 
 - **分支**：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「CC12: 沙箱镜像中国版 + AIGC 隐式标识器」（正文用 `--body-file`，见 §5 第 0 项 / §6 守卫）。
-- **代码基线**：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- **代码基线**：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**：
   - `docker/sandbox/**`：改 `Dockerfile` / `requirements.txt`（`matplotlibrc` 不需要动）；新建建议 `docker/sandbox/aite/aite_label.py`、
     `docker/sandbox/aite/tests/test_label.py`、`docker/sandbox/aite/tests/test_image_env.py`、`docker/sandbox/mirrors/{pip.conf,npmrc,cargo-config.toml}`，
@@ -74,10 +75,10 @@
 分级：**第 1–4 步对不上 → 停**，写回执；**第 5 步对不上 → 原文进回执、docker 验收标「人工本机量」、照样写代码**；
 基线 docker 组 `PASS≠50` 或 `SKIP≠0` → 按测试名逐条解释（进回执），能解释清楚就继续。
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -237,7 +238,7 @@
 
 ## 7. 验收（命令 + 期望输出）
 
-基线数按开场自检第 1 步判定的情形取（A：897 / 25；B：901 / 27）。
+基线数按开场自检第 1 步判定的情形取（A：946 / 25；B：950 / 27）。
 
 1. `docker build -t aite-sandbox:p0 docker/sandbox` → 成功；`docker image inspect aite-sandbox:p0 --format '{{.Id}} {{.Size}}'` 的 Id **不同于**开场自检记下的那个
    （确认后面跑的不是 B0 的旧镜像），大小前后对比进回执。
@@ -252,7 +253,7 @@
    `grep -E '^--- (PASS|FAIL): TestImage' /tmp/cc12-docker.txt` → 7 行全 PASS（旧 3 + 新 4）。
 6. `docker ps -a --filter label=aite.task -q | wc -l` → `0`。
 7. `cd edge && go vet -tags docker ./internal/sandbox/... && gofmt -l . | wc -l` → exit 0，打印 `0`（check.sh 的 `go vet ./...` 不带 tag，编不到 `docker_test.go`）。
-8. `scripts/check.sh` → 末行「全部通过」、exit 0；`cargo passed=<897 或 901> failed=0`（**Δ = 0**：本轨不改 Rust）、`contracts passed=<25 或 27> failed=0`、
+8. `scripts/check.sh` → 末行「全部通过」、exit 0；`cargo passed=<946 或 950> failed=0`（**Δ = 0**：本轨不改 Rust）、`contracts passed=<25 或 27> failed=0`、
    `OK 25 files`、`passed 10/10`；A4c / A4d `-> exit 0`；Go 那格 8 行 = 6 行 `ok` + 2 行 `?`（`gen/aitepb`、`internal/pin` 无测试文件；`docker_test.go` 带 tag，不影响包数，仍 9 包），单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok`。
 9. `git diff --name-only origin/main...HEAD` → 每一行都以 `docker/sandbox/` 开头，或正好是 `edge/internal/sandbox/docker_test.go`、`review/p1/ledger/CC12.md`。
 10. `git status --short` → 空（临时变异、探针都清掉）。

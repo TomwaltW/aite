@@ -1,8 +1,9 @@
 # 派单 CC6：国产模型加固 + 进程内思考字段回挂缓存（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC6.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC6）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC6.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC6）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -59,7 +60,7 @@ DD4（W2）把 `raw["provider_extra"]` 落进 `Turn.provider_extra` 并在追问
 
 - **分支**：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「CC6: 国产模型加固 + 思考字段回挂缓存」。
   PR 描述先用 Write 工具写成 `/tmp/cc6-pr.md`，再 `gh pr create --draft --title "CC6: 国产模型加固 + 思考字段回挂缓存" --body-file /tmp/cc6-pr.md`（详见 §8 末尾）。
-- **代码基线**：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- **代码基线**：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（逐条核过）：
   - `core/crates/models/**` —— 现有文件：`Cargo.toml`、`src/lib.rs`、`tests/common/mod.rs`、`tests/test_openai_compat.rs`；
     建议新建：`src/vendor.rs`、`src/echo.rs`、`tests/cc6_vendors.rs`、`tests/cc6_live.rs`、`tests/fixtures/*.json` + `tests/fixtures/README.md`。
@@ -82,10 +83,10 @@ DD4（W2）把 `raw["provider_extra"]` 落进 `Turn.provider_extra` 并在追问
 
 ## 4. 开场自检（全部对上才开工；对不上就写回执停下）
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -116,7 +117,7 @@ DD4（W2）把 `raw["provider_extra"]` 落进 `Turn.provider_extra` 并在追问
 被 `tests/test_openai_compat.rs:16-19` 直接导入调用，`MessageError` 是 `to_openai_messages` 签名里的错误类型（lib.rs:39-42）——签名都不许动。
 evals 不导入本 crate（`evals/src/cli.rs:46`、:390 与 `deps.rs:170` 只是注释）。现有 24 + 3 条测试一条不许改断言；要加能力就加**新函数 / 新方法**。
 **Generic（认不出厂商）档：响应不带思考字段时，请求体与今天逐字节一致**；响应带思考字段 + `tool_calls` 时照样按第 4 项回挂（卡片没按厂商限定回挂）。
-`preflight_e2e.rs` 用的是 `fake-model`（:70）+ `127.0.0.1`、响应不带思考字段，正是靠这条保证 models crate 外面的 897 条不动。
+`preflight_e2e.rs` 用的是 `fake-model`（:70）+ `127.0.0.1`、响应不带思考字段，正是靠这条保证 models crate 外面的 946 条不动。
 B8（`evals/p0`）走 `--model scripted`，不经过这个 crate。
 
 1. **厂商识别**（新 `src/vendor.rs`）。`pub enum Vendor { Generic, Deepseek, Qwen, Glm, Kimi, Doubao, Minimax }`，`as_str()` 取
@@ -212,11 +213,11 @@ B8（`evals/p0`）走 `--model scripted`，不经过这个 crate。
 | 3 | `cd core && cargo test -p aite-models -- --exact upstream_errors_never_leak_the_api_key unparseable_responses_never_leak_the_api_key debug_never_leaks_the_key tests::a_key_echoed_in_the_url_is_still_redacted` | 合计 4 passed（前 3 条在 `test_openai_compat` 顶层，第 4 条在 lib.rs:525 的 `mod tests` 里，所以带 `tests::` 前缀；旧的密钥脱敏测试一条没动、全绿） |
 | 4 | `cd core && cargo test -p aite-models live -- --ignored`（云端**不设** `AITE_LIVE_MODEL`） | live 那条 1 passed，立即返回、不发网络请求 |
 | 5 | `cd core && cargo clippy -p aite-models --all-targets -- -D warnings` | exit 0 |
-| 6 | `scripts/check.sh > /tmp/cc6-check.log 2>&1; echo "exit=$?" >> /tmp/cc6-check.log`（Bash 的 `run_in_background`，冷编译超过单条 600 秒上限；跑完用 Read 工具读全文，不接 `\| tail`） | 日志末行 `exit=0`，其上一行「全部通过」；`cargo passed=<897 或 901>+Δ failed=0`（Δ 逐条列名，= 8 条点名测试 + 你另加的每一条）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、`passed 10/10`；Go 那格 8 行 = 6 行 `ok` + 2 行 `? … [no test files]`（`gen/aitepb`、`internal/pin`；排第一的 `cmd/aite-edge` 被截掉），单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok`，合计 9 包 |
+| 6 | `scripts/check.sh > /tmp/cc6-check.log 2>&1; echo "exit=$?" >> /tmp/cc6-check.log`（Bash 的 `run_in_background`，冷编译超过单条 600 秒上限；跑完用 Read 工具读全文，不接 `\| tail`） | 日志末行 `exit=0`，其上一行「全部通过」；`cargo passed=<946 或 950>+Δ failed=0`（Δ 逐条列名，= 8 条点名测试 + 你另加的每一条）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、`passed 10/10`；Go 那格 8 行 = 6 行 `ok` + 2 行 `? … [no test files]`（`gen/aitepb`、`internal/pin`；排第一的 `cmd/aite-edge` 被截掉），单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok`，合计 9 包 |
 | 7 | `git diff --name-only origin/main...HEAD` | 每一行都以 `core/crates/models/` 开头，或正好是 `review/p1/ledger/CC6.md` |
 | 8 | `git status --short` | 空（临时脚本、探针都清掉） |
 
-- 第 6 行的基线数按开场自检第 1 步判定的情形取（A：897 / 25；B：901 / 27）。**别接 `| tail`**。
+- 第 6 行的基线数按开场自检第 1 步判定的情形取（A：946 / 25；B：950 / 27）。**别接 `| tail`**。
 - Go 模块文件有没有被改，由总管审 PR 时看；你别在命令里 grep 它们。
 - 本机人工步骤（写进回执，给总管照做）：`cd ~/Documents/Projects/Aite/core && AITE_LIVE_MODEL=1 cargo test -p aite-models live -- --ignored --nocapture`
   （key 放本机环境变量；`--nocapture` 才看得到打印的 `model` 字段），把响应的 `model` 字段记下来。

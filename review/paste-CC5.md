@@ -1,8 +1,9 @@
 # 派单 CC5：存储迁移机制 + P0 卫生 + Answering 孤儿恢复（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC5.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC5）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC5.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC5）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -11,7 +12,7 @@
 **CT26**（按群记成本 → tasks 表要有 chat / cost 查询列，并引入迁移机制）。总计划 §3 表 D2 行已拍板：
 **SQLite + 迁移机制，由 CC5 建**。
 
-今天的样子（行号基于 `98e4460`，均已核对）：
+今天的样子（行号基于 `8458435`，均已核对）：
 
 - **没有迁移机制**。`core/crates/store/src/lib.rs:36-73` 的 `SCHEMA` 是一串 `CREATE … IF NOT EXISTS`，
   `init()`（`lib.rs:208-211`）每次整串 `execute_batch`。加一列就没法对存量库做了。
@@ -65,7 +66,7 @@
 - **分支**：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「CC5: 存储迁移机制 + Answering 孤儿恢复」。
   PR 描述先用 **Write 工具**写成 `/tmp/cc5-pr.md`（此时回执还不存在），再 `gh pr create --draft --title "CC5: 存储迁移机制 + Answering 孤儿恢复" --body-file /tmp/cc5-pr.md`；
   收尾时 `gh pr edit --body-file review/p1/ledger/CC5.md`（或先 Write 一份摘要文件再 `--body-file` 它）。**永远别**把多行正文塞进 `--body "…"` 或 heredoc（见第 6 节守卫）。
-- **代码基线**：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- **代码基线**：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（只有这些）：
   - `core/crates/store/**`：现有 `Cargo.toml`、`src/lib.rs`、`tests/{common/mod.rs,concurrency.rs,crash_recovery.rs,persistence.rs,session_lookup.rs}`；
     可新建 `src/migrate.rs`、`tests/migration.rs` 等（新建）。**但 `store/Cargo.toml` 的依赖表一行都不改**——
@@ -100,10 +101,10 @@
 
 第 1-4 步逐字照抄总计划 §4.4（第 2 步另补一句「被拦就是通过」）；第 5 步是本轨附加。
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -290,5 +291,5 @@ git diff --name-only origin/main...HEAD                      # 每一行都在 �
 8. **没做的与原因**。
 9. **契约缺口**（给 T0 / T0.1；写清需要什么形状、为什么开放通道绕不过去；绕得过去就写「不是缺口」）：
    - contracts `ports.rs:156-157` 的 `recover_orphan_tasks` 文档还写「所有活跃态任务」，本轨之后实际是 created/planning/answering/working（不含 awaiting_approval）→ 建议总管在 H11 审 T0 补丁 / 设计文档时并入（T0 同波看不到本回执，T0 派单也没含这一条）；
-   - 总计划 §5.2「会话」一条与 T0 原卡写的 `lib.rs:419-421` / `:481-483` 与实际行号（`98e4460` 上是 `:421-423` / `:482-484`；本轨之后 `:482-484` 那处已不存在）有漂移 → 同上，由总管在 H11 审 T0 设计文档时改成按名字引用；
+   - 总计划 §5.2「会话」一条与 T0 原卡写的 `lib.rs:419-421` / `:481-483` 与实际行号（`8458435` 上是 `:421-423` / `:482-484`；本轨之后 `:482-484` 那处已不存在）有漂移 → 同上，由总管在 H11 审 T0 设计文档时改成按名字引用；
    - 新 schema 错误只能走 `StoreError::Other`（contracts 无对应变体）：你认为够不够用。

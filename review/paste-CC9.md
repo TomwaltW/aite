@@ -1,8 +1,9 @@
 # 派单 CC9：钉钉 Stream 适配器包（不接线）（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC9.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC9）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC9.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC9）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -76,7 +77,7 @@ FF3（W4）要新建 `edge/internal/dingtalk/stream_card.go` + `stream_card_test
 - **分支**：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「CC9: 钉钉 Stream 适配器包（不接线）」。
   PR 描述先用 **Write 工具**写成 `/tmp/cc9-pr.md`（此时回执还不存在），再 `gh pr create --draft --title "CC9: 钉钉 Stream 适配器包（不接线）" --body-file /tmp/cc9-pr.md`；
   收尾时 `gh pr edit --body-file review/p1/ledger/CC9.md`（或先 Write 一份摘要文件再 `--body-file` 它）。**永远别**把多行正文塞进 `--body "…"` 或 heredoc（见 §6 守卫）。
-- **代码基线**：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- **代码基线**：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（原卡逐字；三处今天都不存在，全部新建）：`edge/internal/dingtalk/**`、`docs/p1/dingtalk.md`、`review/p1/ledger/CC9.md`。
   建议文件：`platform.go`、`stream.go`、`normalize.go`、`anchor.go`、`api.go`、`outbound.go`、`card.go`、`callback.go` 与各自 `_test.go`、`helpers_test.go`，
   夹具放 `edge/internal/dingtalk/testdata/*.json`（**不是** `edge/testdata/`，那是飞书的、不在你面里）。**不建** `stream_card.go`、`stream_card_test.go`、`dws.go`、`dws_test.go`。
@@ -96,10 +97,10 @@ FF3（W4）要新建 `edge/internal/dingtalk/stream_card.go` + `stream_card_test
 
 ## 4. 开场自检（全部对上才开工；对不上就写回执停下）
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -257,8 +258,8 @@ FF3（W4）要新建 `edge/internal/dingtalk/stream_card.go` + `stream_card_test
 5. `cd edge && go test -race ./... -count=1 > /tmp/cc9-go.txt 2>&1; grep -c '^ok' /tmp/cc9-go.txt; grep -cE '^(ok|\?)' /tmp/cc9-go.txt; grep -c '^FAIL' /tmp/cc9-go.txt`
    → 三个数依次是 **N0 + 1**、`10`、`0`（全量 Go 只跑这一遍；最后那个 grep 打印 0 时退出码是 1，属正常）。
    原卡写「10 = 9 + 本包」指的是 `^ok` 行数；按源码静态数 `^ok` 是 7 → 8，两个数都进回执。
-6. `scripts/check.sh` → 末行「全部通过」、exit 0；`cargo passed=<897 或 901>+0 failed=0`（本轨 Δ = 0，不碰 Rust）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、`passed 10/10`；
-   Go 那格 8 行无 `FAIL`，另单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok`。基线数按开场自检第 1 步的情形取（A：897 / 25；B：901 / 27）。**别接 `| tail`**。
+6. `scripts/check.sh` → 末行「全部通过」、exit 0；`cargo passed=<946 或 950>+0 failed=0`（本轨 Δ = 0，不碰 Rust）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、`passed 10/10`；
+   Go 那格 8 行无 `FAIL`，另单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok`。基线数按开场自检第 1 步的情形取（A：946 / 25；B：950 / 27）。**别接 `| tail`**。
 7. `git diff --name-only origin/main...HEAD` → 每一行都以 `edge/internal/dingtalk/` 开头，或正好是 `docs/p1/dingtalk.md` / `review/p1/ledger/CC9.md`。
    原卡这条里「reviewer 另确认 Go 模块文件没改」是**总管审 PR 时看**的事，你别在命令里 grep / diff 那两个文件。
 8. `grep -rn '"aite/edge/internal/feishu"' edge/internal/dingtalk` → 无输出（注释里写「照 feishu/platform.go:…」没问题，只禁 import）；`ls edge/internal/dingtalk` → 没有 `stream_card.go`、`stream_card_test.go`、`dws.go`、`dws_test.go`。

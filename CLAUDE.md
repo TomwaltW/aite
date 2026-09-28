@@ -96,7 +96,8 @@ P0 冻结规格：`docs/dev-spec-2026-09-11-rustgo.md`（Python 时代那份 `do
 | 基线 | sha | cargo / contracts / 锁 | go packages | B8 / B9 | 墙钟（冷 / 热） | 来源 |
 |---|---|---|---|---|---|---|
 | B0 | `c159d12`（D0 之后的 main） | `897/0` / `25/0` / `OK 25 files` | `ok=9 fail=0` | `passed 10/10` / skip | 5m58s / 42s（开场自检旧 check.sh 冷编 7m30s） | CC1 云端实测（2026-09-25，4 vCPU、uid 0；`reconnect_replay` 的 `a_root_and_its_thread_followup_replayed_together` 单跑约 1/5 会红，是 R7 的真竞态，见 runbook §7） |
-| P0-CLOSE 之后 | — | `901` / `27` / `OK 25 files` | `ok=9 fail=0` | `passed 10/10` / skip | — | **计划值（§5.1），待总管实测** |
+| B0'（CC1–CC4 合并后） | `8458435` | `946/0` / `25/0` / `OK 25 files` | `ok=9 fail=0` | `passed 10/10` / skip | — | 总管本机实测（2026-09-28）；`reconnect_replay` 连跑 5 次全绿（CC2 ⑩ 修了 R7 竞态）。T0 与 CC5–CC12 的派单以此为基线 |
+| P0-CLOSE 之后 | — | B0 上 `901` / B0' 上 `950`；`27` / `OK 25 files` | `ok=9 fail=0` | `passed 10/10` / skip | — | **计划值（§5.1），待总管实测** |
 
 云端要点（详见 `docs/p1/cloud-runbook.md`）：会话是 root（check.sh 自动降权，单跑只读类测试要自己带 `setpriv` 前缀）；
 每个会话都从冷编起跑；docker daemon 默认不在（`dockerd &` 手动起）；Docker Hub 匿名拉取会 429、出口 TLS 拦截代理让容器里的 HTTPS 验不过证书，

@@ -1,8 +1,9 @@
 # 派单 CC8：飞书适配器整理 —— 按关注点拆文件、新事件、卡片按钮开关与帧类型日志、话题历史、发言人姓名、每群限速（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC8.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC8）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC8.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC8）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -68,7 +69,7 @@ CC2（同波）的 `!restart` 回灌也调 `read_history(thread)`。DD9（W2）�
 - **分支**：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「CC8: 飞书适配器整理 + 新事件 + 卡片按钮开关」。
   PR 描述先用 **Write 工具**写成 `/tmp/cc8-pr.md`，再 `gh pr create --draft --title "CC8: 飞书适配器整理 + 新事件 + 卡片按钮开关" --body-file /tmp/cc8-pr.md`；
   收尾时 `gh pr edit --body-file review/p1/ledger/CC8.md`（或它的摘要文件）。**永远别**把多行正文塞进 `--body "…"`（跨行引号会被守卫判「无法解析」）。
-- **代码基线**：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- **代码基线**：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（逐条核过）：
   - `edge/internal/feishu/**` —— 现有 15 个文件；目标布局（§5 第 1 项）：`api.go platform.go reads.go outbound.go cards.go events.go normalize.go capabilities.go`
     + 同前缀的 `*_test.go` + 共享的 `helpers_test.go`；新建 `testdata/events/`（新事件夹具）、`testdata/read/`（话题历史 / 通讯录的响应夹具）、
@@ -94,10 +95,10 @@ CC2（同波）的 `!restart` 回灌也调 `read_history(thread)`。DD9（W2）�
 本节与 §7 的命令都从仓库根起跑；进子目录一律写成子 shell `(cd edge && …)` / `(cd core && …)`（Bash 的工作目录在两次调用之间是保留的，
 裸 `cd edge && …` 之后，下一条 `cd edge` 就进不去了，`scripts/check.sh`、`git diff` 也会落在 `edge/` 里跑）。
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史；§7 ⑧⑨ 的三点 diff 也要靠它拿到合并基），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史；§7 ⑧⑨ 的三点 diff 也要靠它拿到合并基），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -130,7 +131,7 @@ CC2（同波）的 `!restart` 回灌也调 `read_history(thread)`。DD9（W2）�
 `Normalize / NormalizeMessage / NormalizeCardAction / BuildChecklistCard` 等导出签名不变。**所有环境变量只在 `New()` 里读**；`newPlatform`（测试都走它）
 不读环境、不装配任何真网络查询 —— `dispatchPlatform`（reconnect_test.go:337-346）造的 Platform 指向真的 `open.feishu.cn`，任何默认开启的网络查询都会让测试在云端打公网。
 **edge 的改动碰不到 B8**：`evals/p0` 在 core 里跑 `--platform fake`；本轨 `cargo passed` 的 Δ 应当是 **0**。
-下文所有 `文件:行` 都指 `98e4460` 上的原位置；第 1 项拆完之后按符号名找。
+下文所有 `文件:行` 都指 `8458435` 上的原位置；第 1 项拆完之后按符号名找。
 
 1. **零行为变化拆文件（单独第 1 个提交：「CC8 ①: 按关注点拆 edge/internal/feishu（零行为变化）」）**。只搬、不改逻辑、不改名：
 
@@ -280,10 +281,10 @@ git diff --name-only origin/main...HEAD -- edge/testdata edge/cmd               
 git status --short                                                              # ⑩ 空（/tmp 下的对照文件不在仓库里）
 ```
 
-- ⑦ 期望：末行「全部通过」、exit 0；`cargo passed=<897 或 901> failed=0`（Δ = 0：本轨不碰 Rust）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、
+- ⑦ 期望：末行「全部通过」、exit 0；`cargo passed=<946 或 950> failed=0`（Δ = 0：本轨不碰 Rust）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、
   `passed 10/10`；Go 那格 8 行（6 行 `ok` + 2 行 `? … [no test files]`，排第一的 `cmd/aite-edge` 被截掉），单跑 `cmd/aite-edge` → `ok`，合计 9 包。
 
-- ⑦ 的基线数按开场自检第 1 步判定的情形取（A：897 / 25；B：901 / 27）。**别接 `| tail`**。
+- ⑦ 的基线数按开场自检第 1 步判定的情形取（A：946 / 25；B：950 / 27）。**别接 `| tail`**。
 - Go 模块文件有没有被改，由总管审 PR 时看；你别在命令里 grep 它们。
 - 第 1 项的零行为判据（test 名单 diff、`--- PASS` 总数、`go doc -short` diff、逐文件对照表）另在回执里单列。
 

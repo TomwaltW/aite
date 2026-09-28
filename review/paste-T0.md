@@ -1,15 +1,16 @@
 # 派单 T0：契约 p1.0 补丁起草（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-T0.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=T0）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-T0.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=T0）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
 
 P1 要对齐 Claude Tag 的 26 条机制（CT02/06/07/08/09/12/13/14/15/16/17/18/20/21/22/23/26/27/28/30、NEW02/08/10/11/16/21），
 全都卡在同一件事上：**契约还是 p0.2**。另外原卡的 [REVISION 2026-09-25] 为 NEW23（断开工作区 / PIPL 清除，FF6 做）加了 `delete_doc` / `DeleteDoc`，
-为 D9（只用大陆端点、私有化自托管）加了 `ModelVendor` 的 `selfhost` 与 `ModelConfig.allow_overseas_endpoint`。实证（行号基于 `98e4460`）：
+为 D9（只用大陆端点、私有化自托管）加了 `ModelVendor` 的 `selfhost` 与 `ModelConfig.allow_overseas_endpoint`。实证（行号基于 `8458435`）：
 
 - 版本与平台：`contracts/src/lib.rs:26` `CONTRACT_VERSION = "p0.2"`、`edge/internal/server/server.go:18` 同值；`config.rs:149-151`
   `PlatformChoice { feishu, fake }`，`contracts/tests/config.rs:63` 钉着「`platform: dingtalk` 被拒」。
@@ -53,7 +54,7 @@ CC11 的 `Policy{Level, AllowHosts, AuditTag}` 与每请求一行的 `NetworkEve
 ## 3. 工作区
 
 - 分支：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「T0: 契约 p1.0 补丁起草」（正文与多行提交信息怎么写见 §6 守卫）。
-- 代码基线：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- 代码基线：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（全部新建）：`review/t0/**`（`p1-contract-patch.py`、`data/*.txt`、`APPLY.md`、`companion-todo.md`）、`docs/p1/contract-p1.md`、`review/p1/ledger/T0.md`。
 - **只读面**：其余一切。点名：
   - P0-CLOSE 文件（完整 14 个路径见 §4 第 1 步；其余几个也落在下一条的补丁目标面里）：`proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`core/crates/contracts/src/evidence.rs`、`core/crates/evidence/**`、
@@ -69,10 +70,10 @@ CC11 的 `Policy{Level, AllowHosts, AuditTag}` 与每请求一行的 `NetworkEve
 
 ## 4. 开场自检（全部对上才开工；对不上就写回执停下）
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok；
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -117,6 +118,20 @@ T0c 的 Go 可选接口签名（新文件 `edge/internal/server/ports_p1.go` 里
 小时文件名按 UTC（`YYYYMMDDHH.jsonl`）；键名、个数与 CC11 写出的 JSON 行一致，能反序列化它；
 ② `SessionStore::index_message` / `find_session_by_message` 的参数与返回按 `review/paste-CC5.md` §5② 的 `message_index` 列（`chat_id`、`message_id`、`session_id`、`task_id`（可空）、`outbound`；`created_at` 是 store 内部盖的戳）；
 ③ op 登记表的 `command` 条目 = `event_received` + `route="command"` + `command` 键，W1 由 CC2 发（`review/paste-CC2.md` §5⑨）；另登记 `cancelled` 载荷的 `stopped_by`（仅真人发起时出现：`!stop` 与卡片 Stop 按钮；收尾那条路不写该键）。
+
+**W1 已合并各轨回执里报的契约缺口（2026-09-28 总管并入；逐条评估，能进 p1.0 的进，进不了的在设计文档写明理由与开放通道替代）**：
+④ `SessionStore::unsee_event(event_id)`（或把 `seen_event` 改成「处理完才提交」的两段式）——CC2 ③ 已让入口错误传回平台重推，但重推回来 R2 认得它、当重复丢掉
+（`review/p1/ledger/CC2.md` §9）；
+⑤ `WorkerConfig.stuck_after_sec`（默认 900）——CC2 ④ 先用 control 常量 + `with_stuck_after_sec`，T0c 接线（同上）；
+⑥ `RunHooks` 带停止发起人：`cancelled_by: Arc<dyn Fn() -> Option<String> + Send + Sync>`（或 `is_cancelled` 改返回 `Option<String>`），让 worker 写的 `cancelled`
+载荷也有 `stopped_by`（同上）；
+⑦ `SessionStore` 的比较并交换：`update_task_if(task, expected_status_in)` 一类形状，消掉取消 / 卡死替换与被丢 worker 之间「最后一笔写靠时序」（同上）；
+⑧ `RunHooks.drain_steer` 改给 `Vec<SteerMessage>`，`SteerMessage { text, platform_user_id, sender_name: Option<String>, message_id: Option<String> }`
+（`review/p1/ledger/CC3.md` §9：今天靠 transcript 认领发言人，同一句话多人说过时认不准）；
+⑨ `Turn.sender_name: Option<String>`（同上；与原卡 `Turn += message_id, provider_extra` 同一处加）；
+⑩ `contracts/src/ports.rs` 里 `ToolGateway::call` 的调用顺序注释补上策略钩子：`token → 查工具（含 enabled 谓词）→ before_call → 校验参数 → 执行`
+（`review/p1/ledger/CC4.md` §9；`ToolContext += initiator_id / chat_type / initiator_external` 原卡已有，确认照写）。
+这些都是已合并代码真实撞到的缺口，**不要为了保持原卡清单不变而丢掉**；每一条在回执里标「进 p1.0 / 不进（理由）」。
 
 **p1.0 完整清单**（译自 `contract_batches[T0-p1.0]`；所有新字段 `#[serde(default)]`，**旧 JSON / P0 的 SQLite 行必须照样能反序列化**；精确默认值抄原卡，设计文档逐条写出）：
 
@@ -196,7 +211,7 @@ ToolContext, Usage, ModelConfig, RunHooks` 与各新枚举，范围 = 分支上 
 `context_max_tokens` 经 CC3 的 `AgentWorker::with_context_max_tokens` 接进预算（T0c 原卡第 8 项；`review/paste-CC3.md` §5⑦）；`edge/gen/**` 永不由 T0c 重生成。
 另列 **W1 各轨记账转给 T0c 的**（不在 T0c 原卡 `companion_edits` 里，来源见括号，以各轨回执为准）：`run.rs` 的 `takeoff` 调 `features::start_all`（EE7 / EE2 / DD12 依赖；`review/paste-CC4.md` §5⑧）；
 `wiring.rs` 的 docker 档（`docker_sandbox_factory`）挂登记与 `gateway_options`（`review/paste-CC4.md` §5⑦）；`plane_factory` 把 CC7 的 `worker_options.aigc_label` 接进 `WorkerDeps`，
-并撤掉 CC7 的「无消费方」闸门及其测试 `worker_options_label_without_consumer_is_a_wiring_error`（`review/paste-CC7.md` §5⑥；CC7 标为计划缺口、请总管确认归属）。
+并撤掉 CC7 的「无消费方」闸门及其测试 `worker_options_label_without_consumer_is_a_wiring_error`（`review/paste-CC7.md` §5⑥；CC7 标为计划缺口、请总管确认归属）。另加：CC2 的 `with_stuck_after_sec` 接 `worker.stuck_after_sec`（若 ⑤ 进 p1.0）；`FeatureCtx.services` 由 T0c 加字段、DD1 填（`review/p1/ledger/CC4.md` §7）。**总管确认：CC7 那道闸门与测试归 T0c 撤。**
 
 ### ④ `review/t0/APPLY.md`：总管的 H11 人跑链，每步带期望输出
 
@@ -240,8 +255,8 @@ ToolContext, Usage, ModelConfig, RunHooks` 与各新枚举，范围 = 分支上 
 
 ## 7. 验收（命令 + 期望输出）
 
-1. `scripts/check.sh`（后台跑、自测结束之后，写法见 §6）→ 末行「全部通过」，各行与开场自检**逐字相同**（Δ = 0）：情形 A `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 全 ok；
-   情形 B `901 / 27 / OK 25 / 10/10`。任何一行变了 = 越界，不是「增量」。
+1. `scripts/check.sh`（后台跑、自测结束之后，写法见 §6）→ 末行「全部通过」，各行与开场自检**逐字相同**（Δ = 0）：情形 A `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 全 ok；
+   情形 B `950 / 27 / OK 25 / 10/10`。任何一行变了 = 越界，不是「增量」。
 2. 自测（后台）→ 日志末行 `exit=0`、倒数第二行 `[T0 self-test] 全部通过`；报告里：情形 A 为 AA4 + BB2 + BB4 + T0 都套上、情形 B 为 P0-CLOSE 已在 + T0 套上，锚点 0 miss。
 3. 同一报告：`contracts passed=27+K failed=0`（K 在回执里逐条点名）、`proto passed=M failed=0`；变异 ≥3 处红→绿。
 4. 同一报告：codegen ok；副本 `go build ./...`、`go vet ./...` exit 0（不声称 go test 过）。

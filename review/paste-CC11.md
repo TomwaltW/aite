@@ -1,8 +1,9 @@
 # 派单 CC11：出网代理包（不接线）（第 1 波 · Claude Code 云端）
 
-> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC11.md 并照做"`（CC1 先单独派；其余在 CC1 自检通过后派）
-> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC11）· 生成 2026-09-25 · 代码基线 `98e4460`（+ 总管的 D0 文档提交）
+> 启动：`cd ~/Documents/Projects/Aite && claude --cloud "读 review/paste-CC11.md 并照做"`（CC1–CC4 已合并，本轨直接派）
+> 总计划：`review/plan-2026-09-25-claude-tag-parity.md` §6.1 · 英文原卡：`review/p1/tracks-2026-09-25.json`（id=CC11）· 生成 2026-09-25 · 代码基线 `8458435`（+ 总管的 D0 文档提交）
 > 文中所有指向总计划的行号（`plan:NNN`、「计划第 N 行」之类）都是生成时的；计划此后又改过，行号已经漂了——一律按 § 编号或关键词在计划里找，不按行号。仓库代码的 `文件:行号` 以 `98e4460` 为准，照常可用。
+> **2026-09-28 刷新**：代码基线从 `98e4460` 换成 `8458435`（= CC1–CC4 按序合并后的 main；总管本机实测 `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`go packages ok=9 fail=0`、`passed 10/10`、`B9 skip`）。本文里凡说 CC1–CC4「同波看不到 / 未合并」的，现在都已在 main 上——直接读代码，以代码为准。CC1–CC4 改过的文件（`core/crates/{control,worker,gateway}/**`、`core/crates/app/src/{app,wiring,lib,run}.rs`、`app/src/features/**`、`app/tests/{reconnect_replay,sqlite_cross_process,build_app_contract}.rs`、`scripts/check.sh`、`Makefile`、`.github/**`、`docker/core|edge/**`、`docker-compose.yml`、Cargo 文件）里引用的行号生成于 `98e4460`，已经漂了，按符号 / 函数名找。
 > 你是一个 Claude Code 云端会话。总管不在线：独立干完、开 draft PR、写回执；拿不准的写进回执，不猜、不扩范围。
 
 ## 1. 背景
@@ -58,7 +59,7 @@ NEW12（`*` 放行任意主机、默认关，NEW12 行，plan:181）。
 ## 3. 工作区
 
 - **分支**：会话自带的 `claude/*` 分支（只能推这一条）；第一次提交后立刻开 draft PR，标题「CC11: 出网代理包（不接线）」（正文用 `--body-file`，见 §6 守卫；收尾时 `gh pr edit --body-file review/p1/ledger/CC11.md` 或它的摘要文件）。
-- **代码基线**：`98e4460`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
+- **代码基线**：`8458435`；判定方法见开场自检第 1 步（情形 A / 情形 B）。
 - **可写面**（全部新建，基线上都不存在）：
   - `edge/internal/egress/**` —— 建议文件：`egress.go`（`Config` / `Proxy` / `New` / `Serve`）、`policy.go`（`Level` / `Policy` / 主机匹配 / 预设 / 保留主机）、
     `audit.go`（`NetworkEvent` / 小时文件写入）、`tunnel.go`（CONNECT 与转发），测试 `policy_test.go`、`proxy_test.go`、`audit_test.go`、`helpers_test.go`。文件怎么切你定。
@@ -78,11 +79,11 @@ NEW12（`*` 放行任意主机、默认关，NEW12 行，plan:181）。
 
 ## 4. 开场自检（全部对上才开工；对不上就写回执停下）
 
-1. **代码基线**：先 `git cat-file -e 98e4460 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
-   `git diff --stat --no-renames --diff-filter=AM 98e4460 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
-   - 输出为空 → 情形 A：基线行 = `cargo passed=897 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok
+1. **代码基线**：先 `git cat-file -e 8458435 || git fetch -q --unshallow origin`（浅 clone 时补历史），再
+   `git diff --stat --no-renames --diff-filter=AM 8458435 HEAD -- . ':!review' ':!docs' ':!CLAUDE.md' ':!.gitignore'`
+   - 输出为空 → 情形 A：基线行 = `cargo passed=946 failed=0`、`contracts passed=25 failed=0`、`OK 25 files`、`passed 10/10`、Go 9 包全 ok
      （= 7 行 ok + 2 行 no test files，见第 5 步）；
-   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=901 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
+   - 恰好列出下面 14 个 P0-CLOSE 路径、一个不多 → 情形 B：基线行 = `cargo passed=950 failed=0`、`contracts passed=27 failed=0`、`OK 25 files`、`passed 10/10`（以实测为准，差异逐条解释）。
      14 个路径：AA4 的 `proto/aite/v1/edge.proto`、`edge/cmd/aite-edge/main.go`、`edge/gen/aitepb/edge_grpc.pb.go`；
      BB2 的 `core/crates/contracts/src/evidence.rs`、`core/crates/contracts/src/lib.rs`、`core/crates/contracts/tests/evidence_vectors.rs`、
      `core/crates/evidence/src/writer.rs`、`core/crates/evidence/src/cli.rs`、`core/crates/evidence/tests/chain.rs`、
@@ -242,11 +243,11 @@ cd edge && go test -race ./... -count=1 2>&1 | grep -E -e '^ok' -e '^\?' -e '^FA
 | 1 | `cd edge && go test -race ./internal/egress/... -count=1 -v` | 上表 11 条逐个 `--- PASS`，末行 `ok  	aite/edge/internal/egress`；没有 `FAIL`、没有 `DATA RACE` |
 | 2 | `cd edge && go test -race ./internal/egress/... -count=5` | `ok`（连跑 5 遍不抖） |
 | 3–6 | 见上面代码块 | 见代码块注释 |
-| 7 | `scripts/check.sh` | 末行「全部通过」、exit 0；`cargo passed=<897 或 901> failed=0`（**Δ = 0**：本轨不加 Rust 测试）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、`passed 10/10`；A4c / A4d `-> exit 0`；Go 那格 8 行：7 行 `ok`（含 `ok  aite/edge/internal/egress`）+ 1 行 `?   aite/edge/internal/pin [no test files]`，没有 `FAIL`（现在是 10 个包，被截掉的是 `cmd/aite-edge` 与 `gen/aitepb`）；单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok` |
+| 7 | `scripts/check.sh` | 末行「全部通过」、exit 0；`cargo passed=<946 或 950> failed=0`（**Δ = 0**：本轨不加 Rust 测试）、`contracts passed=<25 或 27> failed=0`、`OK 25 files`、`passed 10/10`；A4c / A4d `-> exit 0`；Go 那格 8 行：7 行 `ok`（含 `ok  aite/edge/internal/egress`）+ 1 行 `?   aite/edge/internal/pin [no test files]`，没有 `FAIL`（现在是 10 个包，被截掉的是 `cmd/aite-edge` 与 `gen/aitepb`）；单跑 `cd edge && go test -race ./cmd/... -count=1` → `ok` |
 | 8 | `git diff --name-only origin/main...HEAD` | 每一行都以 `edge/internal/egress/` 开头，或正好是 `docs/p1/egress.md`、`review/p1/ledger/CC11.md` |
 | 9 | `git status --short` | 空（临时脚本、探针都清掉；测试只写 `t.TempDir()`，仓库里不留 `data/audit/…`） |
 
-- 第 7 行的基线数按开场自检第 1 步判定的情形取（A：897 / 25；B：901 / 27）。**别接 `| tail`**。
+- 第 7 行的基线数按开场自检第 1 步判定的情形取（A：946 / 25；B：950 / 27）。**别接 `| tail`**。
 - 原卡「reviewer 另外确认 Go 模块文件没被改」这一条由**总管审 PR 时**看；你别在命令里 grep 或 diff 那两个文件（守卫点名路径）。第 8 行本身已经保证它们不在 diff 里。
 - 本机人工步骤：无（本轨不接线、不碰受保护面、不需要真网络）。
 
