@@ -50,41 +50,92 @@ protoc-gen-go v1.36.12
 protoc-gen-go-grpc 1.6.2
 ```
 
-### 第 4 步：`scripts/check.sh`（开工前，原样）
+### 第 4 步：`scripts/check.sh`（开工前，原样全文）
 
 ```
+
 === A1 cargo build --workspace ===
+$ bash -c cd core && cargo build --workspace
+   Compiling aite-models v0.0.1 (/home/user/repo/core/crates/models)
+   Compiling aite-gateway v0.0.1 (/home/user/repo/core/crates/gateway)
+   Compiling aite-githost v0.0.1 (/home/user/repo/core/crates/githost)
+   Compiling aite-routines v0.0.1 (/home/user/repo/core/crates/routines)
+   Compiling aite-memory v0.0.1 (/home/user/repo/core/crates/memory)
+   Compiling aite-search v0.0.1 (/home/user/repo/core/crates/search)
+   Compiling aite v0.0.1 (/home/user/repo/core/crates/app)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 12s
 -> exit 0
+
 === A2 go build ./... ===
+$ bash -c cd edge && go build ./...
+
 -> exit 0
+
 === A3/C2 契约锁 --check ===
+$ core/target/debug/aite contracts lock --check
 OK 25 files
 -> exit 0
+
 === A4a cargo clippy -D warnings ===
+$ bash -c cd core && cargo clippy --workspace --all-targets -- -D warnings
+    Checking aite-models v0.0.1 (/home/user/repo/core/crates/models)
+    Checking aite-gateway v0.0.1 (/home/user/repo/core/crates/gateway)
+    Checking aite-githost v0.0.1 (/home/user/repo/core/crates/githost)
+    Checking aite-memory v0.0.1 (/home/user/repo/core/crates/memory)
+    Checking aite-routines v0.0.1 (/home/user/repo/core/crates/routines)
+    Checking aite-search v0.0.1 (/home/user/repo/core/crates/search)
+    Checking aite v0.0.1 (/home/user/repo/core/crates/app)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 01s
 -> exit 0
+
 === A4b cargo fmt --check ===
+$ bash -c cd core && cargo fmt --check
+
 -> exit 0
+
 === A4c go vet ===
+$ bash -c cd edge && go vet ./...
+
 -> exit 0
+
 === A4d gofmt ===
+$ bash -c cd edge && test -z "$(gofmt -l .)"
+
 -> exit 0
+
 === A5 cargo test --no-run（全部测试可编译） ===
+$ bash -c cd core && cargo test --workspace --no-run
+  Executable tests/test_context.rs (target/debug/deps/test_context-0c9eaf634dbf20e3)
+  Executable tests/test_final.rs (target/debug/deps/test_final-6e70a09cb9f97835)
+  Executable tests/test_in_flight.rs (target/debug/deps/test_in_flight-9cf74d9da741dd8b)
+  Executable tests/test_limits.rs (target/debug/deps/test_limits-37cdb5e9a29c39a5)
+  Executable tests/test_loop_fallbacks.rs (target/debug/deps/test_loop_fallbacks-4493b78700529fd8)
+  Executable tests/test_prompts_checklist.rs (target/debug/deps/test_prompts_checklist-e9d7c93d76b8d9d7)
+  Executable tests/test_sandbox_handoff.rs (target/debug/deps/test_sandbox_handoff-0384a5fa7bf2bfc7)
+  Executable tests/test_steer.rs (target/debug/deps/test_steer-0e71edf6a13bb207)
 -> exit 0
+
 === C1 契约测试 ===
+$ bash -c cd core && cargo test -p aite-contracts 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"contracts passed=\" p \" failed=\" f; exit (f>0)}"
 contracts passed=25 failed=0
 -> exit 0
+
 === B 全量 cargo test ===
+$ setpriv --bounding-set=-dac_override,-dac_read_search --inh-caps=-dac_override,-dac_read_search -- bash -c cd core && o=$(cargo test --workspace --no-fail-fast 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^(---- .* stdout ----|error(: test failed|: could not compile|\[E[0-9]+\]))" | sort -u | head -n 7; printf "%s\n" "$o" | grep -E "^test result" | awk -v c="$c" "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p+0 \" failed=\" f+0; exit (c != 0 || f > 0 || NR == 0)}"
 cargo passed=946 failed=0
 -> exit 0
+
 === B 全量 go test（-race） ===
+$ setpriv --bounding-set=-dac_override,-dac_read_search --inh-caps=-dac_override,-dac_read_search -- bash -c cd edge && o=$(go test -race ./... -count=1 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^FAIL[[:space:]]+aite/edge/" | head -n 5; ok=$(printf "%s\n" "$o" | grep -cE "^(ok|\?)[[:space:]]"); fail=$(printf "%s\n" "$o" | grep -cE "^FAIL[[:space:]]+aite/edge/"); echo "go packages ok=${ok} fail=${fail}"; exit "$c"
 go packages ok=9 fail=0
 -> exit 0
+
 === B8 评测（passed 10/10） ===
+$ bash -c o=$(core/target/debug/aite evals run evals/p0 --platform fake --model scripted 2>&1); c=$?; printf "%s\n" "$o" | tail -n 2; [ "$c" = 0 ] && printf "%s\n" "$o" | tail -n 1 | grep -qx "passed 10/10"
 }
 passed 10/10
 -> exit 0
+
 === B9 评测 evals/p1 ===
 B9 skip：evals/p1 尚无场景
 
@@ -92,7 +143,7 @@ B9 skip：evals/p1 尚无场景
 exit=0
 ```
 
-（中间的 `Compiling …` / `Executable …` 行略；各判定行逐字如上，与情形 A 一致。CC1 之后 Go 那格已是 `go packages ok=N fail=M` 单行口径。）
+各判定行与情形 A 逐字一致。CC1 之后 Go 那格已是 `go packages ok=N fail=M` 单行口径。
 
 ### 第 5 步：本轨附加底
 
@@ -223,6 +274,9 @@ $ (cd edge && go vet ./... && gofmt -l . | wc -l)               → 0
   (b) `events.go:246` —— 仅开关开时 `larkws.WithLogger(sdkLogAdapter)`；`sdkLogAdapter`（`events.go:328`）摊平 :77 那条嵌套切片参数，
   认出 `receive message, message_type: card` 打 INFO `feishu.card_frame frame_type=card`，**不记 payload**；Debug / Info 一律丢，Warn / Error 转 `feishu.sdk`。
   开关关时建连参数与原来逐字相同（`WithLogLevel(Warn)`、不装 logger）。
+  「不记 payload」对 Warn / Error 也成立：逐个查过 SDK `ws/*.go` 的 `logger.Warn / logger.Error` 调用点（client_lifecycle / client_message /
+  client_session / client_transport），格式串里没有一个带 payload；`client_message.go:109/115` 带的是 handler 返回的 err 文本。
+  `client_session.go:99` 会带 endpoint（长连接 URL，可能含 ticket 参数）—— 这条今天 SDK 的默认 logger 在 Warn 级也照样打到 stdout，不是本轨新增的泄漏面。
 - core 只会发 `Stop`（`control/src/card.rs`、`worker/src/card.rs` 硬编码 `vec![Stop]`），「证据」按钮只在单测里出现 —— 没去改 core。
 
 ### ⑤ 话题历史走 thread 容器（`cd52259`）
@@ -246,6 +300,9 @@ $ (cd edge && go vet ./... && gofmt -l . | wc -l)               → 0
   - `senderNameCacheSize = 1024`：一个群常说话的几十到几百人，edge 接的群有限；每条百来字节，不到 1MB。名字几乎不变，**不设 TTL**（改名等挤出 / 重启生效，只影响显示）。
   - `senderNameTimeout = 300ms`：事件要 1s 内交 core（`onEventBudget`），查名字是锦上添花；这个 ctx 同时截断 `rawRequest` 的退避重试。
   - `senderNameTripFor = 10min`：权限错误（同 ⑤ 的判据）熔断 10 分钟 + 每次熔断一条 WARN `feishu.sender_name_denied`；其它失败 Debug `feishu.sender_name_failed`。
+  - **已知缺口（生产里最先咬人的一条）**：熔断只认 ⑤ 那张清单（HTTP 403 + 99991400 / 99991401 / 230002）。测试里的「没权限」响应是 HTTP 403 + 业务码 99991672，
+    熔断靠的是 403 而不是这个码；若真机通讯录接口没权限时回的是 HTTP 200 / 400 + 某个不在清单里的业务码，`isPermissionError` 为 false → 不熔断、不打 WARN，
+    H5 授权 `contact:user.base:readonly` 之前**每条人类消息都要多付一次失败的通讯录往返**（仍有 300ms 上限，不影响投递）。码值按派单不许猜，待 H7 真机补进清单。
 - `fillSenderName`（`reads.go:471`）在 `dispatchRaw` 里 `Normalize` 之后、交 sink 之前调（`events.go:402`）：仅 MESSAGE / CARD_ACTION、HUMAN、`sender_id` 非空且 `sender_name` 为空。
 - **只在 `New()` 里装配**（`platformOptions.senderNames=true`，`platform.go:209`）；`newPlatform` 默认 false，`dispatchPlatform` 等测试不打公网；`Normalize` 仍是纯函数，老黄金文件零变化。
   通讯录读不过出站令牌桶（`rateLimited` 未设）。要 `contact:user.base:readonly`（H5）。
@@ -596,7 +653,7 @@ PreToolUse:Bash hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -
 | 三个环境变量换成 `FeishuConfig.api_base / card_buttons`（passive_listen 同理） | Go 配置镜像不在本轨 | DD8 / DD9 / DD10 |
 | 撤回的「删根」语义（撤回的是话题 root 时怎么办；撤回事件没有操作者，见 §2③） | core 语义 | DD3 |
 | `card_buttons` 默认值（按 H8 结果翻） | 要真机点一次 | DD10（按 H8） |
-| 权限错误码清单真机核对（`99991400` 疑为限流）；通讯录权限错误的真实码 | 云端连不上飞书 | H7 |
+| 权限错误码清单真机核对（`99991400` 疑为限流）；通讯录没权限时的真实 HTTP 状态与业务码（不在清单里就不熔断，见 §2⑥「已知缺口」） | 云端连不上飞书 | H7 |
 | `api_test.go` / `platform_test.go` / `helpers_test.go` 在 W2 没有主人（英文原卡 DD9 只列了 `platform.go`、`api.go`；DD9 / DD10 都没列 `helpers_test.go`，而 DD9 给 `testdata/read/` 加夹具根要改它） | 本轨只定布局、不定 W2 归属 | 总管补进 DD9 可写面 |
 | `sendMessage` 的 `dedupeKey` 参数接 `OutboundText.dedupe_key`（飞书 uuid 要求 ≤50 字符，接的时候要截断或哈希） | 契约字段还没有 | DD10（依赖 T0） |
 | 仓库推送 / draft PR（本会话没权限，见文首） | 会话 sources 设置 | 总管 |
@@ -608,6 +665,8 @@ PreToolUse:Bash hook error: [d=$(git rev-parse --show-toplevel 2>/dev/null); [ -
 - ⑤ 的「含 root」按「root 进候选集、再取最近 limit 条」实现：话题回复超过 limit 条时 root 会被窗口截掉 —— 与原整群筛法同口径；
   若 CC3 / CC2 要「root 永远在」，改 `readThreadHistory` 末尾一行即可，写在这里备查。
 - 没跑真容器那组（本轨不碰 sandbox）。
+- **本轨新增的时序敏感测试**（CPU 紧时可能假红，先单跑再下结论）：`TestSenderNameDegradesWithin300ms/慢`（断言墙钟 < 1s）、
+  `TestCardActionTriggerArrivesAsEventFrame`（真 websocket + `settleSink` 真 sleep，与 card_frames 那组同一性质）。
 
 ## 9. 契约缺口（给 T0 / T0.1）
 
