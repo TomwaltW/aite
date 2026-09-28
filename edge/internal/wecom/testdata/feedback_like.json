@@ -1,0 +1,14 @@
+{
+  "msgid": "fb-msg-1",
+  "aibotid": "bot-test",
+  "chatid": "chat-fb",
+  "chattype": "single",
+  "from": {"userid": "u-like"},
+  "event": {
+    "eventtype": "feedback_event",
+    "feedback_event": {
+      "id": "stream-abc",
+      "type": 1
+    }
+  }
+}
