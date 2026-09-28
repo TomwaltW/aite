@@ -365,7 +365,6 @@ async fn recover_orphan_tasks_leaves_finished_tasks_alone() {
         TaskStatus::Delivered,
         TaskStatus::Failed,
         TaskStatus::Cancelled,
-        TaskStatus::Answering,
     ] {
         task.status = done;
         task.result_summary = "原来的摘要".to_string();

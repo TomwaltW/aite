@@ -71,6 +71,61 @@ async fn recover_orphan_tasks_clears_the_zombie_after_crash() {
     store2.close().await.unwrap();
 }
 
+/// 造一个停在 `status` 的任务，然后崩溃（只关 fd）。返回 (task_id, task_no)。
+async fn crash_with_a_task_stuck_at(db: &std::path::Path, status: TaskStatus) -> (String, String) {
+    let store = open_store(db).await;
+    let task_no = seed_task(&store, "ses_1", "tsk_1", CHAT, "画个图").await;
+    let mut task = store.get_task("tsk_1").await.unwrap().expect("任务在");
+    task.status = status;
+    task.result_summary = "原来的摘要".to_string();
+    store.update_task(&task).await.unwrap();
+    store.close().await.unwrap(); // 只关 fd，收尾序列全跳过
+    (task.id, task_no)
+}
+
+#[tokio::test]
+async fn answering_task_recovered_as_orphan() {
+    // CC5：worker 没发过卡片的那一路先落 answering、再 send_text、最后落 delivered。
+    // 进程死在中间 → 重启后它必须被当孤儿收掉，否则永远停在 answering、群里没人收场。
+    let tmp = TempDir::new().unwrap();
+    let (task_id, task_no) =
+        crash_with_a_task_stuck_at(&db_path(&tmp), TaskStatus::Answering).await;
+
+    let store2 = open_store(db_path(&tmp)).await;
+    let orphans = store2.recover_orphan_tasks().await.unwrap();
+    assert_eq!(
+        orphans.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+        std::slice::from_ref(&task_id)
+    );
+    assert_eq!(orphans[0].status, TaskStatus::Failed);
+    assert_eq!(orphans[0].task_no, task_no, "回帖要用它，得带得出来");
+    assert_eq!(orphans[0].result_summary, ORPHAN_RESULT_SUMMARY);
+    store2.close().await.unwrap();
+
+    // 落盘了：换一个实例重读
+    let store3 = open_store(db_path(&tmp)).await;
+    let reread = store3.get_task(&task_id).await.unwrap().expect("任务还在");
+    assert_eq!(reread.status, TaskStatus::Failed);
+    assert_eq!(reread.result_summary, ORPHAN_RESULT_SUMMARY);
+    assert!(store3.recover_orphan_tasks().await.unwrap().is_empty());
+    store3.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn awaiting_approval_not_recovered_as_orphan() {
+    // awaiting_approval 在启动时怎么处理归 EE7（D17：v1 审批不跨重启）—— store 不当孤儿收。
+    let tmp = TempDir::new().unwrap();
+    let (task_id, _) =
+        crash_with_a_task_stuck_at(&db_path(&tmp), TaskStatus::AwaitingApproval).await;
+
+    let store2 = open_store(db_path(&tmp)).await;
+    assert!(store2.recover_orphan_tasks().await.unwrap().is_empty());
+    let reread = store2.get_task(&task_id).await.unwrap().expect("任务还在");
+    assert_eq!(reread.status, TaskStatus::AwaitingApproval);
+    assert_eq!(reread.result_summary, "原来的摘要");
+    store2.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn journal_mode_is_delete_and_crash_leaves_no_residue() {
     // P0 的 journal 模式是 `delete`（不是 WAL）：崩溃后不留 `-wal` / `-journal`。

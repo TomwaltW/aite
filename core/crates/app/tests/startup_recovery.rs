@@ -473,10 +473,10 @@ async fn an_orphan_without_a_session_does_not_block_takeoff() {
 
 /// 连「查出残局」这一步都炸了，进程照样起得来。
 ///
-/// 怎么让它炸：把 `tasks` 表换成**缺 `data` 列**的样子。`init()` 的
-/// `CREATE TABLE IF NOT EXISTS` 与 `CREATE INDEX … (session_id)` 照样过得去，
-/// 而 `recover_orphan_tasks` 的 `SELECT data FROM tasks` 必然报「no such column」——
-/// 正好只砸这一支，不连累起飞。
+/// 怎么让它炸：先正常 `init()` 一次把库迁到最新 schema 版本，再把 `tasks` 表换成
+/// **缺 `data` 列**的样子。起飞时的 `init()` 读到版本已是最新就直接返回（只读
+/// `schema_version`，不碰 `tasks`），而 `recover_orphan_tasks` 的 `SELECT data FROM tasks`
+/// 必然报「no such column」—— 正好只砸这一支，不连累起飞。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_broken_store_query_does_not_block_takeoff() {
     let tmp = tempfile::tempdir().expect("tmpdir");
@@ -556,8 +556,10 @@ fn delete_session_row(db_path: &str, session_id: &str) {
 
 /// 把 `tasks` 表换成**缺 `data` 列**的样子。
 ///
-/// 留着 `session_id`，这样 `init()` 里那条 `CREATE INDEX … (session_id)` 照样建得出来 ——
-/// 只有 `recover_orphan_tasks` 的 `SELECT data FROM tasks` 会红。
+/// 调用前库必须已经 `init()` 过（版本行已是最新）：之后的 `init()` 走只读快路径、不碰
+/// `tasks`，所以这里删掉的查询列与索引（`idx_tasks_session`、迁移 2 的 `idx_tasks_chat_created`
+/// 随 `DROP TABLE` 一起没了）都不会让起飞红 —— 只有 `recover_orphan_tasks` 的
+/// `SELECT data FROM tasks` 会红。
 fn break_tasks_table(db_path: &str) {
     let conn = rusqlite::Connection::open(db_path).expect("open db");
     conn.execute_batch(
