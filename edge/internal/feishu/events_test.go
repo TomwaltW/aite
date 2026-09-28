@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -471,7 +472,8 @@ func TestUnsubscribedEventIsDroppedWithoutCallingHandler(t *testing.T) {
 	p, capture := dispatchPlatform(t, sink, 0, nil)
 
 	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
-	asMap(raw["header"])["event_type"] = "im.chat.member.user.added_v1"
+	// CC8 起成员事件已订阅；换一个仍没订阅的（与 TestUnsubscribedEventTypeIsIgnored 同一个）。
+	asMap(raw["header"])["event_type"] = "im.message.message_read_v1"
 	if err := p.dispatchRaw(context.Background(), raw); err != nil {
 		t.Fatalf("没订阅的事件不该报错：%v", err)
 	}
@@ -584,13 +586,80 @@ func TestSlowHandlerIsReported(t *testing.T) {
 func sampleEnvelopes(t *testing.T) map[string]map[string]any {
 	t.Helper()
 	return map[string]map[string]any{
-		eventMessageReceive: loadFixture(t, "message_at_bot_toplevel", ".json"),
-		eventCardAction:     cardActionPayload,
+		eventMessageReceive:  loadFixture(t, "message_at_bot_toplevel", ".json"),
+		eventCardAction:      cardActionPayload,
+		eventMessageRecalled: loadFixture(t, "recalled", ".json"),
+		eventBotAdded:        loadFixture(t, "bot_added", ".json"),
+		eventUserAdded:       loadFixture(t, "member_added", ".json"),
+		eventUserDeleted:     loadFixture(t, "member_deleted", ".json"),
+		eventReactionCreated: loadFixtureFile(t, reactionFixture("reaction_created")),
+		eventReactionDeleted: loadFixtureFile(t, reactionFixture("reaction_deleted")),
 	}
 }
 
 // droppedByDesign 是表里登记了、但归一化后故意不上送的事件类型。
-var droppedByDesign = map[string]bool{}
+var droppedByDesign = map[string]bool{
+	eventReactionCreated: true,
+	eventReactionDeleted: true,
+}
+
+func reactionFixture(name string) string {
+	return filepath.Join(testEventFixturesDir, "reaction", name+".json")
+}
+
+// TestReactionIsParsedAndDropped 钉住表情事件：结构体解析对；dispatchRaw 不进 sink、
+// 返回 nil、打 feishu.reaction_dropped；buildDispatcher().Do 返回 nil 而不是 NotFound
+// （不注册的话长连接回 500，平台会一直重推）。
+func TestReactionIsParsedAndDropped(t *testing.T) {
+	cases := []struct {
+		name string
+		want reactionEvent
+	}{
+		{"reaction_created", reactionEvent{
+			EventID: "evt_reaction_created_0105", MessageID: testRootMsgID, EmojiType: "THUMBSUP",
+			OperatorType: "user", OperatorID: "ou_zhang_san_00000000000000000001", Added: true,
+		}},
+		{"reaction_deleted", reactionEvent{
+			EventID: "evt_reaction_deleted_0106", MessageID: testRootMsgID, EmojiType: "THUMBSUP",
+			OperatorType: "app", OperatorID: "cli_other_app_000000001", Added: false,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			raw := loadFixtureFile(t, reactionFixture(c.name))
+			got, ok := parseReaction(raw)
+			if !ok {
+				t.Fatal("parseReaction 没认出表情事件")
+			}
+			if got != c.want {
+				t.Errorf("解析结果 = %+v，要 %+v", got, c.want)
+			}
+
+			sink := &recordingSink{}
+			p, capture := dispatchPlatform(t, sink, 0, nil)
+			if err := p.dispatchRaw(context.Background(), raw); err != nil {
+				t.Fatalf("表情事件不该报错（报错会让平台重推）：%v", err)
+			}
+			if n := len(sink.seen()); n != 0 {
+				t.Errorf("表情事件暂不上送，sink 收到 %d 条", n)
+			}
+			records := capture.find("feishu.reaction_dropped")
+			if len(records) != 1 || records[0].Level != slog.LevelDebug {
+				t.Errorf("该打一条 Debug 的 feishu.reaction_dropped，得到 %v", records)
+			} else if v, _ := attr(records[0], "emoji_type"); v.String() != "THUMBSUP" {
+				t.Errorf("日志里的 emoji_type = %v", v.Any())
+			}
+
+			delivered, err := dispatchThroughSDK(t, raw)
+			if err != nil {
+				t.Fatalf("buildDispatcher().Do 对表情事件该返回 nil，得到 %v", err)
+			}
+			if len(delivered) != 1 {
+				t.Errorf("表情事件该到 onRaw 1 次，得到 %d 次", len(delivered))
+			}
+		})
+	}
+}
 
 // dispatchThroughSDK 把一份信封经 buildDispatcher().Do 投一遍，返回 onRaw 收到的信封。
 func dispatchThroughSDK(t *testing.T, envelope map[string]any) ([]map[string]any, error) {

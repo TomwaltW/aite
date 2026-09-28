@@ -2,8 +2,10 @@
 //
 // 飞书原始事件 → pb.NormalizedEvent（proto/aite/v1/events.proto）。
 //
-// 只认 P0 订阅的两类事件：im.message.receive_v1 和 card.action.trigger。
-// 其余事件返回 nil —— P0 压根没订阅它们，凭空映射成别的 EventKind 就是在发明契约。
+// 认的事件都登记在分发表（events.go）里：P0 的 im.message.receive_v1 / card.action.trigger，
+// CC8 加的撤回（→ MESSAGE_DELETED）、机器人入群（→ BOT_ADDED）、成员进出（→ MEMBER_CHANGED），
+// 以及只解析、暂不上送的表情回复（等契约里的 EventKind::Reaction）。
+// 表里没有的事件返回 nil —— 没订阅的东西凭空映射成别的 EventKind 就是在发明契约。
 //
 // 归一化全程只读原始 map，不经过 SDK 的类型对象：raw 要原样进 NormalizedEvent.raw
 // 供审计（events.proto「任何逻辑不得依赖 raw」），过一遍 SDK 模型再吐回来只会丢字段。
@@ -11,6 +13,7 @@ package feishu
 
 import (
 	"encoding/json"
+	"log/slog"
 	"math"
 	"regexp"
 	"strconv"
@@ -25,6 +28,17 @@ import (
 
 const platformName = "feishu"
 
+// CC8 订阅的新事件。字段路径以 lark-oapi-go v3.12.0 生成的结构体 json tag 为准
+// （service/im/v1/model.go 的 P2*V1Data），见各归一化函数的注释。
+const (
+	eventMessageRecalled = "im.message.recalled_v1"
+	eventBotAdded        = "im.chat.member.bot.added_v1"
+	eventUserAdded       = "im.chat.member.user.added_v1"
+	eventUserDeleted     = "im.chat.member.user.deleted_v1"
+	eventReactionCreated = "im.message.reaction.created_v1"
+	eventReactionDeleted = "im.message.reaction.deleted_v1"
+)
+
 // init 把本文件归一化的事件登记进分发表（events.go）。
 func init() {
 	registerEvent(eventMessageReceive, eventEntry{normalize: NormalizeMessage})
@@ -34,6 +48,14 @@ func init() {
 		},
 		callback: true,
 	})
+
+	registerEvent(eventMessageRecalled, eventEntry{normalize: normalizeRecalled, onDropped: logMalformed})
+	registerEvent(eventBotAdded, eventEntry{normalize: normalizeBotAdded, onDropped: logMalformed})
+	registerEvent(eventUserAdded, eventEntry{normalize: normalizeMemberChanged, onDropped: logMalformed})
+	registerEvent(eventUserDeleted, eventEntry{normalize: normalizeMemberChanged, onDropped: logMalformed})
+	// 表情事件只解析、不上送：H5 会在控制台订阅它们，不注册的话 SDK 回 NotFound → 平台重推。
+	registerEvent(eventReactionCreated, eventEntry{normalize: dropReaction, onDropped: logReactionDropped})
+	registerEvent(eventReactionDeleted, eventEntry{normalize: dropReaction, onDropped: logReactionDropped})
 }
 
 // senderKindByType 是飞书 sender.sender_type → 契约 SenderKind。
@@ -622,6 +644,140 @@ func NormalizeCardAction(raw map[string]any, workspaceID, tenantID string) *pb.N
 		OccurredAt: timestamppb.New(occurredAt),
 		Raw:        rawStruct(raw),
 	}
+}
+
+// ---------------------------------------------------------------------------
+// CC8 的新事件：撤回、入群、成员进出、表情
+// ---------------------------------------------------------------------------
+
+// chatEvent 是撤回 / 入群 / 成员事件共用的形状。
+//
+// 形状规则（违反就在 core 被判 INVALID_ARGUMENT，而 edge 的 ingress 对它是静默丢）：
+//   - event_id 只取 header.event_id，缺了返回 nil（别拿 message_id 顶替：入群事件根本没有
+//     message_id，拿别的 id 冒充会让 core 的去重把两条不同事件当成一条）；
+//   - anchor 必须有；没有触发消息的事件 message_id 留空 —— 下游把 anchor.message_id
+//     当 reply_to 用，塞 event_id 进去就是回复一条不存在的消息；
+//   - 事件体里没有 chat_type，一律 GROUP（这几类事件只在群里发生）；
+//   - occurred_at 取 header.create_time，解析不了回退 now。
+func chatEvent(raw map[string]any, workspaceID, tenantID string, kind pb.EventKind, chatID, messageID, senderID string) *pb.NormalizedEvent {
+	header := asMap(raw["header"])
+	eventID := mapStr(header, "event_id")
+	if eventID == "" {
+		return nil
+	}
+	occurredAt, ok := toTime(header["create_time"])
+	if !ok {
+		occurredAt = timeNow()
+	}
+	return &pb.NormalizedEvent{
+		EventId:     eventID,
+		Kind:        kind,
+		Platform:    platformName,
+		TenantId:    tenantID,
+		WorkspaceId: firstNonEmpty(mapStr(header, "app_id"), workspaceID),
+		ChatId:      chatID,
+		ChatType:    pb.ChatType_CHAT_TYPE_GROUP,
+		SenderId:    senderID,
+		// 非 HUMAN 在 core 的 R1 就被丢，到不了记这些事件的 R4。
+		SenderKind: pb.SenderKind_SENDER_KIND_HUMAN,
+		Text:       "",
+		Mentioned:  false,
+		Anchor: &pb.Anchor{
+			Platform:  platformName,
+			ChatId:    chatID,
+			MessageId: messageID,
+		},
+		OccurredAt: timestamppb.New(occurredAt),
+		Raw:        rawStruct(raw),
+	}
+}
+
+// normalizeRecalled 把 im.message.recalled_v1 归一化成 MESSAGE_DELETED。
+//
+// 字段（P2MessageRecalledV1Data，model.go:16640）：event.message_id / event.chat_id。
+// 事件体里没有操作者（只有 message_id / chat_id / recall_time / recall_type），撤回的人
+// 是发送者本人或群主 / 管理员，一律记 HUMAN、sender_id 留空。
+func normalizeRecalled(raw map[string]any, _, workspaceID, tenantID string) *pb.NormalizedEvent {
+	event := asMap(raw["event"])
+	return chatEvent(raw, workspaceID, tenantID, pb.EventKind_EVENT_KIND_MESSAGE_DELETED,
+		mapStr(event, "chat_id"), mapStr(event, "message_id"), "")
+}
+
+// normalizeBotAdded 把 im.chat.member.bot.added_v1 归一化成 BOT_ADDED。
+//
+// 字段（P2ChatMemberBotAddedV1Data，model.go:16498）：event.chat_id / event.operator_id.open_id。
+func normalizeBotAdded(raw map[string]any, _, workspaceID, tenantID string) *pb.NormalizedEvent {
+	event := asMap(raw["event"])
+	return chatEvent(raw, workspaceID, tenantID, pb.EventKind_EVENT_KIND_BOT_ADDED,
+		mapStr(event, "chat_id"), "", mapStr(asMap(event["operator_id"]), "open_id"))
+}
+
+// normalizeMemberChanged 把 im.chat.member.user.added_v1 / deleted_v1 归一化成 MEMBER_CHANGED。
+//
+// 字段（P2ChatMemberUserAddedV1Data model.go:16546、P2ChatMemberUserDeletedV1Data model.go:16572）：
+// event.chat_id / event.operator_id.open_id。加入还是退出、谁进谁出（event.users[]）契约里
+// 没有字段装，只留在 raw 里（契约缺口见回执）。
+func normalizeMemberChanged(raw map[string]any, _, workspaceID, tenantID string) *pb.NormalizedEvent {
+	event := asMap(raw["event"])
+	return chatEvent(raw, workspaceID, tenantID, pb.EventKind_EVENT_KIND_MEMBER_CHANGED,
+		mapStr(event, "chat_id"), "", mapStr(asMap(event["operator_id"]), "open_id"))
+}
+
+// logMalformed 是新事件归一化成 nil（缺 header.event_id）时的日志。
+func logMalformed(logger *slog.Logger, raw map[string]any) {
+	logger.Debug("feishu.event_malformed",
+		"type", mapStr(asMap(raw["header"]), "event_type"), "reason", "缺 header.event_id")
+}
+
+// reactionEvent 是表情回复事件解析出来的样子。暂不上送：契约里还没有 EventKind::Reaction
+// （T0 计划里加），DD9 接上之前只解析、打 Debug。
+//
+// 字段（P2MessageReactionCreatedV1Data model.go:16676、P2MessageReactionDeletedV1Data model.go:16700）：
+// event.message_id、event.reaction_type.emoji_type（Emoji，model.go:2751）、event.operator_type
+// （user / app）、event.user_id.open_id（UserId，model.go:8453；operator_type=user 时有）、
+// event.app_id（operator_type=app 时有）、event.action_time（毫秒）。
+type reactionEvent struct {
+	EventID      string
+	MessageID    string
+	EmojiType    string
+	OperatorType string
+	// OperatorID 是 user_id.open_id（用户）或 app_id（应用）。
+	OperatorID string
+	// Added 区分增 / 删：created_v1 → true，deleted_v1 → false。
+	Added bool
+}
+
+// parseReaction 解析表情回复事件；不是这两类事件返回 ok=false。
+func parseReaction(raw map[string]any) (reactionEvent, bool) {
+	header := asMap(raw["header"])
+	var added bool
+	switch mapStr(header, "event_type") {
+	case eventReactionCreated:
+		added = true
+	case eventReactionDeleted:
+		added = false
+	default:
+		return reactionEvent{}, false
+	}
+	event := asMap(raw["event"])
+	return reactionEvent{
+		EventID:      mapStr(header, "event_id"),
+		MessageID:    mapStr(event, "message_id"),
+		EmojiType:    mapStr(asMap(event["reaction_type"]), "emoji_type"),
+		OperatorType: mapStr(event, "operator_type"),
+		OperatorID:   firstNonEmpty(mapStr(asMap(event["user_id"]), "open_id"), mapStr(event, "app_id")),
+		Added:        added,
+	}, true
+}
+
+// dropReaction 是表情事件的归一化：恒为 nil（不上送、不报错、不重推）。
+func dropReaction(map[string]any, string, string, string) *pb.NormalizedEvent { return nil }
+
+func logReactionDropped(logger *slog.Logger, raw map[string]any) {
+	r, _ := parseReaction(raw)
+	logger.Debug("feishu.reaction_dropped",
+		"event_id", r.EventID, "message_id", r.MessageID, "emoji_type", r.EmojiType,
+		"operator_type", r.OperatorType, "added", r.Added)
 }
 
 // timeNow 是 time.Now 的可替换钩子（测试里钉住回退时间）。

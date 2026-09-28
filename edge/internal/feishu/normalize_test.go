@@ -83,7 +83,7 @@ func TestRequiredFixtureExists(t *testing.T) {
 func TestEveryFixtureHasExpected(t *testing.T) {
 	for _, name := range fixtureNames(t) {
 		t.Run(name, func(t *testing.T) {
-			if _, err := os.Stat(filepath.Join(testFixturesDir, name+".expected.json")); err != nil {
+			if _, err := os.Stat(filepath.Join(fixtureDir(name), name+".expected.json")); err != nil {
 				t.Fatalf("%s 缺 .expected.json", name)
 			}
 		})
@@ -99,7 +99,7 @@ func TestFixtureMatchesExpectedByteForByte(t *testing.T) {
 	for _, name := range fixtureNames(t) {
 		t.Run(name, func(t *testing.T) {
 			actual := goldenBytes(t, normalized(t, name))
-			path := filepath.Join(testFixturesDir, name+".expected.json")
+			path := filepath.Join(fixtureDir(name), name+".expected.json")
 			if *updateGolden {
 				if err := os.WriteFile(path, actual, 0o644); err != nil {
 					t.Fatalf("写 expected 失败：%v", err)
@@ -122,7 +122,7 @@ func TestFixtureMatchesExpectedByteForByte(t *testing.T) {
 func TestExpectedRoundTripsBackIntoTheContract(t *testing.T) {
 	for _, name := range fixtureNames(t) {
 		t.Run(name, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join(testFixturesDir, name+".expected.json"))
+			data, err := os.ReadFile(filepath.Join(fixtureDir(name), name+".expected.json"))
 			if err != nil {
 				t.Fatalf("读 expected 失败：%v", err)
 			}
@@ -584,5 +584,93 @@ func TestRawStripsBothVerificationTokens(t *testing.T) {
 	// 调用方传进来的 map 不许被就地改（Python 版 raw 是同一引用，Go 版是拷贝）。
 	if _, ok := asMap(raw["event"])["token"]; !ok {
 		t.Error("归一化不该就地改调用方的 map")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CC8：撤回 / 入群 / 成员事件（手写字面量；黄金文件只是兜底）
+// ---------------------------------------------------------------------------
+
+// TestNewEventKindsNormalize 对每个新夹具钉 kind / event_id / chat_id / anchor.message_id /
+// sender_id / sender_kind，外加 core 的契约闸门要的形状（convert.rs：kind / chat_type /
+// sender_kind 不许 UNSPECIFIED、anchor 与 occurred_at 必须有）。
+func TestNewEventKindsNormalize(t *testing.T) {
+	const zhangSan = "ou_zhang_san_00000000000000000001"
+	cases := []struct {
+		fixture, eventID, messageID, senderID string
+		kind                                  pb.EventKind
+	}{
+		// 撤回：anchor.message_id = 被撤回的消息；事件体没有操作者 → sender_id 空。
+		{"recalled", "evt_recalled_0101", testRootMsgID, "", pb.EventKind_EVENT_KIND_MESSAGE_DELETED},
+		// 入群 / 成员：没有触发消息 → anchor.message_id 留空（别拿 event_id 冒充）。
+		{"bot_added", "evt_bot_added_0102", "", zhangSan, pb.EventKind_EVENT_KIND_BOT_ADDED},
+		{"member_added", "evt_member_added_0103", "", zhangSan, pb.EventKind_EVENT_KIND_MEMBER_CHANGED},
+		{"member_deleted", "evt_member_deleted_0104", "", zhangSan, pb.EventKind_EVENT_KIND_MEMBER_CHANGED},
+	}
+	for _, c := range cases {
+		t.Run(c.fixture, func(t *testing.T) {
+			event := normalized(t, c.fixture)
+			if event.GetKind() != c.kind {
+				t.Errorf("kind = %v，要 %v", event.GetKind(), c.kind)
+			}
+			if event.GetEventId() != c.eventID {
+				t.Errorf("event_id = %q，要 %q", event.GetEventId(), c.eventID)
+			}
+			if event.GetChatId() != testChatID {
+				t.Errorf("chat_id = %q", event.GetChatId())
+			}
+			if event.GetAnchor() == nil {
+				t.Fatal("anchor 不许是 nil（core 判 INVALID_ARGUMENT，edge 静默丢）")
+			}
+			if got := event.GetAnchor().GetMessageId(); got != c.messageID {
+				t.Errorf("anchor.message_id = %q，要 %q", got, c.messageID)
+			}
+			if got := event.GetAnchor().GetChatId(); got != testChatID {
+				t.Errorf("anchor.chat_id = %q", got)
+			}
+			if event.GetAnchor().GetPlatform() != "feishu" {
+				t.Errorf("anchor.platform = %q", event.GetAnchor().GetPlatform())
+			}
+			if event.GetSenderId() != c.senderID {
+				t.Errorf("sender_id = %q，要 %q", event.GetSenderId(), c.senderID)
+			}
+			// 非 HUMAN 在 core 的 R1 就被丢，到不了记这些事件的 R4。
+			if event.GetSenderKind() != pb.SenderKind_SENDER_KIND_HUMAN {
+				t.Errorf("sender_kind = %v，要 HUMAN", event.GetSenderKind())
+			}
+			if event.GetChatType() != pb.ChatType_CHAT_TYPE_GROUP {
+				t.Errorf("chat_type = %v，要 GROUP", event.GetChatType())
+			}
+			if event.GetOccurredAt() == nil {
+				t.Error("occurred_at 必须有")
+			}
+			if event.GetMentioned() || event.GetText() != "" {
+				t.Errorf("mentioned=%v text=%q，要 false / 空", event.GetMentioned(), event.GetText())
+			}
+			if event.GetWorkspaceId() != testAppID {
+				t.Errorf("workspace_id = %q", event.GetWorkspaceId())
+			}
+
+			// 缺 header.event_id → 不产出（别拿 message_id 顶替）。
+			raw := loadFixture(t, c.fixture, ".json")
+			delete(asMap(raw["header"]), "event_id")
+			if got := Normalize(raw, testBotOpenID, testAppID, "default"); got != nil {
+				t.Errorf("缺 event_id 该返回 nil，得到 event_id=%q", got.GetEventId())
+			}
+		})
+	}
+
+	// occurred_at 取 header.create_time（撤回是 2026-09-09T01:08:00Z），解析不了回退 now。
+	if got := normalized(t, "recalled").GetOccurredAt().AsTime().Format(time.RFC3339); got != "2026-09-09T01:08:00Z" {
+		t.Errorf("occurred_at = %s", got)
+	}
+	raw := loadFixture(t, "bot_added", ".json")
+	asMap(raw["header"])["create_time"] = "不是时间戳"
+	fixed := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	restore := timeNow
+	timeNow = func() time.Time { return fixed }
+	defer func() { timeNow = restore }()
+	if got := Normalize(raw, testBotOpenID, testAppID, "default").GetOccurredAt().AsTime(); !got.Equal(fixed) {
+		t.Errorf("create_time 解析不了该回退 now，得到 %s", got)
 	}
 }

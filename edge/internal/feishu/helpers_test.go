@@ -34,6 +34,8 @@ const (
 	testRootMsgID   = "om_toplevel_0001"
 	testCardMsgID   = "om_checklist_card_0001"
 	testFixturesDir = "../../testdata/feishu"
+	// testEventFixturesDir 是 CC8 新事件的夹具（本包自己的 testdata）。
+	testEventFixturesDir = "testdata/events"
 )
 
 // ---------------------------------------------------------------------------
@@ -363,26 +365,49 @@ func outboundPlatform(t *testing.T, f *fakeFeishu) (*Platform, *fakeClock) {
 // fixture
 // ---------------------------------------------------------------------------
 
+// fixtureRoots 是黄金循环扫的两个根：老的 7 对（dev-spec B1 钉着，一个字节都不许动）
+// 与 CC8 新事件的夹具（本包 testdata/events/）。glob 不递归，表情夹具放子目录 reaction/，
+// 不进黄金循环（它们不产出 NormalizedEvent，没有 expected 可比）。
+var fixtureRoots = []string{testFixturesDir, testEventFixturesDir}
+
 func fixtureNames(t *testing.T) []string {
 	t.Helper()
-	entries, err := filepath.Glob(filepath.Join(testFixturesDir, "*.json"))
-	if err != nil {
-		t.Fatalf("列 fixture 失败：%v", err)
-	}
 	var names []string
-	for _, p := range entries {
-		base := filepath.Base(p)
-		if len(base) > len(".expected.json") && base[len(base)-len(".expected.json"):] == ".expected.json" {
-			continue
+	for _, root := range fixtureRoots {
+		entries, err := filepath.Glob(filepath.Join(root, "*.json"))
+		if err != nil {
+			t.Fatalf("列 fixture 失败：%v", err)
 		}
-		names = append(names, base[:len(base)-len(".json")])
+		for _, p := range entries {
+			base := filepath.Base(p)
+			if len(base) > len(".expected.json") && base[len(base)-len(".expected.json"):] == ".expected.json" {
+				continue
+			}
+			names = append(names, base[:len(base)-len(".json")])
+		}
 	}
 	return names
 }
 
+// fixtureDir 返回 name.json 所在的根；两个根都没有就回老根（让调用方按老口径报「读不到」）。
+func fixtureDir(name string) string {
+	for _, root := range fixtureRoots {
+		if _, err := os.Stat(filepath.Join(root, name+".json")); err == nil {
+			return root
+		}
+	}
+	return testFixturesDir
+}
+
 func loadFixture(t *testing.T, name, suffix string) map[string]any {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(testFixturesDir, name+suffix))
+	return loadFixtureFile(t, filepath.Join(fixtureDir(name), name+suffix))
+}
+
+// loadFixtureFile 按显式路径读一份夹具（表情夹具不在黄金循环里，按路径读）。
+func loadFixtureFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("读 fixture 失败：%v", err)
 	}
