@@ -12,6 +12,8 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -404,4 +406,169 @@ func anyMap(m map[string]bool) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// 事件投递
+// ---------------------------------------------------------------------------
+
+// TestRawEventsAreNormalizedAndDelivered
+// 对应 test_raw_events_are_normalized_and_delivered。
+func TestRawEventsAreNormalizedAndDelivered(t *testing.T) {
+	sink := &recordingSink{}
+	p, _ := dispatchPlatform(t, sink, 0, nil)
+
+	if err := p.dispatchRaw(context.Background(),
+		loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+		t.Fatalf("dispatchRaw 失败：%v", err)
+	}
+
+	seen := sink.seen()
+	if len(seen) != 1 {
+		t.Fatalf("事件数 = %d，要 1", len(seen))
+	}
+	if got := seen[0].GetText(); got != "把这个季度的销售数据画成趋势图" {
+		t.Errorf("text = %q", got)
+	}
+	if !seen[0].GetMentioned() {
+		t.Error("mentioned 要是 true")
+	}
+	if got := seen[0].GetWorkspaceId(); got != testAppID {
+		t.Errorf("workspace_id = %q", got)
+	}
+}
+
+// TestAdapterDoesNotDeduplicateReplayedEvents
+// 对应 test_adapter_does_not_deduplicate_replayed_events。
+//
+// 重连后平台重推的重复事件由 core 靠 event_id 去重，adapter 不管。
+func TestAdapterDoesNotDeduplicateReplayedEvents(t *testing.T) {
+	sink := &recordingSink{}
+	p, _ := dispatchPlatform(t, sink, 0, nil)
+
+	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
+	for i := 0; i < 2; i++ {
+		if err := p.dispatchRaw(context.Background(), raw); err != nil {
+			t.Fatalf("第 %d 次 dispatchRaw 失败：%v", i+1, err)
+		}
+	}
+
+	seen := sink.seen()
+	if len(seen) != 2 {
+		t.Fatalf("事件数 = %d，要 2（adapter 私自去重的话 core 的 events.duplicate 就永远是 0）", len(seen))
+	}
+	if seen[0].GetEventId() != seen[1].GetEventId() {
+		t.Error("两条的 event_id 该相同")
+	}
+}
+
+// TestUnsubscribedEventIsDroppedWithoutCallingHandler
+// 对应 test_unsubscribed_event_is_dropped_without_calling_handler。
+func TestUnsubscribedEventIsDroppedWithoutCallingHandler(t *testing.T) {
+	sink := &recordingSink{}
+	p, capture := dispatchPlatform(t, sink, 0, nil)
+
+	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
+	asMap(raw["header"])["event_type"] = "im.chat.member.user.added_v1"
+	if err := p.dispatchRaw(context.Background(), raw); err != nil {
+		t.Fatalf("没订阅的事件不该报错：%v", err)
+	}
+
+	if got := sink.seen(); len(got) != 0 {
+		t.Errorf("没订阅的事件不该进 sink，得到 %d 条", len(got))
+	}
+	if !capture.has("feishu.event_ignored") {
+		t.Error("该打一条 feishu.event_ignored")
+	}
+}
+
+// TestHandlerFailureDoesNotKillTheConnection
+// 对应 test_handler_exception_does_not_kill_the_connection。
+//
+// 与 Python 的一处有意差异：Python 把回调异常吞掉只打日志；Go 版把 error 返回给
+// SDK 让平台重推（spec §2.1）。「不带走长连接」这条不变 —— Start 的循环照转。
+func TestHandlerFailureDoesNotKillTheConnection(t *testing.T) {
+	boom := errors.New("上游炸了")
+	sink := &recordingSink{err: boom}
+	p, capture := dispatchPlatform(t, sink, 0, nil)
+
+	err := p.dispatchRaw(context.Background(), loadFixture(t, "message_at_bot_toplevel", ".json"))
+	if !errors.Is(err, boom) {
+		t.Errorf("HandleEvent 失败要一路返回给 SDK（让平台重推），得到 %v", err)
+	}
+
+	records := capture.find("feishu.on_event_failed")
+	if len(records) != 1 {
+		t.Fatalf("该打一条 feishu.on_event_failed，得到 %d 条", len(records))
+	}
+	if records[0].Level != slog.LevelError {
+		t.Errorf("feishu.on_event_failed 的级别 = %v，要 ERROR", records[0].Level)
+	}
+	if v, ok := attr(records[0], "event_id"); !ok || v.String() != "evt_at_bot_toplevel_0001" {
+		t.Errorf("event_id = %v", v.Any())
+	}
+
+	// 长连接不受影响：投递一路失败，Start 的重连循环照转到 ctx 取消为止。
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sleep := &recordingSleep{stopAfter: 3, cancel: cancel}
+	cs := &connectionScript{script: []string{"ok", "ok", "ok"}}
+	_, logger := newLogCapture()
+	loopP := mustPlatform(t, platformBuild{
+		factory: cs.factory, sleep: sleep.Sleep, logger: logger, sink: sink, appID: testAppID,
+	})
+	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
+	sleep.onSleep = func(int) {
+		for _, c := range cs.all() {
+			if c.onRaw != nil {
+				_ = c.onRaw(context.Background(), raw)
+			}
+		}
+	}
+	if err := loopP.Start(ctx); err != nil {
+		t.Fatalf("投递一直失败也不该让 Start 抛出去：%v", err)
+	}
+	if len(sink.seen()) < 3 {
+		t.Errorf("投递该一直在发生，得到 %d 条", len(sink.seen()))
+	}
+}
+
+// TestSlowHandlerIsReported 对应 test_slow_handler_is_reported。
+//
+// HandleEvent 必须 1s 内返回。超了不拦（拦了会丢事件），但要吼一声。
+func TestSlowHandlerIsReported(t *testing.T) {
+	clock := newFakeClock()
+	sink := &recordingSink{before: func() { clock.Advance(2 * time.Second) }}
+	p, capture := dispatchPlatform(t, sink, time.Second, clock)
+
+	if err := p.dispatchRaw(context.Background(),
+		loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+		t.Fatalf("慢不等于失败：%v", err)
+	}
+
+	records := capture.find("feishu.on_event_slow")
+	if len(records) != 1 {
+		t.Fatalf("该打一条 feishu.on_event_slow，得到 %d 条", len(records))
+	}
+	if records[0].Level != slog.LevelWarn {
+		t.Errorf("feishu.on_event_slow 的级别 = %v，要 WARN", records[0].Level)
+	}
+	if v, ok := attr(records[0], "elapsed_sec"); !ok || v.Float64() != 2 {
+		t.Errorf("elapsed_sec = %v，要 2", v.Any())
+	}
+	if v, ok := attr(records[0], "budget_sec"); !ok || v.Float64() != 1 {
+		t.Errorf("budget_sec = %v，要 1", v.Any())
+	}
+
+	// 没超时就不打。
+	clock2 := newFakeClock()
+	sink2 := &recordingSink{}
+	p2, capture2 := dispatchPlatform(t, sink2, time.Second, clock2)
+	if err := p2.dispatchRaw(context.Background(),
+		loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+		t.Fatal(err)
+	}
+	if capture2.has("feishu.on_event_slow") {
+		t.Error("没超预算不该打 feishu.on_event_slow")
+	}
 }

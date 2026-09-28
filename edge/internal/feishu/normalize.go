@@ -25,11 +25,6 @@ import (
 
 const platformName = "feishu"
 
-const (
-	eventMessageReceive = "im.message.receive_v1"
-	eventCardAction     = "card.action.trigger"
-)
-
 // senderKindByType 是飞书 sender.sender_type → 契约 SenderKind。
 //
 // 飞书有两套 sender_type 枚举，取值不一样，这张表要同时吃下（T16 核过）：
@@ -615,18 +610,6 @@ func NormalizeCardAction(raw map[string]any, workspaceID, tenantID string) *pb.N
 		},
 		OccurredAt: timestamppb.New(occurredAt),
 		Raw:        rawStruct(raw),
-	}
-}
-
-// Normalize 是事件总入口：认识就归一化，不认识返回 nil。
-func Normalize(raw map[string]any, botOpenID, workspaceID, tenantID string) *pb.NormalizedEvent {
-	switch mapStr(asMap(raw["header"]), "event_type") {
-	case eventMessageReceive:
-		return NormalizeMessage(raw, botOpenID, workspaceID, tenantID)
-	case eventCardAction:
-		return NormalizeCardAction(raw, workspaceID, tenantID)
-	default:
-		return nil
 	}
 }
 

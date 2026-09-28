@@ -438,3 +438,46 @@ func defaultFeishuConfig() config.Feishu { return config.Default().Feishu }
 
 // strptr 是 optional string 字段的取址助手。
 func strptr(s string) *string { return &s }
+
+// ---------------------------------------------------------------------------
+// 事件投递（原 reconnect_test.go）
+// ---------------------------------------------------------------------------
+
+// recordingSink 是 EventSink 的假实现。
+type recordingSink struct {
+	mu     sync.Mutex
+	events []*pb.NormalizedEvent
+	err    error
+	before func()
+}
+
+func (s *recordingSink) HandleEvent(_ context.Context, ev *pb.NormalizedEvent) error {
+	s.mu.Lock()
+	before := s.before
+	err := s.err
+	s.events = append(s.events, ev)
+	s.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	return err
+}
+
+func (s *recordingSink) seen() []*pb.NormalizedEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*pb.NormalizedEvent, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+func dispatchPlatform(t *testing.T, sink *recordingSink, budget time.Duration, clock *fakeClock) (*Platform, *logCapture) {
+	t.Helper()
+	capture, logger := newLogCapture()
+	b := platformBuild{sink: sink, logger: logger, budget: budget, appID: testAppID}
+	if clock != nil {
+		b.clock = clock.Now
+		b.sleep = clock.Sleep
+	}
+	return mustPlatform(t, b), capture
+}

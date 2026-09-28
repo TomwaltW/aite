@@ -26,12 +26,13 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
+
+	pb "aite/edge/gen/aitepb"
 )
 
-// 1s → 2s → … → 30s 封顶，无限重试。
 const (
-	ReconnectBaseSec = 1
-	ReconnectMaxSec  = 30
+	eventMessageReceive = "im.message.receive_v1"
+	eventCardAction     = "card.action.trigger"
 )
 
 // RawEventHandler 是原始事件（信封 map）的消费者。
@@ -49,24 +50,6 @@ type Connection interface {
 
 // ConnectionFactory 每轮新建一个连接对象（真实现也是这样：连接对象不复用）。
 type ConnectionFactory func(onRaw RawEventHandler) Connection
-
-// backoffDelay 返回第 attempt 次重连前该等多久（attempt 从 1 起）。
-//
-// 1, 2, 4, 8, 16, 30, 30, …（32 会被 30s 的上限压回去）。
-func backoffDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		return 0
-	}
-	// attempt >= 6 时 2^(attempt-1) >= 32 已经越过上限；提前返回顺便躲开移位溢出。
-	if attempt >= 6 {
-		return ReconnectMaxSec * time.Second
-	}
-	secs := ReconnectBaseSec << (attempt - 1)
-	if secs > ReconnectMaxSec {
-		secs = ReconnectMaxSec
-	}
-	return time.Duration(secs) * time.Second
-}
 
 // envelopeHeaderKeys 是信封里保留的 header 字段。
 //
@@ -242,4 +225,50 @@ func (c *larkConnection) Close() error {
 		c.logger.Warn("feishu.close_timeout", "note", "长连接 5s 内没退干净，放手")
 	}
 	return nil
+}
+
+// dispatchRaw 把原始事件归一化后同步交给 sink。
+//
+// adapter 不去重：重连后平台重推的同一条也照样往上送，由 core 用 event_id 判。
+//
+// 与 Python 版的一处有意差异：Python 把 handler 的异常吞掉（只打日志），
+// Go 版把 error 一路返回给 SDK，让平台重推（spec §2.1「失败 → 向平台返回错误让其重推」）。
+func (p *Platform) dispatchRaw(ctx context.Context, raw map[string]any) error {
+	if p.sink == nil {
+		// New(cfg, opts, nil) 是合法构造（测试就这么用），但真收到事件时不能裸调。
+		p.logger.Warn("feishu.no_sink", "note", "没接 EventSink，事件无处可送")
+		return nil
+	}
+	event := Normalize(raw, p.opts.BotOpenID, p.opts.AppID, p.opts.TenantID)
+	if event == nil {
+		p.logger.Debug("feishu.event_ignored", "type", mapStr(asMap(raw["header"]), "event_type"))
+		return nil
+	}
+
+	started := p.clock()
+	err := p.sink.HandleEvent(ctx, event)
+	elapsed := p.clock().Sub(started)
+	if elapsed > p.budget {
+		p.logger.Warn("feishu.on_event_slow",
+			"event_id", event.GetEventId(),
+			"elapsed_sec", elapsed.Seconds(),
+			"budget_sec", p.budget.Seconds())
+	}
+	if err != nil {
+		p.logger.Error("feishu.on_event_failed", "event_id", event.GetEventId(), "err", err)
+		return err
+	}
+	return nil
+}
+
+// Normalize 是事件总入口：认识就归一化，不认识返回 nil。
+func Normalize(raw map[string]any, botOpenID, workspaceID, tenantID string) *pb.NormalizedEvent {
+	switch mapStr(asMap(raw["header"]), "event_type") {
+	case eventMessageReceive:
+		return NormalizeMessage(raw, botOpenID, workspaceID, tenantID)
+	case eventCardAction:
+		return NormalizeCardAction(raw, workspaceID, tenantID)
+	default:
+		return nil
+	}
 }

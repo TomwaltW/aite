@@ -477,3 +477,108 @@ func TestPlatformErrorSignatureMatchesTheSpec(t *testing.T) {
 		t.Error("PlatformError 要实现 error")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 令牌桶
+// ---------------------------------------------------------------------------
+
+func mustBucket(t *testing.T, rate int, clock *fakeClock) *TokenBucket {
+	t.Helper()
+	b, err := NewTokenBucket(rate, 0, clock.Now, clock.Sleep)
+	if err != nil {
+		t.Fatalf("建桶失败：%v", err)
+	}
+	return b
+}
+
+// TestTokenBucketAllowsAFullBurstThenPaces
+// 对应 test_token_bucket_allows_a_full_burst_then_paces。
+func TestTokenBucketAllowsAFullBurstThenPaces(t *testing.T) {
+	clock := newFakeClock()
+	bucket := mustBucket(t, 60, clock)
+	ctx := context.Background()
+
+	for i := 0; i < 60; i++ {
+		waited, err := bucket.Acquire(ctx, 1)
+		if err != nil {
+			t.Fatalf("第 %d 次取令牌失败：%v", i+1, err)
+		}
+		if waited != 0 {
+			t.Fatalf("第 %d 次不该等，等了 %v", i+1, waited)
+		}
+	}
+	if got := clock.Slept(); len(got) != 0 {
+		t.Errorf("满桶 60 次不该 sleep，得到 %v", got)
+	}
+
+	// 第 61 次要等 1 秒（60/分钟 = 每秒 1 个）。
+	waited, err := bucket.Acquire(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waited != time.Second {
+		t.Errorf("第 61 次等了 %v，要 1s", waited)
+	}
+	if got := clock.Slept(); len(got) != 1 || got[0] != time.Second {
+		t.Errorf("slept = %v，要 [1s]", got)
+	}
+}
+
+// TestTokenBucketRefillsOverTime 对应 test_token_bucket_refills_over_time。
+func TestTokenBucketRefillsOverTime(t *testing.T) {
+	clock := newFakeClock()
+	bucket := mustBucket(t, 60, clock)
+	ctx := context.Background()
+	for i := 0; i < 60; i++ {
+		if _, err := bucket.Acquire(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	clock.Advance(10 * time.Second)
+	if got := bucket.Tokens(); got < 9.999 || got > 10.001 {
+		t.Errorf("补了 10 秒后 tokens = %v，要 10", got)
+	}
+
+	for i := 0; i < 10; i++ {
+		waited, err := bucket.Acquire(ctx, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waited != 0 {
+			t.Errorf("补回来的 10 个不该等，第 %d 次等了 %v", i+1, waited)
+		}
+	}
+	if got := clock.Slept(); len(got) != 0 {
+		t.Errorf("slept = %v，要空", got)
+	}
+}
+
+// TestTokenBucketNeverExceedsCapacity 对应 test_token_bucket_never_exceeds_capacity。
+func TestTokenBucketNeverExceedsCapacity(t *testing.T) {
+	clock := newFakeClock()
+	bucket := mustBucket(t, 60, clock)
+	clock.Advance(time.Hour)
+	if got := bucket.Tokens(); got != 60 {
+		t.Errorf("空闲一小时后 tokens = %v，要 60（不超过容量）", got)
+	}
+}
+
+// TestTokenBucketRejectsANonPositiveRate
+// 对应 test_token_bucket_rejects_a_non_positive_rate。
+func TestTokenBucketRejectsANonPositiveRate(t *testing.T) {
+	for _, rate := range []int{0, -1} {
+		if _, err := NewTokenBucket(rate, 0, nil, nil); err == nil {
+			t.Errorf("rate_per_min=%d 该报错", rate)
+		}
+	}
+}
+
+// TestTokenBucketRejectsMoreTokensThanCapacity 是 Go 侧补的一条。
+func TestTokenBucketRejectsMoreTokensThanCapacity(t *testing.T) {
+	clock := newFakeClock()
+	bucket := mustBucket(t, 2, clock)
+	if _, err := bucket.Acquire(context.Background(), 3); err == nil {
+		t.Error("一次要 3 个令牌超过桶容量 2，该报错")
+	}
+}
