@@ -10,9 +10,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 
 	pb "aite/edge/gen/aitepb"
 )
@@ -580,4 +582,135 @@ func TestDownloadImageUsesTypeImage(t *testing.T) {
 	if got := route.last(t).query.Get("type"); got != "image" {
 		t.Errorf("type = %q，要 image", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 发言人姓名（CC8）
+// ---------------------------------------------------------------------------
+
+const zhangSanOpenID = "ou_zhang_san_00000000000000000001"
+
+var pathZhangSan = fmt.Sprintf(PathContactUser, zhangSanOpenID)
+
+func senderNamePlatform(t *testing.T, f *fakeFeishu, clock *fakeClock) (*Platform, *recordingSink, *logCapture) {
+	t.Helper()
+	sink := &recordingSink{}
+	capture, logger := newLogCapture()
+	b := platformBuild{domain: f.URL, appID: testAppID, sink: sink, logger: logger, senderNames: true}
+	if clock != nil {
+		b.clock, b.sleep = clock.Now, clock.Sleep
+	}
+	return mustPlatform(t, b), sink, capture
+}
+
+// TestSenderNameFromContactAPIIsCached：同一发送人两条事件 → 通讯录请求 1 次、两条都有名字。
+func TestSenderNameFromContactAPIIsCached(t *testing.T) {
+	f := newFakeFeishu(t)
+	f.mockToken()
+	users := f.onJSON(http.MethodGet, pathZhangSan, 200, map[string]any{
+		"code": 0, "data": map[string]any{"user": map[string]any{"open_id": zhangSanOpenID, "name": "张三"}},
+	})
+	p, sink, _ := senderNamePlatform(t, f, newFakeClock())
+
+	for _, fixture := range []string{"message_at_bot_toplevel", "message_in_thread_no_at"} {
+		if err := p.dispatchRaw(context.Background(), loadFixture(t, fixture, ".json")); err != nil {
+			t.Fatalf("dispatchRaw 失败：%v", err)
+		}
+	}
+	if users.count() != 1 {
+		t.Errorf("通讯录请求 %d 次，要 1（第二条该命中缓存）", users.count())
+	}
+	if got := users.last(t).query.Get("user_id_type"); got != "open_id" {
+		t.Errorf("user_id_type = %q，要 open_id", got)
+	}
+	seen := sink.seen()
+	if len(seen) != 2 {
+		t.Fatalf("sink 收到 %d 条，要 2", len(seen))
+	}
+	for i, ev := range seen {
+		if ev.SenderName == nil || ev.GetSenderName() != "张三" {
+			t.Errorf("第 %d 条 sender_name = %v，要 张三", i+1, ev.SenderName)
+		}
+	}
+
+	// 机器人发的消息不查（非 HUMAN）。
+	if err := p.dispatchRaw(context.Background(), loadFixture(t, "message_from_bot", ".json")); err != nil {
+		t.Fatal(err)
+	}
+	if users.count() != 1 {
+		t.Errorf("机器人消息不该查通讯录，请求 %d 次", users.count())
+	}
+}
+
+// TestSenderNameDegradesWithin300ms：慢路由 → 事件照送、名字 nil、耗时 < 1s；
+// 权限错误 → nil 且熔断期内第二条不再请求。
+func TestSenderNameDegradesWithin300ms(t *testing.T) {
+	t.Run("慢", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		slow := f.onReq(http.MethodGet, pathZhangSan, func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+		})
+		p, sink, _ := senderNamePlatform(t, f, nil)
+
+		// 外层 ctx 给 5s：去掉 300ms 超时的变异下也能在几秒内红，而不是等 http 客户端的 30s。
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		started := time.Now()
+		if err := p.dispatchRaw(ctx, loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+			t.Fatalf("查名字超时不该让事件失败：%v", err)
+		}
+		elapsed := time.Since(started)
+		if elapsed >= time.Second {
+			t.Errorf("耗时 %v，要 < 1s（查询该被 300ms 截断）", elapsed)
+		}
+		if !slow.called() {
+			t.Error("该真的去查过通讯录")
+		}
+		seen := sink.seen()
+		if len(seen) != 1 {
+			t.Fatalf("事件该照送，sink 收到 %d 条", len(seen))
+		}
+		if seen[0].SenderName != nil {
+			t.Errorf("超时 → sender_name 该是 nil，得到 %q", seen[0].GetSenderName())
+		}
+	})
+
+	t.Run("权限错误熔断", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		denied := f.onJSON(http.MethodGet, pathZhangSan, 403, map[string]any{"code": 99991672, "msg": "no permission"})
+		clock := newFakeClock()
+		p, sink, capture := senderNamePlatform(t, f, clock)
+
+		for i := 0; i < 2; i++ {
+			if err := p.dispatchRaw(context.Background(), loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+				t.Fatalf("第 %d 条 dispatchRaw 失败：%v", i+1, err)
+			}
+		}
+		if denied.count() != 1 {
+			t.Errorf("熔断期内第二条不该再请求，请求了 %d 次", denied.count())
+		}
+		for i, ev := range sink.seen() {
+			if ev.SenderName != nil {
+				t.Errorf("第 %d 条 sender_name 该是 nil，得到 %q", i+1, ev.GetSenderName())
+			}
+		}
+		warns := capture.find("feishu.sender_name_denied")
+		if len(warns) != 1 || warns[0].Level != slog.LevelWarn {
+			t.Errorf("该恰好一条 WARN feishu.sender_name_denied，得到 %v", warns)
+		}
+
+		// 熔断期过了再试一次。
+		clock.Advance(senderNameTripFor + time.Second)
+		if err := p.dispatchRaw(context.Background(), loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+			t.Fatal(err)
+		}
+		if denied.count() != 2 {
+			t.Errorf("熔断期过后该重试，请求 %d 次", denied.count())
+		}
+	})
 }

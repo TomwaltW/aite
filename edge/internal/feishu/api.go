@@ -52,6 +52,7 @@ const (
 	PathDocxDocument    = "/open-apis/docx/v1/documents/%s"
 	PathDocxRawContent  = "/open-apis/docx/v1/documents/%s/raw_content"
 	PathWikiNode        = "/open-apis/wiki/v2/spaces/get_node"
+	PathContactUser     = "/open-apis/contact/v3/users/%s" // GetUserRequest（contact/v3 resource.go:1884）
 )
 
 // tokenSafetySec 是 token 过期前多久就提前换新的。

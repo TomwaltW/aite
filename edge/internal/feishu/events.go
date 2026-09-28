@@ -399,6 +399,7 @@ func (p *Platform) dispatchRaw(ctx context.Context, raw map[string]any) error {
 		p.logger.Debug("feishu.event_ignored", "type", eventType)
 		return nil
 	}
+	p.fillSenderName(ctx, event)
 
 	started := p.clock()
 	err := p.sink.HandleEvent(ctx, event)

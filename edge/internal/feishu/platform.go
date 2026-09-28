@@ -71,6 +71,8 @@ type Platform struct {
 
 	// cardButtons=true 时 SendCard / UpdateCard 的卡片带按钮（AITE_FEISHU_CARD_BUTTONS=1，默认关）。
 	cardButtons bool
+	// senderNames 非 nil 时 dispatchRaw 给事件补发言人姓名（通讯录查询，见 reads.go）。
+	senderNames *senderNameLookup
 
 	// historyWindow 是 config 里的 feishu.history_window，只存不用：
 	// ReadHistory 的条数由调用方按 ports.go 的签名给（Python 版同样只存着）。
@@ -95,6 +97,9 @@ type platformOptions struct {
 
 	// cardButtons 见 Platform.cardButtons。New() 从环境变量填，newPlatform 只认字段、不读环境。
 	cardButtons bool
+	// senderNames=true 时装配发言人姓名查询（走 api 的通讯录接口）。只有 New() 设 true：
+	// 测试的 dispatchPlatform 不给 api，默认 api 指向真的 open.feishu.cn，不能默认开。
+	senderNames bool
 }
 
 func newPlatform(po platformOptions) (*Platform, error) {
@@ -158,6 +163,9 @@ func newPlatform(po platformOptions) (*Platform, error) {
 		}
 		p.api = api
 	}
+	if po.senderNames {
+		p.senderNames = newSenderNameLookup(p.api, p.clock, p.logger)
+	}
 
 	p.factory = po.factory
 	if p.factory == nil {
@@ -183,6 +191,7 @@ func New(cfg config.Feishu, opts Options, sink EventSink) (*Platform, error) {
 	return newPlatform(platformOptions{
 		cfg: cfg, opts: opts, sink: sink,
 		cardButtons: os.Getenv(EnvCardButtons) == "1",
+		senderNames: true,
 	})
 }
 

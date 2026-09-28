@@ -162,7 +162,7 @@ type route struct {
 	// 也必须持。不持的话 -race 会在服务端 goroutine 还没退出时抓现行 ——
 	// TestTransportErrorIsRetryable 就是这种形状：连接被掐断，断言先跑到了。
 	mu        *sync.Mutex
-	responses []func(w http.ResponseWriter)
+	responses []func(w http.ResponseWriter, r *http.Request)
 	calls     []recordedRequest
 }
 
@@ -186,6 +186,16 @@ func routeKey(method, path string) string { return method + " " + path }
 
 // on 注册一条路由，每次调用按顺序取一个响应；用完后重复最后一个。
 func (f *fakeFeishu) on(method, path string, responses ...func(w http.ResponseWriter)) *route {
+	wrapped := make([]func(http.ResponseWriter, *http.Request), 0, len(responses))
+	for _, respond := range responses {
+		wrapped = append(wrapped, func(w http.ResponseWriter, _ *http.Request) { respond(w) })
+	}
+	return f.onReq(method, path, wrapped...)
+}
+
+// onReq 是拿得到 *http.Request 的路由变体（比如慢路由要 select 在 r.Context().Done() 上，
+// 否则 httptest.Server.Close 会一直等 handler）。
+func (f *fakeFeishu) onReq(method, path string, responses ...func(w http.ResponseWriter, r *http.Request)) *route {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := &route{mu: &f.mu, responses: responses}
@@ -251,7 +261,7 @@ func (f *fakeFeishu) serve(w http.ResponseWriter, req *http.Request) {
 	}
 	respond := r.responses[idx]
 	f.mu.Unlock()
-	respond(w)
+	respond(w, req)
 }
 
 func (r *route) count() int {
@@ -301,6 +311,7 @@ type platformBuild struct {
 	httpClient *http.Client
 	// 与 platformOptions 同名的装配字段：测试直接设，不经环境变量。
 	cardButtons bool
+	senderNames bool
 }
 
 func mustPlatform(t *testing.T, b platformBuild) *Platform {
@@ -329,6 +340,7 @@ func mustPlatform(t *testing.T, b platformBuild) *Platform {
 		budget:  b.budget,
 
 		cardButtons: b.cardButtons,
+		senderNames: b.senderNames,
 	}
 	if b.domain != "" {
 		api, err := newAPIClient(apiOptions{

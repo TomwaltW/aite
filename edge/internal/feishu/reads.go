@@ -1,13 +1,17 @@
 package feishu
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -358,5 +362,123 @@ func senderKindToken(kind pb.SenderKind) string {
 		return "system"
 	default:
 		return "app"
+	}
+}
+
+// ------------------------------------------------------------------
+// 发言人姓名（通讯录）
+// ------------------------------------------------------------------
+
+const (
+	// senderNameCacheSize 是姓名缓存的条数上限。一个群里常说话的人是几十到几百，
+	// 一个 edge 进程接的群有限；1024 条按每条百来字节算不到 1MB，又足够让热点发言人常驻。
+	// 名字几乎不变，不设 TTL：改名要等被挤出或进程重启才生效（可接受，只是显示用）。
+	senderNameCacheSize = 1024
+	// senderNameTimeout 是每次查询的上限。事件链路要 1s 内交给 core（onEventBudget），
+	// 查名字是锦上添花，超时就不要了；这个 ctx 也截断 apiClient 的退避重试。
+	senderNameTimeout = 300 * time.Millisecond
+	// senderNameTripFor 是权限错误后的熔断时长：没开 contact:user.base:readonly 的应用
+	// 每条事件都会撞同一个错，熔断期内不再请求，每次熔断只打一条 WARN。
+	senderNameTripFor = 10 * time.Minute
+)
+
+// senderNameLookup 按 open_id 查发言人姓名（GET /open-apis/contact/v3/users/{open_id}），
+// 带有界 LRU 与权限熔断。只在 New() 里装配（newPlatform 收到 senderNames=false 就不查），
+// Normalize 保持纯函数，老黄金文件不变。
+type senderNameLookup struct {
+	api    *apiClient
+	clock  clockFunc
+	logger *slog.Logger
+
+	mu           sync.Mutex
+	order        *list.List // 最近用过的在前；元素是 *senderNameEntry
+	index        map[string]*list.Element
+	trippedUntil time.Time
+}
+
+type senderNameEntry struct {
+	openID string
+	name   string
+}
+
+func newSenderNameLookup(api *apiClient, clock clockFunc, logger *slog.Logger) *senderNameLookup {
+	return &senderNameLookup{
+		api: api, clock: clock, logger: logger,
+		order: list.New(), index: map[string]*list.Element{},
+	}
+}
+
+// lookup 返回 open_id 的姓名；查不到（超时 / 出错 / 熔断中 / 响应里没有）返回 ok=false。
+func (s *senderNameLookup) lookup(ctx context.Context, openID string) (string, bool) {
+	s.mu.Lock()
+	if el, ok := s.index[openID]; ok {
+		s.order.MoveToFront(el)
+		name := el.Value.(*senderNameEntry).name
+		s.mu.Unlock()
+		return name, true
+	}
+	if s.clock().Before(s.trippedUntil) {
+		s.mu.Unlock()
+		return "", false
+	}
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, senderNameTimeout)
+	defer cancel()
+	// 字段形状照 SDK：GetUserRespData.user（contact/v3 model.go:12819）→ User.name（:4441）。
+	data, _, err := s.api.request(ctx, apiRequest{
+		method: http.MethodGet,
+		path:   fmt.Sprintf(PathContactUser, openID),
+		params: map[string]string{"user_id_type": "open_id"},
+	})
+	if err != nil {
+		if isPermissionError(err) {
+			s.mu.Lock()
+			s.trippedUntil = s.clock().Add(senderNameTripFor)
+			s.mu.Unlock()
+			s.logger.Warn("feishu.sender_name_denied",
+				"note", "通讯录没权限（要 contact:user.base:readonly），熔断后不再查",
+				"trip_sec", senderNameTripFor.Seconds(), "err", err)
+			return "", false
+		}
+		s.logger.Debug("feishu.sender_name_failed", "open_id", openID, "err", err)
+		return "", false
+	}
+	name := mapStr(asMap(data["user"]), "name")
+	if name == "" {
+		s.logger.Debug("feishu.sender_name_failed", "open_id", openID, "err", "响应里没有 user.name")
+		return "", false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if el, ok := s.index[openID]; ok { // 并发查同一个人，后到的覆盖
+		el.Value.(*senderNameEntry).name = name
+		s.order.MoveToFront(el)
+		return name, true
+	}
+	s.index[openID] = s.order.PushFront(&senderNameEntry{openID: openID, name: name})
+	for s.order.Len() > senderNameCacheSize {
+		oldest := s.order.Back()
+		s.order.Remove(oldest)
+		delete(s.index, oldest.Value.(*senderNameEntry).openID)
+	}
+	return name, true
+}
+
+// fillSenderName 在事件交给 sink 之前补 sender_name：仅 MESSAGE / CARD_ACTION、
+// sender_kind=HUMAN、sender_id 非空且 sender_name 为空时查。查不到就留 nil（core 退回 open_id）。
+func (p *Platform) fillSenderName(ctx context.Context, event *pb.NormalizedEvent) {
+	if p.senderNames == nil || event.SenderName != nil || event.GetSenderId() == "" ||
+		event.GetSenderKind() != pb.SenderKind_SENDER_KIND_HUMAN {
+		return
+	}
+	switch event.GetKind() {
+	case pb.EventKind_EVENT_KIND_MESSAGE, pb.EventKind_EVENT_KIND_CARD_ACTION:
+	default:
+		return
+	}
+	if name, ok := p.senderNames.lookup(ctx, event.GetSenderId()); ok {
+		event.SenderName = &name
 	}
 }
