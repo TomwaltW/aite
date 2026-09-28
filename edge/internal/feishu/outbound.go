@@ -2,9 +2,12 @@ package feishu
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	pb "aite/edge/gen/aitepb"
 	"aite/edge/internal/aiteerr"
@@ -44,7 +47,20 @@ var fileTypeByExt = map[string]string{
 // sendMessage 发一条消息，返回 message_id。
 //
 // 有 replyTo 就走「回复消息」接口（带 reply_in_thread 才进话题），否则走「发送消息」。
-func (p *Platform) sendMessage(ctx context.Context, chatID string, replyTo *string, msgType, content string, inThread bool) (string, error) {
+//
+// 先过该群的桶（每群 5 QPS，见 chatPacer），再由 api.request 过全局桶（outbound_rate_per_min）。
+// 请求体带 uuid（飞书按它对「发送 / 回复」去重）：每次 sendMessage 生成一次，
+// rawRequest 的重试复用同一个请求体、也就复用同一个 uuid —— 5xx 之后重试不会重复发出同一条。
+// dedupeKey 非空时由它当 uuid（留给 DD10 接 OutboundText.dedupe_key；飞书要求 ≤50 字符）。
+func (p *Platform) sendMessage(ctx context.Context, chatID string, replyTo *string, msgType, content string, inThread bool, dedupeKey string) (string, error) {
+	if err := p.pacer.acquire(ctx, chatID); err != nil {
+		return "", &aiteerr.PlatformError{Code: "transport_error", Retryable: true, Msg: err.Error()}
+	}
+	uuid := dedupeKey
+	if uuid == "" {
+		uuid = newMessageUUID()
+	}
+
 	var (
 		data map[string]any
 		err  error
@@ -54,7 +70,7 @@ func (p *Platform) sendMessage(ctx context.Context, chatID string, replyTo *stri
 			method: http.MethodPost,
 			path:   fmt.Sprintf(PathMessageReply, *replyTo),
 			body: map[string]any{
-				"content": content, "msg_type": msgType, "reply_in_thread": inThread,
+				"content": content, "msg_type": msgType, "reply_in_thread": inThread, "uuid": uuid,
 			},
 			rateLimited: true,
 		})
@@ -64,7 +80,7 @@ func (p *Platform) sendMessage(ctx context.Context, chatID string, replyTo *stri
 			path:   PathMessages,
 			params: map[string]string{"receive_id_type": "chat_id"},
 			body: map[string]any{
-				"receive_id": chatID, "msg_type": msgType, "content": content,
+				"receive_id": chatID, "msg_type": msgType, "content": content, "uuid": uuid,
 			},
 			rateLimited: true,
 		})
@@ -75,6 +91,124 @@ func (p *Platform) sendMessage(ctx context.Context, chatID string, replyTo *stri
 	return mapStr(data, "message_id"), nil
 }
 
+// newMessageUUID 生成发送请求的去重 uuid：crypto/rand 的 26 字符 base32（≤50 字符）。
+func newMessageUUID() string { return rand.Text() }
+
+// ------------------------------------------------------------------
+// 每群限速
+// ------------------------------------------------------------------
+
+const (
+	// perChatRatePerMin / perChatBurst：飞书对同一个群的发送限 5 QPS（全局额度另算）。
+	perChatRatePerMin = 300
+	perChatBurst      = 5
+	// chatBucketsMax 是每群桶表的上限。超了先淘汰闲置满 chatBucketIdle 的（它们已经补满，
+	// 丢掉再建一个等价），还超就淘汰最久没用的那个。
+	chatBucketsMax = 1024
+	// chatBucketIdle：5 个令牌按 5/s 补，闲 1s 就满了。
+	chatBucketIdle = time.Second
+	// cardChatsMax 是 card_id → chat_id 记账的上限（UpdateCard 靠它找群），先进先出。
+	cardChatsMax = 4096
+)
+
+// chatPacer 是每群一个令牌桶的限速器，加上 card_id → chat_id 的有界记账。
+type chatPacer struct {
+	clock clockFunc
+	sleep sleeperFunc
+
+	mu        sync.Mutex
+	buckets   map[string]*chatBucket
+	cardChat  map[string]string
+	cardOrder []string
+}
+
+type chatBucket struct {
+	bucket   *TokenBucket
+	lastUsed time.Time
+}
+
+func newChatPacer(clock clockFunc, sleep sleeperFunc) *chatPacer {
+	return &chatPacer{
+		clock: clock, sleep: sleep,
+		buckets:  map[string]*chatBucket{},
+		cardChat: map[string]string{},
+	}
+}
+
+// acquire 过 chatID 那个群的桶；chatID 空就跳过。不在表锁里等（等的是桶自己的锁）。
+func (c *chatPacer) acquire(ctx context.Context, chatID string) error {
+	if chatID == "" {
+		return nil
+	}
+	b, err := c.bucketFor(chatID)
+	if err != nil {
+		return err
+	}
+	_, err = b.Acquire(ctx, 1)
+	return err
+}
+
+func (c *chatPacer) bucketFor(chatID string) (*TokenBucket, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.clock()
+	if cb, ok := c.buckets[chatID]; ok {
+		cb.lastUsed = now
+		return cb.bucket, nil
+	}
+	if len(c.buckets) >= chatBucketsMax {
+		c.evictLocked(now)
+	}
+	bucket, err := NewTokenBucket(perChatRatePerMin, perChatBurst, c.clock, c.sleep)
+	if err != nil {
+		return nil, err
+	}
+	c.buckets[chatID] = &chatBucket{bucket: bucket, lastUsed: now}
+	return bucket, nil
+}
+
+func (c *chatPacer) evictLocked(now time.Time) {
+	for id, cb := range c.buckets {
+		if now.Sub(cb.lastUsed) >= chatBucketIdle {
+			delete(c.buckets, id)
+		}
+	}
+	for len(c.buckets) >= chatBucketsMax {
+		oldestID := ""
+		var oldest time.Time
+		for id, cb := range c.buckets {
+			if oldestID == "" || cb.lastUsed.Before(oldest) {
+				oldestID, oldest = id, cb.lastUsed
+			}
+		}
+		delete(c.buckets, oldestID)
+	}
+}
+
+// rememberCard 记下卡片发在哪个群（SendCard 成功后调）。
+func (c *chatPacer) rememberCard(cardID, chatID string) {
+	if cardID == "" || chatID == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.cardChat[cardID]; !ok {
+		c.cardOrder = append(c.cardOrder, cardID)
+	}
+	c.cardChat[cardID] = chatID
+	for len(c.cardOrder) > cardChatsMax {
+		delete(c.cardChat, c.cardOrder[0])
+		c.cardOrder = c.cardOrder[1:]
+	}
+}
+
+// chatOfCard 查卡片所在的群；查不到返回 ""（UpdateCard 就只过全局桶）。
+func (c *chatPacer) chatOfCard(cardID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cardChat[cardID]
+}
+
 func (p *Platform) SendText(ctx context.Context, msg *pb.OutboundText) (*pb.SendResult, error) {
 	// pb 的 getter 是 nil-safe 的，但 msg.ReplyTo 是裸字段 —— gRPC 请求里没塞 msg
 	// 就会 nil 解引用，把整个 edge 进程带走。
@@ -82,7 +216,7 @@ func (p *Platform) SendText(ctx context.Context, msg *pb.OutboundText) (*pb.Send
 		return nil, &aiteerr.PlatformError{Code: "bad_request", Msg: "SendText 收到空消息", Retryable: false}
 	}
 	content := DumpsCard(BuildMarkdownCard(msg.GetText()))
-	messageID, err := p.sendMessage(ctx, msg.GetChatId(), msg.ReplyTo, "interactive", content, msg.GetInThread())
+	messageID, err := p.sendMessage(ctx, msg.GetChatId(), msg.ReplyTo, "interactive", content, msg.GetInThread(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -92,11 +226,12 @@ func (p *Platform) SendText(ctx context.Context, msg *pb.OutboundText) (*pb.Send
 func (p *Platform) SendCard(ctx context.Context, chatID string, replyTo *string, card *pb.ChecklistCard) (*pb.SendResult, error) {
 	content := DumpsCard(buildChecklistCardWith(card, p.cardButtons))
 	// send_card 的 in_thread 写死 true，只有 SendText 透传。
-	messageID, err := p.sendMessage(ctx, chatID, replyTo, "interactive", content, true)
+	messageID, err := p.sendMessage(ctx, chatID, replyTo, "interactive", content, true, "")
 	if err != nil {
 		return nil, err
 	}
 	cardID := messageID
+	p.pacer.rememberCard(cardID, chatID)
 	return &pb.SendResult{MessageId: messageID, CardId: &cardID}, nil
 }
 
@@ -104,7 +239,13 @@ func (p *Platform) SendCard(ctx context.Context, chatID string, replyTo *string,
 //
 // 必须是 PATCH /open-apis/im/v1/messages/{card_id}（「更新应用发送的消息卡片」）。
 // 任何时候都不许退化成再发一条 —— 「过程中卡片至少更新 3 次且不新增消息」就靠这条。
+//
+// 签名里没有 chat id：本进程 SendCard 过的卡片查得到它的群，过该群的桶；
+// 查不到（进程重启前发的卡片）只过全局桶。PATCH 请求体不带 uuid（只有 content）。
 func (p *Platform) UpdateCard(ctx context.Context, cardID string, card *pb.ChecklistCard) error {
+	if err := p.pacer.acquire(ctx, p.pacer.chatOfCard(cardID)); err != nil {
+		return &aiteerr.PlatformError{Code: "transport_error", Retryable: true, Msg: err.Error()}
+	}
 	_, _, err := p.api.request(ctx, apiRequest{
 		method:      http.MethodPatch,
 		path:        fmt.Sprintf(PathMessage, cardID),
@@ -149,7 +290,7 @@ func (p *Platform) SendFile(ctx context.Context, msg *pb.OutboundFile) (*pb.Send
 		msgType = "file"
 	}
 
-	messageID, err := p.sendMessage(ctx, msg.GetChatId(), msg.ReplyTo, msgType, content, true)
+	messageID, err := p.sendMessage(ctx, msg.GetChatId(), msg.ReplyTo, msgType, content, true, "")
 	if err != nil {
 		return nil, err
 	}

@@ -73,6 +73,8 @@ type Platform struct {
 	cardButtons bool
 	// senderNames 非 nil 时 dispatchRaw 给事件补发言人姓名（通讯录查询，见 reads.go）。
 	senderNames *senderNameLookup
+	// pacer 是每群 5 QPS 的桶表（outbound.go），与 api 的全局桶叠加。
+	pacer *chatPacer
 
 	// historyWindow 是 config 里的 feishu.history_window，只存不用：
 	// ReadHistory 的条数由调用方按 ports.go 的签名给（Python 版同样只存着）。
@@ -144,6 +146,7 @@ func newPlatform(po platformOptions) (*Platform, error) {
 		logger:        po.logger,
 		budget:        po.budget,
 		cardButtons:   po.cardButtons,
+		pacer:         newChatPacer(po.clock, po.sleep),
 		historyWindow: historyWindow,
 	}
 
