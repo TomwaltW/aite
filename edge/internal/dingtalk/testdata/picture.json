@@ -1,0 +1,14 @@
+{
+  "conversationId": "cidP2P0001==",
+  "conversationType": "1",
+  "msgId": "msgPIC01",
+  "msgtype": "picture",
+  "content": {"pictureDownloadCode": "pdc_pic_01"},
+  "isInAtList": false,
+  "senderStaffId": "staff_0002",
+  "senderNick": "李四",
+  "chatbotCorpId": "ding_corp_0001",
+  "createAt": 1700000200000,
+  "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=FAKESESSIONTOKEN04",
+  "sessionWebhookExpiredTime": 1700005400000
+}

@@ -1,0 +1,20 @@
+{
+  "conversationId": "cidGROUP0001==",
+  "conversationType": "2",
+  "msgId": "msgRICH01",
+  "msgtype": "richText",
+  "content": {
+    "richText": [
+      {"text": "@Aite 看看这张图"},
+      {"type": "picture", "downloadCode": "dlc_rich_01", "pictureDownloadCode": "pdc_rich_01"},
+      {"text": "\n对不对"}
+    ]
+  },
+  "isInAtList": true,
+  "senderStaffId": "staff_0001",
+  "senderNick": "张三",
+  "chatbotCorpId": "ding_corp_0001",
+  "createAt": 1700000100000,
+  "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=FAKESESSIONTOKEN03",
+  "sessionWebhookExpiredTime": 1700005400000
+}

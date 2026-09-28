@@ -1,0 +1,24 @@
+{
+  "conversationId": "cidGROUP0001==",
+  "conversationType": "2",
+  "msgId": "msgQUOTE01",
+  "msgtype": "text",
+  "text": {
+    "content": "@Aite 继续，加上同比",
+    "isReplyMsg": true,
+    "repliedMsg": {
+      "msgId": "msgROOT0001",
+      "senderId": "$:LWCP_v1:$fakeBot",
+      "msgType": "text",
+      "createdAt": 1699999000000,
+      "content": {"text": "#AH 已开始：把 Q3 销售数据画成趋势图"}
+    }
+  },
+  "isInAtList": true,
+  "senderStaffId": "staff_0001",
+  "senderNick": "张三",
+  "chatbotCorpId": "ding_corp_0001",
+  "createAt": 1700000300000,
+  "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=FAKESESSIONTOKEN05",
+  "sessionWebhookExpiredTime": 1700005400000
+}
