@@ -1,0 +1,3 @@
+# 沙箱运行期的 npm 源（owner: CC12；COPY 到 /home/aite/.npmrc，属主 aite）。
+# 镜像里没有 node，这份文件本身是惰性的；等 FF8 装厂商 CLI / 用户自带 node 时才会被读到。
+registry=https://registry.npmmirror.com

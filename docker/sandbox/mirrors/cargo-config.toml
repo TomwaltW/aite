@@ -1,0 +1,17 @@
+# 沙箱运行期的 crates.io 源（owner: CC12；COPY 到 /home/aite/.cargo/config.toml，属主 aite）。
+# 镜像里没有 cargo，这份文件本身是惰性的。
+#
+# 指向中科大（ustc）sparse 索引：总管 2026-09-25 修订，覆盖原卡的 rsproxy；与 CC11 的
+# china-trusted 预设（只列 ustc crates）一致。
+[source.crates-io]
+replace-with = 'ustc-sparse'
+
+[source.ustc-sparse]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+# 备选：字节 rsproxy。大陆实测通过后才可能切（归 EE10），切的时候 CC11 预设要同步加主机。
+# [source.crates-io]
+# replace-with = 'rsproxy-sparse'
+#
+# [source.rsproxy-sparse]
+# registry = "sparse+https://rsproxy.cn/index/"
