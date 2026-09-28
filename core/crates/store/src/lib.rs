@@ -58,6 +58,20 @@ fn is_constraint_violation(e: &rusqlite::Error) -> bool {
     )
 }
 
+/// `message_index` 的一行（[`SqliteSessionStore::find_session_by_message`] 的返回）。
+/// contracts 锁定、没有对应类型，所以定义在本 crate。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedMessage {
+    pub chat_id: String,
+    pub message_id: String,
+    pub session_id: String,
+    pub task_id: Option<String>,
+    /// true = 我们发出去的消息；false = 群里收进来的
+    pub outbound: bool,
+    /// 索引写入时刻（store 盖的戳），按时间清理 / 留存用
+    pub created_at: DateTime<Utc>,
+}
+
 /// SessionStore（对应 Python `SqliteSessionStore`）。
 pub struct SqliteSessionStore {
     path: String,
@@ -122,6 +136,113 @@ impl SqliteSessionStore {
         let sql = format!("PRAGMA {name}");
         self.with_conn(move |c| c.query_row(&sql, [], |r| r.get::<_, i64>(0)).map_err(sq))
             .await
+    }
+
+    /// 剪掉 `seen_at < cutoff` 的去重键，返回删掉的行数。
+    ///
+    /// 被剪掉的 event_id 再来一次会被当成新事件（`seen_event` 回 false）—— cutoff 要远早于
+    /// 平台重推的窗口。迁移 2 之前的存量行 `seen_at` = 迁移时刻，所以不会一迁完就被剪光。
+    pub async fn prune_seen_events_before(&self, cutoff: DateTime<Utc>) -> Result<u64, StoreError> {
+        let cutoff = stamp(cutoff);
+        self.with_conn(move |c| {
+            let n = c
+                .execute(
+                    "DELETE FROM seen_events WHERE seen_at < ?1",
+                    params![cutoff],
+                )
+                .map_err(sq)?;
+            Ok(n as u64)
+        })
+        .await
+    }
+
+    /// 记一条「平台消息 → 会话 / 任务」索引。`outbound` = 这条消息是我们发出去的。
+    ///
+    /// 同一 `(chat_id, message_id)` 重复索引：**保留首条**、不报错、不覆盖 ——
+    /// 一条消息属于它第一次被认领的那个会话；平台重推 / 重连回放再来一遍不许把它挪走。
+    pub async fn index_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        session_id: &str,
+        task_id: Option<&str>,
+        outbound: bool,
+    ) -> Result<(), StoreError> {
+        let (chat_id, message_id, session_id) = (
+            chat_id.to_string(),
+            message_id.to_string(),
+            session_id.to_string(),
+        );
+        let task_id = task_id.map(str::to_string);
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO message_index \
+                 (chat_id, message_id, session_id, task_id, outbound, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT (chat_id, message_id) DO NOTHING",
+                params![
+                    chat_id,
+                    message_id,
+                    session_id,
+                    task_id,
+                    outbound,
+                    stamp(Utc::now())
+                ],
+            )
+            .map_err(sq)?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// 按 `(chat_id, message_id)` 查消息索引；没有就 `None`。
+    pub async fn find_session_by_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<IndexedMessage>, StoreError> {
+        let (chat_id, message_id) = (chat_id.to_string(), message_id.to_string());
+        self.with_conn(move |c| {
+            let row: Option<(String, String, String, Option<String>, bool, String)> = c
+                .query_row(
+                    "SELECT chat_id, message_id, session_id, task_id, outbound, created_at \
+                     FROM message_index WHERE chat_id = ?1 AND message_id = ?2",
+                    params![chat_id, message_id],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(sq)?;
+            row.map(
+                |(chat_id, message_id, session_id, task_id, outbound, created_at)| {
+                    let created_at = DateTime::parse_from_rfc3339(&created_at)
+                        .map_err(|e| {
+                            StoreError::Other(format!(
+                                "message_index.created_at 不是 RFC 3339：{created_at:?}（{e}）"
+                            ))
+                        })?
+                        .with_timezone(&Utc);
+                    Ok(IndexedMessage {
+                        chat_id,
+                        message_id,
+                        session_id,
+                        task_id,
+                        outbound,
+                        created_at,
+                    })
+                },
+            )
+            .transpose()
+        })
+        .await
     }
 
     /// 所有方法的公共骨架：进 blocking 线程池 → 持锁 → 拿连接（已 close 则报
@@ -329,16 +450,22 @@ impl SessionStore for SqliteSessionStore {
         let t = t.clone();
         self.with_conn(move |c| {
             let data = serde_json::to_string(&t)?;
+            // 查询列（迁移 2）写时同步：chat_id 不在 Task 里，按 session_id 去 sessions 取
             c.execute(
-                "INSERT INTO tasks (id, session_id, task_no, status, created_at, data) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO tasks (id, session_id, task_no, status, created_at, data, \
+                 chat_id, cost, tokens_in, tokens_out) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, \
+                 (SELECT chat_id FROM sessions WHERE id = ?2), ?7, ?8, ?9)",
                 params![
                     t.id,
                     t.session_id,
                     t.task_no,
                     t.status.as_str(),
                     stamp(t.created_at),
-                    data
+                    data,
+                    t.cost,
+                    t.tokens_in as i64,
+                    t.tokens_out as i64
                 ],
             )
             .map_err(sq)?;
@@ -351,9 +478,21 @@ impl SessionStore for SqliteSessionStore {
         let t = t.clone();
         self.with_conn(move |c| {
             let data = serde_json::to_string(&t)?;
+            // 查询列每次都跟着写，否则从第二笔起就是陈的
             c.execute(
-                "UPDATE tasks SET session_id = ?1, task_no = ?2, status = ?3, data = ?4 WHERE id = ?5",
-                params![t.session_id, t.task_no, t.status.as_str(), data, t.id],
+                "UPDATE tasks SET session_id = ?1, task_no = ?2, status = ?3, data = ?4, \
+                 chat_id = (SELECT chat_id FROM sessions WHERE id = ?1), \
+                 cost = ?6, tokens_in = ?7, tokens_out = ?8 WHERE id = ?5",
+                params![
+                    t.session_id,
+                    t.task_no,
+                    t.status.as_str(),
+                    data,
+                    t.id,
+                    t.cost,
+                    t.tokens_in as i64,
+                    t.tokens_out as i64
+                ],
             )
             .map_err(sq)?;
             Ok(())
@@ -425,8 +564,8 @@ impl SessionStore for SqliteSessionStore {
         let event_id = event_id.to_string();
         self.with_conn(move |c| {
             match c.execute(
-                "INSERT INTO seen_events (event_id) VALUES (?1)",
-                params![event_id],
+                "INSERT INTO seen_events (event_id, seen_at) VALUES (?1, ?2)",
+                params![event_id, stamp(Utc::now())],
             ) {
                 Ok(_) => Ok(false),
                 Err(e) if is_constraint_violation(&e) => Ok(true),

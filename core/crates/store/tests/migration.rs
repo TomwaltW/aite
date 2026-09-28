@@ -160,7 +160,9 @@ async fn migrates_p0_db_in_place() {
         "夹具必须是没有版本表的 P0 库"
     );
 
+    let before_migrate = stamp(Utc::now());
     let store = open_store(&db).await;
+    let after_migrate = stamp(Utc::now());
 
     assert_eq!(version_rows(&db), all_versions());
     // 老数据一个字不丢
@@ -192,6 +194,64 @@ async fn migrates_p0_db_in_place() {
         "号接着发"
     );
     assert_eq!(store.pragma("journal_mode").await.unwrap(), "delete");
+
+    // 迁移 2 的回填：tasks 查询列 = JSON 里的值，chat_id = 会话的 chat_id
+    let raw = Connection::open(&db).unwrap();
+    let cols = |raw: &Connection, id: &str| -> (Option<String>, f64, i64, i64) {
+        raw.query_row(
+            "SELECT chat_id, cost, tokens_in, tokens_out FROM tasks WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        cols(&raw, "tsk_1"),
+        (Some(CHAT.to_string()), 0.375, 1200, 345)
+    );
+    // 存量去重键回填成迁移时刻，一条 NULL 都不留（NULL 永远剪不掉）
+    let seen_at: Vec<Option<String>> = raw
+        .prepare("SELECT seen_at FROM seen_events WHERE event_id IN ('ev-1', 'ev-2')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(seen_at.len(), 2);
+    for s in &seen_at {
+        let s = s.as_deref().expect("存量行 seen_at 不许是 NULL");
+        assert!(
+            before_migrate.as_str() <= s && s <= after_migrate.as_str(),
+            "seen_at 应是迁移时刻：{s} 不在 [{before_migrate}, {after_migrate}]"
+        );
+    }
+    let names = sqlite_master_names(&db);
+    for want in [
+        "schema_version",
+        "message_index",
+        "idx_seen_events_seen_at",
+        "idx_tasks_chat_created",
+    ] {
+        assert!(names.contains(&want.to_string()), "少了 {want}：{names:?}");
+    }
+
+    // 写时同步：update_task 改 cost / tokens，新列跟着走；create_task 新任务也写全
+    let mut t = task;
+    t.cost = 1.5;
+    t.tokens_in = 2000;
+    t.tokens_out = 500;
+    store.update_task(&t).await.unwrap();
+    assert_eq!(
+        cols(&raw, "tsk_1"),
+        (Some(CHAT.to_string()), 1.5, 2000, 500)
+    );
+    let mut fresh = make_task("tsk_2", "ses_1", "#A2", "新任务");
+    fresh.cost = 0.125;
+    fresh.tokens_in = 7;
+    fresh.tokens_out = 9;
+    store.create_task(&fresh).await.unwrap();
+    assert_eq!(cols(&raw, "tsk_2"), (Some(CHAT.to_string()), 0.125, 7, 9));
+    drop(raw);
     store.close().await.unwrap();
 }
 
@@ -267,5 +327,142 @@ async fn refuses_newer_schema_version() {
         "报错要带上两个版本号：{msg}"
     );
     assert_eq!(std::fs::read(&db).unwrap(), before, "拒绝之前写了库");
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn seen_events_prune() {
+    let tmp = TempDir::new().unwrap();
+    let db = db_path(&tmp);
+    let store = open_store(&db).await;
+    for id in ["old-1", "old-2", "old-3", "new-1", "new-2"] {
+        assert!(!store.seen_event(id).await.unwrap());
+    }
+    // seen_event 自己写了 seen_at（非 NULL）；把旧那批挪到很久以前
+    let raw = Connection::open(&db).unwrap();
+    let nulls: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM seen_events WHERE seen_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(nulls, 0, "seen_event 必须写 seen_at");
+    raw.execute(
+        "UPDATE seen_events SET seen_at = ?1 WHERE event_id LIKE 'old-%'",
+        params![stamp(common::at(0))],
+    )
+    .unwrap();
+    drop(raw);
+
+    let cutoff = Utc::now() - chrono::Duration::hours(1);
+    assert_eq!(store.prune_seen_events_before(cutoff).await.unwrap(), 3);
+    assert_eq!(
+        store.prune_seen_events_before(cutoff).await.unwrap(),
+        0,
+        "再剪一次没东西可剪"
+    );
+
+    assert!(
+        !store.seen_event("old-1").await.unwrap(),
+        "剪掉的键重新记录"
+    );
+    assert!(
+        store.seen_event("old-1").await.unwrap(),
+        "重新记录之后又认得了"
+    );
+    assert!(store.seen_event("new-1").await.unwrap(), "新的一批没被剪");
+    assert!(store.seen_event("new-2").await.unwrap(), "新的一批没被剪");
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn message_index_roundtrip() {
+    let tmp = TempDir::new().unwrap();
+    let db = db_path(&tmp);
+    let store = open_store(&db).await;
+
+    let t0 = Utc::now();
+    // 入站：群里 @ 的那条根消息，还没建任务
+    store
+        .index_message(CHAT, "om_in", "ses_1", None, false)
+        .await
+        .unwrap();
+    // 出站：我们回的那条，挂在任务上
+    store
+        .index_message(CHAT, "om_out", "ses_1", Some("tsk_1"), true)
+        .await
+        .unwrap();
+    let t1 = Utc::now();
+
+    let inbound = store
+        .find_session_by_message(CHAT, "om_in")
+        .await
+        .unwrap()
+        .expect("入站那条");
+    assert_eq!(inbound.chat_id, CHAT);
+    assert_eq!(inbound.message_id, "om_in");
+    assert_eq!(inbound.session_id, "ses_1");
+    assert_eq!(inbound.task_id, None);
+    assert!(!inbound.outbound);
+    assert!(t0 <= inbound.created_at && inbound.created_at <= t1);
+
+    let outbound = store
+        .find_session_by_message(CHAT, "om_out")
+        .await
+        .unwrap()
+        .expect("出站那条");
+    assert_eq!(outbound.message_id, "om_out");
+    assert_eq!(outbound.session_id, "ses_1");
+    assert_eq!(outbound.task_id.as_deref(), Some("tsk_1"));
+    assert!(outbound.outbound);
+
+    // 查不存在的键
+    assert_eq!(
+        store
+            .find_session_by_message(CHAT, "om_nope")
+            .await
+            .unwrap(),
+        None
+    );
+    // 跨 chat 同 message_id 互不串
+    assert_eq!(
+        store
+            .find_session_by_message("oc_other", "om_in")
+            .await
+            .unwrap(),
+        None
+    );
+    store
+        .index_message("oc_other", "om_in", "ses_2", Some("tsk_9"), true)
+        .await
+        .unwrap();
+    let other = store
+        .find_session_by_message("oc_other", "om_in")
+        .await
+        .unwrap()
+        .expect("另一个群的同号消息");
+    assert_eq!(other.session_id, "ses_2");
+    assert_eq!(
+        store
+            .find_session_by_message(CHAT, "om_in")
+            .await
+            .unwrap()
+            .expect("原来那条")
+            .session_id,
+        "ses_1",
+        "另一个群的索引把这边的串了"
+    );
+
+    // 重复索引：不报错、保留首条（不覆盖）
+    store
+        .index_message(CHAT, "om_in", "ses_X", Some("tsk_X"), true)
+        .await
+        .expect("重复索引不许报错");
+    assert_eq!(
+        store.find_session_by_message(CHAT, "om_in").await.unwrap(),
+        Some(inbound),
+        "重复索引要保留首条"
+    );
     store.close().await.unwrap();
 }

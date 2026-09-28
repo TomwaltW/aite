@@ -26,7 +26,7 @@ use aite_contracts::StoreError;
 use crate::{sq, stamp};
 
 /// 本程序认识的最新 schema 版本。库比它新 → `init()` 拒绝打开；比它旧 → 迁上来。
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 
 /// 一条迁移：在调用方给的事务里跑（`Transaction` 解引用成 `&Connection`），不自己 commit。
 struct Migration {
@@ -35,10 +35,16 @@ struct Migration {
 }
 
 /// 迁移清单，版本号严格递增、从 1 起连续。
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    apply: m1_p0_schema,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        apply: m1_p0_schema,
+    },
+    Migration {
+        version: 2,
+        apply: m2_query_columns_and_message_index,
+    },
+];
 
 /// 迁移 1 = P0 的建表 SQL，逐字照 `aite/control/store.py` 的 `_SCHEMA`。
 /// 全是 `IF NOT EXISTS`，所以在 P0 老库上是空操作 —— 老库只多出一行版本记录。
@@ -83,6 +89,51 @@ CREATE TABLE IF NOT EXISTS seen_events (
 
 fn m1_p0_schema(c: &Connection) -> Result<(), StoreError> {
     c.execute_batch(SCHEMA_V1).map_err(sq)
+}
+
+/// 迁移 2（CC5）：
+/// - `seen_events.seen_at` + 索引：存量行回填成**迁移时刻**（`stamp()` 的定长格式，字典序 = 时间序；
+///   不留 NULL —— NULL 永远不满足 `<`，会永远剪不掉）。SQLite 的 `ADD COLUMN` 不许拿
+///   `CURRENT_TIMESTAMP` 当默认值，所以先加可空列再回填。
+/// - `tasks` 的四个查询列 `chat_id / cost / tokens_in / tokens_out` + `(chat_id, created_at)` 索引：
+///   `cost` / `tokens_*` 从 `data` 回填（缺省 0）；`chat_id` 不在 `Task` 的 JSON 里，按 `session_id`
+///   去 sessions 表取，会话行没了就留 NULL（起飞照常，见 app 的 `startup_recovery`）。
+/// - `message_index`：「平台消息 → 会话 / 任务」索引，锚点与引用解析用。
+fn m2_query_columns_and_message_index(c: &Connection) -> Result<(), StoreError> {
+    c.execute_batch("ALTER TABLE seen_events ADD COLUMN seen_at TEXT;")
+        .map_err(sq)?;
+    c.execute(
+        "UPDATE seen_events SET seen_at = ?1",
+        params![stamp(Utc::now())],
+    )
+    .map_err(sq)?;
+    c.execute_batch(
+        "
+CREATE INDEX IF NOT EXISTS idx_seen_events_seen_at ON seen_events (seen_at);
+
+ALTER TABLE tasks ADD COLUMN chat_id TEXT;
+ALTER TABLE tasks ADD COLUMN cost REAL NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN tokens_in INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN tokens_out INTEGER NOT NULL DEFAULT 0;
+UPDATE tasks SET
+    chat_id    = (SELECT s.chat_id FROM sessions s WHERE s.id = tasks.session_id),
+    cost       = CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.cost'), 0) ELSE 0 END,
+    tokens_in  = CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.tokens_in'), 0) ELSE 0 END,
+    tokens_out = CASE WHEN json_valid(data) THEN COALESCE(json_extract(data, '$.tokens_out'), 0) ELSE 0 END;
+CREATE INDEX IF NOT EXISTS idx_tasks_chat_created ON tasks (chat_id, created_at);
+
+CREATE TABLE IF NOT EXISTS message_index (
+    chat_id     TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    task_id     TEXT,
+    outbound    INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
+",
+    )
+    .map_err(sq)
 }
 
 /// 读当前版本：`schema_version` 表不存在（任何 P0 的库）或为空 = 0。
