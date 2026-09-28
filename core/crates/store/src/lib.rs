@@ -35,6 +35,19 @@ use rusqlite::{Connection, OptionalExtension, params};
 /// 上一条命没跑完的任务被收拾掉时写进 `result_summary` 的话（与 Python 版逐字一致）。
 pub const ORPHAN_RESULT_SUMMARY: &str = "进程重启前该任务仍在执行，已终止。请重新发起。";
 
+/// `recover_orphan_tasks` 收的状态 = T0 的 `OPEN_TASK_STATUSES` 去掉 `AwaitingApproval`。
+///
+/// 比 `ACTIVE_TASK_STATUSES`（`list_active_tasks` 的口径，不动）多一个 `Answering`：worker 在没发过
+/// 卡片的那一路先落 answering、再 `send_text`、最后落 delivered，进程死在中间的话任务会永远停在
+/// answering、群里没人收场（CC5）。`awaiting_approval` 在启动时怎么处理归 EE7（D17：v1 审批不跨重启），
+/// **不**当孤儿收。
+const ORPHAN_TASK_STATUSES: [TaskStatus; 4] = [
+    TaskStatus::Created,
+    TaskStatus::Planning,
+    TaskStatus::Answering,
+    TaskStatus::Working,
+];
+
 /// spec D8：跨实例并发是真线程，撞上文件锁时等一会儿而不是立刻报 SQLITE_BUSY。
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
 
@@ -575,7 +588,8 @@ impl SessionStore for SqliteSessionStore {
         .await
     }
 
-    /// 把上一条命遗留的活跃任务收干净，返回被收拾的那些。
+    /// 把上一条命遗留的未收尾任务（[`ORPHAN_TASK_STATUSES`]，比活跃口径多一个 answering）
+    /// 收干净，返回被收拾的那些。
     ///
     /// **故意不在 `init()` 里自动调用**：`init()` 的契约是「建表，幂等」，塞状态变更是扩契约；
     /// 而 §3.3 要求失败要「task failed + 回帖 + evidence failed 事件」，后两件 store 做不了。
@@ -584,11 +598,13 @@ impl SessionStore for SqliteSessionStore {
         self.with_conn(move |c| {
             let rows = query_texts(
                 c,
-                "SELECT data FROM tasks WHERE status IN (?1, ?2, ?3) ORDER BY created_at ASC, id ASC",
+                "SELECT data FROM tasks WHERE status IN (?1, ?2, ?3, ?4) \
+                 ORDER BY created_at ASC, id ASC",
                 params![
-                    ACTIVE_TASK_STATUSES[0].as_str(),
-                    ACTIVE_TASK_STATUSES[1].as_str(),
-                    ACTIVE_TASK_STATUSES[2].as_str()
+                    ORPHAN_TASK_STATUSES[0].as_str(),
+                    ORPHAN_TASK_STATUSES[1].as_str(),
+                    ORPHAN_TASK_STATUSES[2].as_str(),
+                    ORPHAN_TASK_STATUSES[3].as_str()
                 ],
             )?;
             let tx = c.unchecked_transaction().map_err(sq)?;
