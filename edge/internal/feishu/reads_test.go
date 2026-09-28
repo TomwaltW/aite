@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
+
+	pb "aite/edge/gen/aitepb"
 )
 
 // T0 是 2026-09-09T01:02:00Z；每条 +1 分钟。
@@ -193,9 +195,14 @@ func TestHistoryCarriesSenderNameAndThreadID(t *testing.T) {
 //
 // 飞书的 container_id_type=thread 收的是 omt_ 话题 id，而锚点里存的是话题 root
 // 消息 id，两者不是一个 id 空间，所以在客户端筛。
+//
+// CC8 起带 threadID 先查 root 的 thread_id、走 thread 容器；这条注册的 root 不带
+// thread_id，**有意地**钉住回落 ①（非话题消息 → 整群拉取、客户端筛），期望不变。
 func TestHistoryCanBeNarrowedToOneThread(t *testing.T) {
 	f := newFakeFeishu(t)
 	f.mockToken()
+	f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(
+		historyItem(testRootMsgID, "话题根消息", historyT0)))
 	f.on(http.MethodGet, PathMessages, historyPage([]map[string]any{
 		historyItem("om_other", "别的话题", historyT0+120_000),
 		historyItem("om_in", "本话题里的", historyT0+60_000, withRootID(testRootMsgID)),
@@ -214,6 +221,137 @@ func TestHistoryCanBeNarrowedToOneThread(t *testing.T) {
 	if fmt.Sprint(ids) != fmt.Sprintf("[%s om_in]", testRootMsgID) {
 		t.Errorf("message_id = %v", ids)
 	}
+}
+
+// messageGet 是「获取指定消息的内容」的响应：data.items 是数组（SDK GetMessageRespData）。
+func messageGet(item map[string]any) func(http.ResponseWriter) {
+	return jsonResponse(200, map[string]any{"code": 0, "data": map[string]any{"items": []any{item}}})
+}
+
+func withThreadID(id string) historyOpt {
+	return func(m map[string]any) { m["thread_id"] = id }
+}
+
+func historyIDs(messages []*pb.HistoryMessage) string {
+	var ids []string
+	for _, m := range messages {
+		ids = append(ids, m.GetMessageId())
+	}
+	return fmt.Sprint(ids)
+}
+
+// TestThreadHistoryUsesThreadContainer 钉住话题历史走 thread 容器，以及两条回落。
+func TestThreadHistoryUsesThreadContainer(t *testing.T) {
+	const omt = "omt_x"
+	rootItem := historyItem(testRootMsgID, "话题根消息", historyT0, withThreadID(omt))
+	// 整群那一页：回落时客户端筛出 [root om_in]。
+	chatPage := historyPage([]map[string]any{
+		historyItem("om_other", "别的话题", historyT0+120_000),
+		historyItem("om_in", "本话题里的", historyT0+60_000, withRootID(testRootMsgID)),
+		historyItem(testRootMsgID, "话题根消息", historyT0),
+	}, false, "")
+	permissionDenied := jsonResponse(400, map[string]any{"code": 230002, "msg": "bot not in chat"})
+
+	read := func(t *testing.T, f *fakeFeishu) ([]*pb.HistoryMessage, error) {
+		t.Helper()
+		return readPlatform(t, f).ReadHistory(context.Background(), testChatID, 10, strptr(testRootMsgID))
+	}
+	containers := func(r *route) []string {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		var out []string
+		for _, c := range r.calls {
+			out = append(out, c.query.Get("container_id_type")+":"+c.query.Get("container_id"))
+		}
+		return out
+	}
+
+	t.Run("thread 容器", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(rootItem))
+		// thread 列表里没有 root（倒序）：结果要把 root 补上、按时间归位。
+		list := f.on(http.MethodGet, PathMessages, historyPage([]map[string]any{
+			historyItem("om_r2", "第二条回复", historyT0+120_000, withRootID(testRootMsgID)),
+			historyItem("om_r1", "第一条回复", historyT0+60_000, withRootID(testRootMsgID)),
+		}, false, ""))
+
+		messages, err := read(t, f)
+		if err != nil {
+			t.Fatalf("ReadHistory 失败：%v", err)
+		}
+		if got := fmt.Sprint(containers(list)); got != "[thread:omt_x]" {
+			t.Errorf("列表请求 = %s，要恰好一次 thread:omt_x、没有 chat 容器请求", got)
+		}
+		q := list.last(t).query
+		for key, want := range map[string]string{
+			"sort_type": "ByCreateTimeDesc", "with_sender_name": "true", "page_size": "10",
+		} {
+			if got := q.Get(key); got != want {
+				t.Errorf("query[%s] = %q，要 %q（预算不再 ×4）", key, got, want)
+			}
+		}
+		if got := historyIDs(messages); got != fmt.Sprintf("[%s om_r1 om_r2]", testRootMsgID) {
+			t.Errorf("message_id = %s，要含 root 且正序", got)
+		}
+	})
+
+	t.Run("thread 列表权限错误 → 回落整群筛法", func(t *testing.T) {
+		for name, denied := range map[string]func(http.ResponseWriter){
+			"业务码 230002": permissionDenied,
+			"HTTP 403":   jsonResponse(403, map[string]any{"code": 99999, "msg": "forbidden"}),
+		} {
+			t.Run(name, func(t *testing.T) {
+				f := newFakeFeishu(t)
+				f.mockToken()
+				f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(rootItem))
+				list := f.on(http.MethodGet, PathMessages, denied, chatPage)
+
+				messages, err := read(t, f)
+				if err != nil {
+					t.Fatalf("权限错误该回落而不是上抛：%v", err)
+				}
+				want := fmt.Sprintf("[thread:omt_x chat:%s]", testChatID)
+				if got := fmt.Sprint(containers(list)); got != want {
+					t.Errorf("列表请求 = %s，要 %s（恰好一次 chat 容器请求）", got, want)
+				}
+				if got := historyIDs(messages); got != fmt.Sprintf("[%s om_in]", testRootMsgID) {
+					t.Errorf("message_id = %s，要与整群筛法一致", got)
+				}
+			})
+		}
+	})
+
+	t.Run("非权限错误上抛；root 查询失败回落", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(rootItem))
+		list := f.on(http.MethodGet, PathMessages,
+			jsonResponse(400, map[string]any{"code": 230001, "msg": "invalid params"}))
+		if _, err := read(t, f); err == nil {
+			t.Fatal("thread 列表回非权限错误该上抛")
+		}
+		if got := fmt.Sprint(containers(list)); got != "[thread:omt_x]" {
+			t.Errorf("非权限错误不该回落，列表请求 = %s", got)
+		}
+
+		// root 查询失败（生产里 root 被撤回就是这样）→ 回落、不上抛。
+		f2 := newFakeFeishu(t)
+		f2.mockToken()
+		f2.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID),
+			jsonResponse(400, map[string]any{"code": 230011, "msg": "message recalled"}))
+		list2 := f2.on(http.MethodGet, PathMessages, chatPage)
+		messages, err := read(t, f2)
+		if err != nil {
+			t.Fatalf("root 查询失败该回落：%v", err)
+		}
+		if got := fmt.Sprint(containers(list2)); got != fmt.Sprintf("[chat:%s]", testChatID) {
+			t.Errorf("列表请求 = %s", got)
+		}
+		if got := historyIDs(messages); got != fmt.Sprintf("[%s om_in]", testRootMsgID) {
+			t.Errorf("message_id = %s", got)
+		}
+	})
 }
 
 // TestHistoryPaginatesUntilTheLimitIsFilled
