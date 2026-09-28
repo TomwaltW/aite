@@ -1,0 +1,24 @@
+impl From<NormalizedEvent> for pb::NormalizedEvent {
+    fn from(e: NormalizedEvent) -> Self {
+        pb::NormalizedEvent {
+            event_id: e.event_id,
+            kind: pb::EventKind::from(e.kind) as i32,
+            platform: e.platform,
+            tenant_id: e.tenant_id,
+            workspace_id: e.workspace_id,
+            chat_id: e.chat_id,
+            chat_type: pb::ChatType::from(e.chat_type) as i32,
+            sender_id: e.sender_id,
+            sender_kind: pb::SenderKind::from(e.sender_kind) as i32,
+            sender_name: e.sender_name,
+            text: e.text,
+            raw_text: e.raw_text,
+            mentioned: e.mentioned,
+            anchor: Some(e.anchor.into()),
+            attachments: e.attachments.into_iter().map(Into::into).collect(),
+            card_action: e.card_action.map(Into::into),
+            occurred_at: Some(chrono_to_ts(e.occurred_at)),
+            raw: Some(map_to_struct(&e.raw)),
+        }
+    }
+}

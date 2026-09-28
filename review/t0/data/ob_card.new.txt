@@ -1,0 +1,43 @@
+/// 卡片上的链接按钮（「配置」、MR、托管页……）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardLink {
+    pub label: String,
+    pub url: String,
+}
+
+/// 卡片上的审批请求（配 approve / reject 两个动作）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPrompt {
+    pub approval_id: String,
+    /// 一句话：要做什么
+    pub summary: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChecklistCard {
+    pub task_id: String,
+    /// "#A17"
+    pub task_no: String,
+    /// 任务一句话（≤40 字，worker 截断）
+    pub title: String,
+    /// 发起人显示名
+    pub initiator: String,
+    /// "9:02"
+    pub started_at: String,
+    pub status: CardStatus,
+    #[serde(default)]
+    pub items: Vec<ChecklistItemView>,
+    /// "预计 2 分钟 · 已用 ¥0.12"
+    #[serde(default)]
+    pub footer: String,
+    /// 默认 [stop]
+    #[serde(default = "default_actions")]
+    pub actions: Vec<CardActionKind>,
+    #[serde(default)]
+    pub links: Vec<CardLink>,
+    /// 等审批时有
+    #[serde(default)]
+    pub approval: Option<ApprovalPrompt>,
+}

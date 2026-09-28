@@ -1,0 +1,5 @@
+        created_at: now,
+        last_active_at: now,
+        archived_at: None,
+        meta: json!({"muted": false}).as_object().unwrap().clone(),
+    };

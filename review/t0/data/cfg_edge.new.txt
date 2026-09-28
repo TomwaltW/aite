@@ -1,0 +1,310 @@
+/// core ↔ edge 的进程边界（proto/aite/v1/edge.proto）。socket 路径相对仓库根。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EdgeConfig {
+    /// edge 监听：PlatformService / SandboxService / EdgeStatusService
+    pub edge_socket: String,
+    /// core 监听：IngressService
+    pub core_socket: String,
+    /// edge 调 HandleEvent 的 deadline（§3.3 "on_event 1s 内返回"）
+    pub handle_event_deadline_ms: u64,
+    /// 两边 gRPC 的最大消息体（文件走 bytes）
+    pub max_message_mb: u32,
+    /// edge 的 HTTP 入口（外部 webhook）；空 = 不开
+    pub http_listen: String,
+    pub webhook_secret_env: String,
+}
+
+impl Default for EdgeConfig {
+    fn default() -> Self {
+        Self {
+            edge_socket: "data/run/aite-edge.sock".into(),
+            core_socket: "data/run/aite-core.sock".into(),
+            handle_event_deadline_ms: 1000,
+            max_message_mb: 64,
+            http_listen: String::new(),
+            webhook_secret_env: "AITE_WEBHOOK_SECRET".into(),
+        }
+    }
+}
+
+str_enum! {
+    SearchProvider { None => "none", Bocha => "bocha", Zhipu => "zhipu", Baidu => "baidu" }
+}
+
+/// 联网搜索（CT21）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SearchConfig {
+    pub provider: SearchProvider,
+    pub api_key_env: String,
+    /// 空 = 用厂商默认端点
+    pub endpoint: String,
+    pub max_results: u32,
+    pub timeout_sec: u32,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: SearchProvider::None,
+            api_key_env: "AITE_SEARCH_API_KEY".into(),
+            endpoint: String::new(),
+            max_results: 5,
+            timeout_sec: 15,
+        }
+    }
+}
+
+str_enum! {
+    GitProvider {
+        None => "none",
+        Gitlab => "gitlab",
+        Gitee => "gitee",
+        Codeup => "codeup",
+        Gitea => "gitea",
+        Github => "github",
+    }
+}
+
+/// 代码托管（CT22）：机器人身份开 Draft MR。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitConfig {
+    pub provider: GitProvider,
+    pub base_url: String,
+    pub token_env: String,
+    pub bot_name: String,
+    pub draft_prefix: String,
+    pub webhook_secret_env: String,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            provider: GitProvider::None,
+            base_url: String::new(),
+            token_env: "AITE_GIT_TOKEN".into(),
+            bot_name: "aite-bot".into(),
+            draft_prefix: "Draft: ".into(),
+            webhook_secret_env: "AITE_GIT_WEBHOOK_SECRET".into(),
+        }
+    }
+}
+
+str_enum! {
+    PagesProvider { None => "none", PlatformDoc => "platform_doc" }
+}
+
+/// 托管页（CT23）：platform_doc = 平台云文档。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PagesConfig {
+    pub provider: PagesProvider,
+    /// 放页面的文件夹 token 的环境变量名；空 = 应用根目录
+    pub folder_token_env: String,
+}
+
+impl Default for PagesConfig {
+    fn default() -> Self {
+        Self {
+            provider: PagesProvider::None,
+            folder_token_env: String::new(),
+        }
+    }
+}
+
+/// 记忆（CT16）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub max_entries_per_scope: u32,
+    /// 任务结束后自动提炼记忆
+    pub auto_extract: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries_per_scope: 200,
+            auto_extract: false,
+        }
+    }
+}
+
+/// 例程（CT12 / CT15）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoutinesConfig {
+    pub enabled: bool,
+    pub max_per_chat: u32,
+    pub min_interval_min: u32,
+    pub default_tz: String,
+    /// 与 default_tz 对应的 UTC 偏移（分钟）；东八区 = 480
+    pub default_tz_offset_min: i32,
+    /// 调度循环的节拍
+    pub tick_sec: u32,
+}
+
+impl Default for RoutinesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_per_chat: 20,
+            min_interval_min: 15,
+            default_tz: "Asia/Shanghai".into(),
+            default_tz_offset_min: 480,
+            tick_sec: 30,
+        }
+    }
+}
+
+/// 旁听与主动回复（CT07 / CT08）。自动回复默认关。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AmbientConfig {
+    pub respond_automatically_default: bool,
+    pub daily_cap_per_chat: u32,
+    /// 频道会话读了这么多条还没被叫到就停读
+    pub stop_reading_after_msgs: u32,
+    pub channel_session_idle_min: u32,
+    pub channel_session_max_age_h: u32,
+    pub stalled_followup_h: u32,
+    /// 与别的 bot 连续对话的轮次上限
+    pub max_consecutive_bot_turns: u32,
+}
+
+impl Default for AmbientConfig {
+    fn default() -> Self {
+        Self {
+            respond_automatically_default: false,
+            daily_cap_per_chat: 20,
+            stop_reading_after_msgs: 100,
+            channel_session_idle_min: 60,
+            channel_session_max_age_h: 24,
+            stalled_followup_h: 24,
+            max_consecutive_bot_turns: 3,
+        }
+    }
+}
+
+/// 访问控制（CT28 / NEW06 / NEW08）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessConfig {
+    pub dm_enabled: bool,
+    /// 外部群：restrict = 回固定提示、不执行；离开 restrict 要 compliance 的两个确认位都为 true（D25）
+    pub external_chat_mode: ExternalChatMode,
+    /// 非空 = 只在这些群里工作
+    pub allow_chats: Vec<String>,
+    pub block_chats: Vec<String>,
+    /// 非空 = 只有这些人能叫它
+    pub member_allowlist: Vec<String>,
+    pub search_scope: SearchScope,
+    /// true：群管理员 !configure 之前不接活
+    pub require_setup: bool,
+}
+
+impl Default for AccessConfig {
+    fn default() -> Self {
+        Self {
+            dm_enabled: true,
+            external_chat_mode: ExternalChatMode::Restrict,
+            allow_chats: Vec::new(),
+            block_chats: Vec::new(),
+            member_allowlist: Vec::new(),
+            search_scope: SearchScope::JoinedChats,
+            require_setup: false,
+        }
+    }
+}
+
+/// 预算（CT26），人民币；0 = 不限。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BudgetConfig {
+    pub org_monthly_limit_cny: f64,
+    pub channel_monthly_limit_cny: f64,
+    pub task_limit_cny: f64,
+    /// 用到这个比例先提醒
+    pub warn_ratio: f64,
+    /// 账期从每月几号起算
+    pub month_start_day: u32,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            org_monthly_limit_cny: 0.0,
+            channel_monthly_limit_cny: 0.0,
+            task_limit_cny: 0.0,
+            warn_ratio: 0.8,
+            month_start_day: 1,
+        }
+    }
+}
+
+/// 合规（NEW10 / NEW21 / D25）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ComplianceConfig {
+    /// 显式 AIGC 标识（与回复同一条消息）
+    pub aigc_label: bool,
+    pub label_text: String,
+    /// 隐式标识（产物文件元数据）
+    pub implicit_metadata: bool,
+    pub producer: String,
+    /// Aite 自己的服务备案；模型的编号在 ModelConfig.filing_no
+    pub service_filing_no: String,
+    pub audit_retention_days: u32,
+    /// 对话正文留存天数；0 = 不自动删
+    pub content_retention_days: u32,
+    /// 备案范围已确认覆盖外部群（D25）
+    pub registration_scope_confirmed: bool,
+    /// 内容安全过滤已接上（D25）
+    pub content_safety_filter: bool,
+}
+
+impl Default for ComplianceConfig {
+    fn default() -> Self {
+        Self {
+            aigc_label: true,
+            label_text: "内容由 AI 生成".into(),
+            implicit_metadata: true,
+            producer: "Aite".into(),
+            service_filing_no: String::new(),
+            audit_retention_days: 190,
+            content_retention_days: 0,
+            registration_scope_confirmed: false,
+            content_safety_filter: false,
+        }
+    }
+}
+
+/// 管理台（CT28）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdminConfig {
+    /// 空 = 不开管理台
+    pub listen: String,
+    /// 卡片上「配置」链接的前缀
+    pub public_base_url: String,
+    /// 平台用户 id；这些人是管理员
+    pub owner_ids: Vec<String>,
+    pub session_secret_env: String,
+    pub bootstrap_token_env: String,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            listen: String::new(),
+            public_base_url: String::new(),
+            owner_ids: Vec::new(),
+            session_secret_env: "AITE_ADMIN_SECRET".into(),
+            bootstrap_token_env: "AITE_ADMIN_BOOTSTRAP_TOKEN".into(),
+        }
+    }
+}

@@ -1,0 +1,25 @@
+feishu:
+  app_id_env: FEISHU_APP_ID
+  app_secret_env: FEISHU_APP_SECRET
+  bot_name: Aite
+  bot_open_id_env: FEISHU_BOT_OPEN_ID
+  history_window: 50             # 读群历史的默认条数
+  api_base: https://open.feishu.cn
+  card_buttons: false            # 卡片上出审批 / 表单按钮（要开卡片回调）
+  service_user_token_env: ""     # 服务用户 user_access_token 的环境变量名；空 = 不开消息搜索
+
+dingtalk:                        # 钉钉企业内部应用机器人（Stream 模式）
+  client_id_env: DINGTALK_CLIENT_ID
+  client_secret_env: DINGTALK_CLIENT_SECRET
+  robot_code_env: DINGTALK_ROBOT_CODE
+  card_template_id_env: DINGTALK_CARD_TEMPLATE_ID
+  api_base: https://api.dingtalk.com
+  bot_name: Aite
+
+wecom:                           # 企业微信智能机器人（长连接）
+  bot_id_env: WECOM_BOT_ID
+  bot_secret_env: WECOM_BOT_SECRET
+  ws_url: wss://openws.work.weixin.qq.com
+  corp_id_env: ""                # 另配自建应用换明文 userid 时用
+  app_secret_env: ""
+  bot_name: Aite

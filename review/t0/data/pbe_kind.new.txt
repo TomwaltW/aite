@@ -1,0 +1,5 @@
+  EVENT_KIND_BOT_ADDED = 5;
+  EVENT_KIND_MEMBER_CHANGED = 6;
+  EVENT_KIND_REACTION = 7;             // 表情回应（NormalizedEvent.reaction）
+  EVENT_KIND_EXTERNAL = 8;             // 外部系统事件（NormalizedEvent.external）
+}

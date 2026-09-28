@@ -1,0 +1,8 @@
+message OutboundText {
+  string chat_id = 1;
+  string text = 2;                     // markdown（飞书 post/markdown 由 adapter 转）
+  optional string reply_to = 3;        // 回复哪条消息
+  bool in_thread = 4;                  // reply_to 存在时是否进话题。core 总是显式写（domain 默认 true）
+  repeated string mentions = 5;        // 要 @ 的平台用户 id（adapter 渲染成平台的 @ 语法）
+  optional string dedupe_key = 6;      // 去重键：同一个键 adapter 只发一次
+}

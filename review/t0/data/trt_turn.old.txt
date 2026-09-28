@@ -1,0 +1,13 @@
+        content: "[用户修改了消息] 新内容：x".into(),
+        attachments: vec![],
+        created_at: now,
+    });
+    assert_eq!(
+        serde_json::to_value(TurnRole::SystemNote).unwrap(),
+        "system_note"
+    );
+}
+
+#[test]
+fn protocol_gateway_sandbox_evidence_models() {
+    rt(&Message {

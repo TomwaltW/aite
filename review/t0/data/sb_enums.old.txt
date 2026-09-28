@@ -1,0 +1,8 @@
+str_enum! {
+    /// P0 沙箱无网络：凭证/平台调用都不在沙箱里发生
+    SandboxNetwork { None => "none" }
+}
+
+str_enum! {
+    ExecLanguage { Python => "python" }
+}

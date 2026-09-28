@@ -1,0 +1,110 @@
+    /// status in ACTIVE_TASK_STATUSES，按 (created_at, id) 正序
+    async fn list_active_tasks(&self, chat_id: &str) -> Result<Vec<Task>, StoreError>;
+    /// 原子递增 + encode_task_no
+    async fn next_task_no(&self, tenant_id: &str) -> Result<String, StoreError>;
+    /// 去重：首次调用记录并返回 false，之后 true。写失败必须返回 Err，不许假装 false。
+    async fn seen_event(&self, event_id: &str) -> Result<bool, StoreError>;
+    /// 起飞时收上一条命的残局：created / planning / answering / working 四态改 failed +
+    /// result_summary，返回被收拾的任务。**不含 awaiting_approval**（CC5 口径：待审批任务不是孤儿）。
+    /// 故意不在 init() 里自动调用（回帖与 evidence 归调用方）。
+    async fn recover_orphan_tasks(&self) -> Result<Vec<Task>, StoreError>;
+
+    // —— p1.0 新增：全部带默认实现（StoreError::Other("unimplemented: <方法名>")），DD1 实现 ——
+
+    /// 本群编号为 task_no 的任务，含 delivered / failed / cancelled
+    async fn find_task_by_no(
+        &self,
+        chat_id: &str,
+        task_no: &str,
+    ) -> Result<Option<Task>, StoreError> {
+        let _ = (chat_id, task_no);
+        Err(store_unimplemented("find_task_by_no"))
+    }
+    /// status in OPEN_TASK_STATUSES，按 (created_at, id) 正序
+    async fn list_open_tasks(&self, chat_id: &str) -> Result<Vec<Task>, StoreError> {
+        let _ = chat_id;
+        Err(store_unimplemented("list_open_tasks"))
+    }
+    /// 记一条消息 → 会话 / 任务的索引；同 (chat_id, message_id) 重复写幂等
+    async fn index_message(&self, entry: &MessageIndexEntry) -> Result<(), StoreError> {
+        let _ = entry;
+        Err(store_unimplemented("index_message"))
+    }
+    async fn find_session_by_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+    ) -> Result<Option<MessageIndexEntry>, StoreError> {
+        let _ = (chat_id, message_id);
+        Err(store_unimplemented("find_session_by_message"))
+    }
+    /// 本群由 sender_id 建、last_active_at >= since 的非归档会话，新的在前
+    async fn recent_sessions_by_sender(
+        &self,
+        chat_id: &str,
+        sender_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<Session>, StoreError> {
+        let _ = (chat_id, sender_id, since);
+        Err(store_unimplemented("recent_sessions_by_sender"))
+    }
+    /// 本群该类的非归档会话；多条时取 created_at 最新
+    async fn find_open_session(
+        &self,
+        chat_id: &str,
+        kind: SessionKind,
+    ) -> Result<Option<Session>, StoreError> {
+        let _ = (chat_id, kind);
+        Err(store_unimplemented("find_open_session"))
+    }
+    /// 非归档且 last_active_at < before
+    async fn list_sessions_inactive_since(
+        &self,
+        before: DateTime<Utc>,
+    ) -> Result<Vec<Session>, StoreError> {
+        let _ = before;
+        Err(store_unimplemented("list_sessions_inactive_since"))
+    }
+    async fn get_turn_by_message(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Turn>, StoreError> {
+        let _ = (session_id, message_id);
+        Err(store_unimplemented("get_turn_by_message"))
+    }
+    /// 按 (session_id, seq) 覆盖；不存在报错
+    async fn update_turn(&self, t: &Turn) -> Result<(), StoreError> {
+        let _ = t;
+        Err(store_unimplemented("update_turn"))
+    }
+    async fn list_tasks(&self, q: &TaskQuery) -> Result<Vec<Task>, StoreError> {
+        let _ = q;
+        Err(store_unimplemented("list_tasks"))
+    }
+    /// 清掉本群对话正文（墓碑：审计元数据留着），返回动了的行数
+    async fn purge_chat_content(&self, chat_id: &str) -> Result<u64, StoreError> {
+        let _ = chat_id;
+        Err(store_unimplemented("purge_chat_content"))
+    }
+    /// 删 seen_at < before 的去重记录，返回行数
+    async fn prune_seen_events(&self, before: DateTime<Utc>) -> Result<u64, StoreError> {
+        let _ = before;
+        Err(store_unimplemented("prune_seen_events"))
+    }
+    /// 撤销一次 seen_event 登记：入口处理失败、平台将重推时调用（不存在静默 Ok）
+    async fn unsee_event(&self, event_id: &str) -> Result<(), StoreError> {
+        let _ = event_id;
+        Err(store_unimplemented("unsee_event"))
+    }
+    /// 比较并交换：库里当前状态 ∈ expected 才写入并返回 true，否则不写、返回 false
+    async fn update_task_if(&self, t: &Task, expected: &[TaskStatus]) -> Result<bool, StoreError> {
+        let _ = (t, expected);
+        Err(store_unimplemented("update_task_if"))
+    }
+}
+
+/// SessionStore 新方法的默认返回。
+fn store_unimplemented(method: &str) -> StoreError {
+    StoreError::Other(format!("unimplemented: {method}"))
+}

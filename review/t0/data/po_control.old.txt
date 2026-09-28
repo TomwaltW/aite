@@ -1,0 +1,3 @@
+    /// 计数器快照（events.duplicate / events.nonhuman / ...）
+    fn counters(&self) -> Map<String, Value>;
+}

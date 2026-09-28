@@ -1,0 +1,25 @@
+model:
+  provider: openai_compat  # openai_compat | scripted
+  base_url: ""             # 指向百炼 / 智谱 / DeepSeek 的 OpenAI 兼容端点
+  api_key_env: AITE_MODEL_API_KEY
+  model: ""
+  max_tokens: 4096
+  temperature: 0.0
+  price_in_per_mtok: 0.0   # 元/百万 token，只用于卡片上的"已用 ¥"
+  price_out_per_mtok: 0.0  # 同上（输出价）
+  name: primary            # catalog 里的引用名
+  display_name: ""         # 卡片页脚与 !about 显示的名字；空 = 用 model
+  filing_no: ""            # 这个模型服务的备案号 / 上线编号
+  vendor: generic          # generic | deepseek | qwen | glm | kimi | doubao | minimax | selfhost；显式取值优先于按名推断
+  thinking: auto           # auto | on | off
+  timeout_sec: 600
+  stream: false
+  price_cached_in_per_mtok: 0.0
+  price_cache_write_per_mtok: 0.0
+  offpeak_price_multiplier: 1.0
+  allow_overseas_endpoint: false   # false：base_url 指到海外端点是配置错
+
+models:                    # 多模型：按 catalog[].name 引用
+  fallback: ""             # 限流 / 5xx 时切过去的；空 = 不切
+  fast: ""                 # 轻活用的；空 = 用主模型
+  catalog: []              # 每项的形状同 model 段

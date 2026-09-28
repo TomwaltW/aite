@@ -1,0 +1,17 @@
+        card_action: None,
+        occurred_at: Utc.with_ymd_and_hms(2026, 9, 9, 1, 7, 0).unwrap(),
+        raw:
+            json!({"header": {"event_id": "e1", "n": 3, "f": 1.5, "arr": [true, null], "s": "文"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        quote: Some(Quote {
+            message_id: None,
+            sender_id: Some("ou_0".into()),
+            text: "#A17 那张图".into(),
+        }),
+        reaction: None,
+        external: None,
+        sender_external: true,
+    }
+}

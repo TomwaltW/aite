@@ -1,0 +1,21 @@
+    /// 进程收尾：释放本实例记账的全部沙箱（旧 aclose）。默认什么都不做。
+    async fn close_all(&self) -> Result<(), SandboxError> {
+        Ok(())
+    }
+    /// 按出网策略建沙箱（p1.0）。scope_id 在按线程沙箱之后是 session_id，容器标签仍是
+    /// aite.task=<scope_id>。默认实现：level == none 时等同 acquire，其余档位 Unavailable。
+    async fn acquire_scoped(
+        &self,
+        scope_id: &str,
+        spec: &SandboxSpec,
+        egress: &EgressPolicy,
+    ) -> Result<String, SandboxError> {
+        if egress.level == SandboxNetwork::None {
+            return self.acquire(scope_id, spec).await;
+        }
+        Err(SandboxError::new(
+            SandboxErrorKind::Unavailable,
+            format!("本沙箱实现不支持出网档位 {}", egress.level),
+        ))
+    }
+}

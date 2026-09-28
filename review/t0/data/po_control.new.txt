@@ -1,0 +1,103 @@
+    /// 计数器快照（events.duplicate / events.nonhuman / ...）
+    fn counters(&self) -> Map<String, Value>;
+    /// 内部来源（例程 / 跟进 / 旁听 / fork / 外部事件 / 管理台）在某群或某话题里起一个任务，
+    /// 与 @ 走同一条派发。Ok(Some(task_id)) = 建了；Ok(None) = 按规则不建（静音、停用……）。
+    async fn submit_internal(&self, req: &InternalRequest) -> Result<Option<String>, IngressError> {
+        let _ = req;
+        Err(IngressError::Other("unimplemented: submit_internal".into()))
+    }
+}
+
+// —— p1.0 的五个领域存储（无默认实现；DD1 用 SQLite 实现，DD2 出假件）。
+// 方法集的语义见 docs/p1/contract-p1.md §8.6 ——
+
+/// 设置的层级继承：org → workspace → channel / dm（CT09 / CT28）。
+#[async_trait]
+pub trait ScopeStore: Send + Sync {
+    /// 这一层自己的设置（不继承）
+    async fn get_settings(&self, scope: &ScopeRef) -> Result<Option<ScopeSettings>, StoreError>;
+    /// 按 s.scope 覆盖写这一层
+    async fn put_settings(&self, s: &ScopeSettings) -> Result<(), StoreError>;
+    /// 删这一层，返回是否删了
+    async fn delete_settings(&self, scope: &ScopeRef) -> Result<bool, StoreError>;
+    async fn list_settings(
+        &self,
+        kind: Option<ScopeKind>,
+    ) -> Result<Vec<ScopeSettings>, StoreError>;
+    /// chain 从 org 到叶子；逐层覆盖、bundles 并集（叶子为 channel_only 时只取叶子自己的），
+    /// 最后填 snapshot_hash
+    async fn resolve(&self, chain: &[ScopeRef]) -> Result<EffectiveSettings, StoreError>;
+}
+
+/// 记忆：删除打墓碑，清除是硬删（CT16）。
+#[async_trait]
+pub trait MemoryStore: Send + Sync {
+    /// 按 updated_at 正序
+    async fn list(
+        &self,
+        scope: MemoryScope,
+        scope_id: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<MemoryEntry>, StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<MemoryEntry>, StoreError>;
+    async fn upsert(&self, e: &MemoryEntry) -> Result<(), StoreError>;
+    /// 打墓碑（deleted_at / deleted_by，正文清空），返回是否存在
+    async fn delete(&self, id: &str, by: &str) -> Result<bool, StoreError>;
+    /// 硬删整个 scope，返回行数
+    async fn purge_scope(&self, scope: MemoryScope, scope_id: &str) -> Result<u64, StoreError>;
+}
+
+/// 例程：due() 按 next_run_at 取（CT12 / CT15）。
+#[async_trait]
+pub trait RoutineStore: Send + Sync {
+    async fn create(&self, r: &Routine) -> Result<(), StoreError>;
+    async fn update(&self, r: &Routine) -> Result<(), StoreError>;
+    async fn get(&self, id: &str) -> Result<Option<Routine>, StoreError>;
+    /// 按 created_at 正序
+    async fn list_by_chat(&self, chat_id: &str) -> Result<Vec<Routine>, StoreError>;
+    async fn delete(&self, id: &str) -> Result<bool, StoreError>;
+    /// enabled 且 next_run_at <= now，按 (next_run_at, id) 正序，最多 limit 条
+    async fn due(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<Routine>, StoreError>;
+    /// 写 last_run_at / last_task_id / next_run_at（None = 不再触发）
+    async fn mark_fired(
+        &self,
+        id: &str,
+        fired_at: DateTime<Utc>,
+        next_run_at: Option<DateTime<Utc>>,
+        task_id: Option<&str>,
+    ) -> Result<(), StoreError>;
+    async fn find_by_external_topic(&self, topic: &str) -> Result<Vec<Routine>, StoreError>;
+    async fn purge_chat(&self, chat_id: &str) -> Result<u64, StoreError>;
+}
+
+/// 用量账本：只追加；DM 的用量记到个人（CT26）。
+#[async_trait]
+pub trait UsageLedger: Send + Sync {
+    async fn record(&self, r: &UsageRecord) -> Result<(), StoreError>;
+    /// ts >= since 的 cost_cny 之和。org：key = tenant_id；channel：key = chat_id（不含 DM）；
+    /// user：key = user_id（含 DM）；task：key = task_id
+    async fn spent(
+        &self,
+        scope: BudgetScope,
+        key: &str,
+        since: DateTime<Utc>,
+    ) -> Result<f64, StoreError>;
+    /// 按群 / 人 / 模型汇总，cost_cny 降序
+    async fn summary(
+        &self,
+        group_by: UsageGroupBy,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<UsageSummary>, StoreError>;
+}
+
+/// 审计日志：只追加（CT27）。
+#[async_trait]
+pub trait AuditLog: Send + Sync {
+    async fn append(&self, e: &AuditEvent) -> Result<(), StoreError>;
+    /// 按 ts 正序
+    async fn query(&self, q: &AuditQuery) -> Result<Vec<AuditEvent>, StoreError>;
+    /// 删 ts < before 的行，返回行数。实现必须把 before 钳到「现在 - 190 天」以前：
+    /// 调用方给了更晚的时间也只删 190 天以前的
+    async fn purge_before(&self, before: DateTime<Utc>) -> Result<u64, StoreError>;
+}

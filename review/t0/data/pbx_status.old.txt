@@ -1,0 +1,2 @@
+  string platform = 6;                 // "feishu" | "fake"
+}

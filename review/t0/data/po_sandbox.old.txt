@@ -1,0 +1,5 @@
+    /// 进程收尾：释放本实例记账的全部沙箱（旧 aclose）。默认什么都不做。
+    async fn close_all(&self) -> Result<(), SandboxError> {
+        Ok(())
+    }
+}

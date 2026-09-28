@@ -1,0 +1,77 @@
+    async fn read_document(&self, url_or_token: &str) -> Result<DocumentContent, PlatformError>;
+    async fn download_file(
+        &self,
+        message_id: &str,
+        file_key: &str,
+    ) -> Result<Vec<u8>, PlatformError>;
+
+    // —— p1.0 新增：全部带默认实现（平台做不到就是 unimplemented，retryable=false），
+    // 所以只实现了上面那些方法的旧 adapter / 替身不用改就能编过 ——
+
+    /// 原地改一条已发出的文本消息
+    async fn edit_text(&self, message_id: &str, msg: &OutboundText) -> Result<(), PlatformError> {
+        let _ = (message_id, msg);
+        Err(platform_unimplemented("edit_text"))
+    }
+    /// 私聊某人（msg.chat_id 忽略）
+    async fn send_dm(
+        &self,
+        user_id: &str,
+        msg: &OutboundText,
+    ) -> Result<SendResult, PlatformError> {
+        let _ = (user_id, msg);
+        Err(platform_unimplemented("send_dm"))
+    }
+    async fn get_user(&self, user_id: &str) -> Result<UserInfo, PlatformError> {
+        let _ = user_id;
+        Err(platform_unimplemented("get_user"))
+    }
+    async fn get_chat(&self, chat_id: &str) -> Result<ChatInfo, PlatformError> {
+        let _ = chat_id;
+        Err(platform_unimplemented("get_chat"))
+    }
+    async fn is_member(&self, chat_id: &str, user_id: &str) -> Result<bool, PlatformError> {
+        let _ = (chat_id, user_id);
+        Err(platform_unimplemented("is_member"))
+    }
+    /// bot 所在的群
+    async fn list_chats(&self) -> Result<Vec<ChatInfo>, PlatformError> {
+        Err(platform_unimplemented("list_chats"))
+    }
+    async fn list_pins(&self, chat_id: &str) -> Result<Vec<HistoryMessage>, PlatformError> {
+        let _ = chat_id;
+        Err(platform_unimplemented("list_pins"))
+    }
+    async fn search_messages(&self, q: &SearchQuery) -> Result<Vec<SearchHit>, PlatformError> {
+        let _ = q;
+        Err(platform_unimplemented("search_messages"))
+    }
+    /// 写平台云文档（托管页）；doc.doc_id 有值 = 更新同一页
+    async fn write_doc(&self, doc: &DocWrite) -> Result<DocRef, PlatformError> {
+        let _ = doc;
+        Err(platform_unimplemented("write_doc"))
+    }
+    /// 删除应用建的云文档；做不到删除时至少撤销群共享（NEW23 清除）
+    async fn delete_doc(&self, doc: &DocRef) -> Result<(), PlatformError> {
+        let _ = doc;
+        Err(platform_unimplemented("delete_doc"))
+    }
+    /// 管理台 OAuth 登录：平台密钥只在 edge，core 只拿授权地址与换回来的用户
+    async fn oauth_authorize_url(&self, s: &OAuthStart) -> Result<OAuthUrl, PlatformError> {
+        let _ = s;
+        Err(platform_unimplemented("oauth_authorize_url"))
+    }
+    async fn oauth_exchange(&self, c: &OAuthCode) -> Result<UserInfo, PlatformError> {
+        let _ = c;
+        Err(platform_unimplemented("oauth_exchange"))
+    }
+}
+
+/// PlatformPort 新方法的默认返回（edge-client 把 gRPC UNIMPLEMENTED 也映射成同一个 code）。
+fn platform_unimplemented(method: &str) -> PlatformError {
+    PlatformError::new(
+        "unimplemented",
+        format!("{method}: 本平台 adapter 未实现"),
+        false,
+    )
+}

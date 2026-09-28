@@ -1,0 +1,12 @@
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
+    /// 写入缓存的输入 token（部分厂商单独计价）
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+}

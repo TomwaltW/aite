@@ -1,0 +1,17 @@
+  int32 outbound_rate_per_min = 9;           // 出站限速（消息数/分钟），adapter 自己令牌桶
+  // —— p1.0 新增。数值 0 = 未声明，core 按保守值处理 ——
+  bool supports_reactions_in = 10;           // 能收到表情回应事件
+  bool supports_recall_event = 11;           // 能收到撤回事件
+  bool supports_edit_event = 12;             // 能收到编辑事件（飞书没有：编辑靠拉历史比对）
+  bool supports_pins = 13;
+  bool supports_message_search = 14;
+  bool supports_docs = 15;                   // 能写平台云文档（托管页）
+  bool supports_dm = 16;
+  bool supports_quote_id = 17;               // 引用带被引消息的 id
+  bool requires_visible_anchor = 18;         // 没有话题：每条回复都要带可见的 #A 编号
+  uint32 stream_max_sec = 19;                // 流式卡片最长持续秒数
+  uint32 card_action_deadline_ms = 20;       // 卡片回调必须在这么多毫秒内应答
+  uint32 max_card_bytes = 21;
+  uint32 max_text_chars = 22;
+  uint64 max_upload_bytes = 23;
+}

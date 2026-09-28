@@ -1,0 +1,14 @@
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// download_attachment 用
+    #[serde(default)]
+    pub attachments_message_id: Option<String>,
+    /// 发起人平台用户 id（跨群读要校验成员身份、审批要校验审批人）
+    #[serde(default)]
+    pub initiator_id: Option<String>,
+    #[serde(default)]
+    pub chat_type: Option<ChatType>,
+    /// 发起人不是本企业成员
+    #[serde(default)]
+    pub initiator_external: bool,
+}

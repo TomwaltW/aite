@@ -1,0 +1,178 @@
+impl From<PlatformCapabilities> for pb::PlatformCapabilities {
+    fn from(c: PlatformCapabilities) -> Self {
+        pb::PlatformCapabilities {
+            platform: c.platform,
+            supports_thread: c.supports_thread,
+            supports_history: c.supports_history,
+            supports_passive_listen: c.supports_passive_listen,
+            supports_card_edit: c.supports_card_edit,
+            card_edit_window_sec: c.card_edit_window_sec as i32,
+            inbound_file_in_group: c.inbound_file_in_group,
+            proactive_requires_prior_message: c.proactive_requires_prior_message,
+            outbound_rate_per_min: c.outbound_rate_per_min as i32,
+            supports_reactions_in: c.supports_reactions_in,
+            supports_recall_event: c.supports_recall_event,
+            supports_edit_event: c.supports_edit_event,
+            supports_pins: c.supports_pins,
+            supports_message_search: c.supports_message_search,
+            supports_docs: c.supports_docs,
+            supports_dm: c.supports_dm,
+            supports_quote_id: c.supports_quote_id,
+            requires_visible_anchor: c.requires_visible_anchor,
+            stream_max_sec: c.stream_max_sec,
+            card_action_deadline_ms: c.card_action_deadline_ms,
+            max_card_bytes: c.max_card_bytes,
+            max_text_chars: c.max_text_chars,
+            max_upload_bytes: c.max_upload_bytes,
+        }
+    }
+}
+impl From<pb::PlatformCapabilities> for PlatformCapabilities {
+    fn from(c: pb::PlatformCapabilities) -> Self {
+        PlatformCapabilities {
+            platform: c.platform,
+            supports_thread: c.supports_thread,
+            supports_history: c.supports_history,
+            supports_passive_listen: c.supports_passive_listen,
+            supports_card_edit: c.supports_card_edit,
+            card_edit_window_sec: c.card_edit_window_sec.max(0) as u32,
+            inbound_file_in_group: c.inbound_file_in_group,
+            proactive_requires_prior_message: c.proactive_requires_prior_message,
+            outbound_rate_per_min: c.outbound_rate_per_min.max(0) as u32,
+            supports_reactions_in: c.supports_reactions_in,
+            supports_recall_event: c.supports_recall_event,
+            supports_edit_event: c.supports_edit_event,
+            supports_pins: c.supports_pins,
+            supports_message_search: c.supports_message_search,
+            supports_docs: c.supports_docs,
+            supports_dm: c.supports_dm,
+            supports_quote_id: c.supports_quote_id,
+            requires_visible_anchor: c.requires_visible_anchor,
+            stream_max_sec: c.stream_max_sec,
+            card_action_deadline_ms: c.card_action_deadline_ms,
+            max_card_bytes: c.max_card_bytes,
+            max_text_chars: c.max_text_chars,
+            max_upload_bytes: c.max_upload_bytes,
+        }
+    }
+}
+
+/// SandboxSpec.network / EgressPolicy.level：空串 = none；只认四个档位，其余拒。
+fn network_from_str(s: &str, field: &'static str) -> Result<SandboxNetwork, ConvertError> {
+    match s {
+        "" | "none" => Ok(SandboxNetwork::None),
+        "trusted" => Ok(SandboxNetwork::Trusted),
+        "custom" => Ok(SandboxNetwork::Custom),
+        "full" => Ok(SandboxNetwork::Full),
+        other => Err(ConvertError::Invalid {
+            field,
+            value: other.to_string(),
+        }),
+    }
+}
+
+impl From<SandboxSpec> for pb::SandboxSpec {
+    fn from(s: SandboxSpec) -> Self {
+        pb::SandboxSpec {
+            image: s.image,
+            cpu: s.cpu,
+            mem_mb: s.mem_mb as i32,
+            network: s.network.as_str().to_string(),
+            workdir: s.workdir,
+        }
+    }
+}
+impl TryFrom<pb::SandboxSpec> for SandboxSpec {
+    type Error = ConvertError;
+    fn try_from(s: pb::SandboxSpec) -> Result<Self, ConvertError> {
+        let network = network_from_str(&s.network, "network")?;
+        Ok(SandboxSpec {
+            image: s.image,
+            cpu: if s.cpu > 0.0 { s.cpu } else { 1.0 },
+            mem_mb: if s.mem_mb > 0 { s.mem_mb as u32 } else { 1024 },
+            network,
+            workdir: if s.workdir.is_empty() {
+                "/work".to_string()
+            } else {
+                s.workdir
+            },
+        })
+    }
+}
+
+impl From<CredentialBinding> for pb::CredentialBinding {
+    fn from(c: CredentialBinding) -> Self {
+        pb::CredentialBinding {
+            host: c.host,
+            header: c.header,
+            scheme: c.scheme,
+            secret_ref: c.secret_ref,
+        }
+    }
+}
+impl From<pb::CredentialBinding> for CredentialBinding {
+    fn from(c: pb::CredentialBinding) -> Self {
+        CredentialBinding {
+            host: c.host,
+            header: c.header,
+            scheme: c.scheme,
+            secret_ref: c.secret_ref,
+        }
+    }
+}
+
+impl From<EgressPolicy> for pb::EgressPolicy {
+    fn from(p: EgressPolicy) -> Self {
+        pb::EgressPolicy {
+            level: p.level.as_str().to_string(),
+            allow_hosts: p.allow_hosts,
+            credentials: p.credentials.into_iter().map(Into::into).collect(),
+            audit_tag: p.audit_tag,
+        }
+    }
+}
+impl TryFrom<pb::EgressPolicy> for EgressPolicy {
+    type Error = ConvertError;
+    fn try_from(p: pb::EgressPolicy) -> Result<Self, ConvertError> {
+        Ok(EgressPolicy {
+            level: network_from_str(&p.level, "egress.level")?,
+            allow_hosts: p.allow_hosts,
+            credentials: p.credentials.into_iter().map(Into::into).collect(),
+            audit_tag: p.audit_tag,
+        })
+    }
+}
+
+impl From<ExecRequest> for pb::ExecRequest {
+    fn from(r: ExecRequest) -> Self {
+        pb::ExecRequest {
+            language: r.language.as_str().to_string(),
+            code: r.code,
+            timeout_sec: r.timeout_sec as i32,
+        }
+    }
+}
+impl TryFrom<pb::ExecRequest> for ExecRequest {
+    type Error = ConvertError;
+    fn try_from(r: pb::ExecRequest) -> Result<Self, ConvertError> {
+        let language = match r.language.as_str() {
+            "" | "python" => ExecLanguage::Python,
+            "bash" => ExecLanguage::Bash,
+            other => {
+                return Err(ConvertError::Invalid {
+                    field: "language",
+                    value: other.to_string(),
+                });
+            }
+        };
+        Ok(ExecRequest {
+            language,
+            code: r.code,
+            timeout_sec: if r.timeout_sec > 0 {
+                r.timeout_sec as u32
+            } else {
+                120
+            },
+        })
+    }
+}

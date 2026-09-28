@@ -1,0 +1,122 @@
+#[test]
+fn rejects_bad_shapes() {
+    assert!(
+        AiteConfig::from_yaml_str("- a\n- b\n").is_err(),
+        "顶层必须是 mapping"
+    );
+    assert!(AiteConfig::from_yaml_str("platform: slack\n").is_err());
+    assert!(
+        AiteConfig::from_yaml_str("worker:\n  max_step: 3\n").is_err(),
+        "未知键必须报错"
+    );
+}
+
+#[test]
+fn dingtalk_and_wecom_platforms_accepted() {
+    let d = AiteConfig::from_yaml_str("platform: dingtalk\n").unwrap();
+    assert_eq!(d.platform, PlatformChoice::Dingtalk);
+    assert_eq!(d.dingtalk, DingtalkConfig::default());
+    let w = AiteConfig::from_yaml_str("platform: wecom\nwecom:\n  corp_id_env: WECOM_CORP_ID\n")
+        .unwrap();
+    assert_eq!(w.platform, PlatformChoice::Wecom);
+    assert_eq!(w.wecom.corp_id_env, "WECOM_CORP_ID");
+    assert_eq!(
+        w.wecom.bot_secret_env, "WECOM_BOT_SECRET",
+        "没写的键保持默认"
+    );
+}
+
+#[test]
+fn p1_defaults_match_spec() {
+    let d = AiteConfig::default();
+    assert_eq!(d.feishu.api_base, "https://open.feishu.cn");
+    assert!(!d.feishu.card_buttons);
+    assert_eq!(d.feishu.service_user_token_env, "");
+    assert_eq!(d.dingtalk.client_id_env, "DINGTALK_CLIENT_ID");
+    assert_eq!(d.dingtalk.client_secret_env, "DINGTALK_CLIENT_SECRET");
+    assert_eq!(d.dingtalk.robot_code_env, "DINGTALK_ROBOT_CODE");
+    assert_eq!(d.dingtalk.card_template_id_env, "DINGTALK_CARD_TEMPLATE_ID");
+    assert_eq!(d.dingtalk.api_base, "https://api.dingtalk.com");
+    assert_eq!(d.dingtalk.bot_name, "Aite");
+    assert_eq!(d.wecom.bot_id_env, "WECOM_BOT_ID");
+    assert_eq!(d.wecom.ws_url, "wss://openws.work.weixin.qq.com");
+    assert_eq!(
+        (
+            d.wecom.corp_id_env.as_str(),
+            d.wecom.app_secret_env.as_str()
+        ),
+        ("", "")
+    );
+
+    // 模型：显式厂商默认 generic；海外端点默认是配置错（D9）
+    assert_eq!(d.model.name, "primary");
+    assert_eq!(d.model.vendor, ModelVendor::Generic);
+    assert_eq!(d.model.thinking, ThinkingMode::Auto);
+    assert_eq!(d.model.timeout_sec, 600);
+    assert!(!d.model.stream);
+    assert_eq!(d.model.offpeak_price_multiplier, 1.0);
+    assert!(!d.model.allow_overseas_endpoint, "海外端点默认拒绝");
+    assert_eq!(d.models, ModelsConfig::default());
+    assert!(d.models.catalog.is_empty() && d.models.fallback.is_empty());
+
+    assert_eq!(d.sandbox.network_default, SandboxNetwork::None);
+    assert_eq!(d.sandbox.trusted_preset, "china");
+    assert!(!d.sandbox.allow_full);
+    assert_eq!(d.sandbox.linger_sec, 600);
+    assert_eq!(d.worker.max_parallel_tasks, 4);
+    assert_eq!(d.worker.context_max_tokens, 96_000);
+    assert_eq!(d.worker.approval_timeout_sec, 1800);
+    assert_eq!(d.worker.stuck_after_sec, 900);
+    assert_eq!(d.edge.http_listen, "");
+    assert_eq!(d.edge.webhook_secret_env, "AITE_WEBHOOK_SECRET");
+
+    assert_eq!(d.search.provider, SearchProvider::None);
+    assert_eq!((d.search.max_results, d.search.timeout_sec), (5, 15));
+    assert_eq!(d.git.provider, GitProvider::None);
+    assert_eq!(d.git.draft_prefix, "Draft: ");
+    assert_eq!(d.git.bot_name, "aite-bot");
+    assert_eq!(d.pages.provider, PagesProvider::None);
+    assert!(d.memory.enabled && !d.memory.auto_extract);
+    assert_eq!(d.memory.max_entries_per_scope, 200);
+    assert_eq!(d.routines.default_tz, "Asia/Shanghai");
+    assert_eq!(d.routines.default_tz_offset_min, 480);
+    assert_eq!((d.routines.tick_sec, d.routines.min_interval_min), (30, 15));
+    assert!(!d.ambient.respond_automatically_default, "自动回复默认关");
+    assert_eq!(d.ambient.stop_reading_after_msgs, 100);
+    assert_eq!(d.ambient.max_consecutive_bot_turns, 3);
+    assert!(d.access.dm_enabled && !d.access.require_setup);
+    assert_eq!(d.access.external_chat_mode, ExternalChatMode::Restrict);
+    assert_eq!(d.access.search_scope, SearchScope::JoinedChats);
+    assert_eq!(d.budget.org_monthly_limit_cny, 0.0, "0 = 不限");
+    assert_eq!((d.budget.warn_ratio, d.budget.month_start_day), (0.8, 1));
+    assert!(d.compliance.aigc_label);
+    assert_eq!(d.compliance.label_text, "内容由 AI 生成");
+    assert_eq!(d.compliance.audit_retention_days, 190);
+    assert!(!d.compliance.registration_scope_confirmed && !d.compliance.content_safety_filter);
+    assert_eq!(d.admin.session_secret_env, "AITE_ADMIN_SECRET");
+    assert_eq!(d.admin.bootstrap_token_env, "AITE_ADMIN_BOOTSTRAP_TOKEN");
+}
+
+#[test]
+fn p1_sections_reject_unknown_keys_and_bad_values() {
+    for bad in [
+        "compliance:\n  aigc_lable: false\n",
+        "access:\n  external_chat_mode: open\n",
+        "model:\n  vendor: openai\n",
+        "sandbox:\n  network_default: bridge\n",
+        "models:\n  catalog:\n    - modle: x\n",
+    ] {
+        assert!(AiteConfig::from_yaml_str(bad).is_err(), "{bad:?} 应被拒");
+    }
+    let cfg = AiteConfig::from_yaml_str(
+        "model:\n  vendor: selfhost\n  allow_overseas_endpoint: true\nmodels:\n  fallback: b\n  catalog:\n    - name: b\n      vendor: deepseek\n",
+    )
+    .unwrap();
+    assert_eq!(cfg.model.vendor, ModelVendor::Selfhost);
+    assert!(cfg.model.allow_overseas_endpoint);
+    assert_eq!(cfg.models.catalog[0].vendor, ModelVendor::Deepseek);
+    assert_eq!(
+        cfg.models.catalog[0].timeout_sec, 600,
+        "catalog 项也走默认值"
+    );
+}

@@ -1,0 +1,3 @@
+  google.protobuf.Timestamp occurred_at = 17;
+  google.protobuf.Struct raw = 18;     // 原始事件，仅供审计；任何逻辑不得依赖 raw
+}

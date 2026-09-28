@@ -1,0 +1,4 @@
+        created_at: now,
+        last_active_at: now,
+        archived_at: None,
+    };

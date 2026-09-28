@@ -1,0 +1,6 @@
+        thread_id: None,
+        attachments_message_id: Some("m".into()),
+        initiator_id: Some("ou_1".into()),
+        chat_type: Some(ChatType::Group),
+        initiator_external: false,
+    });

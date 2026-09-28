@@ -1,0 +1,62 @@
+    #[serde(default)]
+    pub card_action: Option<CardAction>,
+    pub occurred_at: DateTime<Utc>,
+    /// 原始事件，仅供审计；任何逻辑不得依赖 raw
+    #[serde(default)]
+    pub raw: Map<String, Value>,
+    /// 这条消息引用 / 回复了哪条消息
+    #[serde(default)]
+    pub quote: Option<Quote>,
+    /// kind == reaction 时有
+    #[serde(default)]
+    pub reaction: Option<ReactionEvent>,
+    /// kind == external 时有
+    #[serde(default)]
+    pub external: Option<ExternalEvent>,
+    /// 发送者不是本企业成员（外部联系人 / 访客）
+    #[serde(default)]
+    pub sender_external: bool,
+}
+
+/// 被引用的消息。企微的引用不带 message id，只有文本（锚点靠可见的 #A 编号）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Quote {
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionEvent {
+    /// 被回应的消息
+    pub message_id: String,
+    /// 平台原始表情名
+    pub emoji: String,
+    /// adapter 判定为「踩 / 不满意」
+    #[serde(default)]
+    pub thumbs_down: bool,
+    /// true = 加上，false = 撤掉
+    #[serde(default)]
+    pub added: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalEvent {
+    /// "gitlab" | "feishu_doc" | "feishu_approval" | ...
+    pub source: String,
+    /// 路由键：例程按它匹配（RoutineTrigger::External.topic）
+    pub topic: String,
+    /// 一句话主体（MR 标题、文档名……）
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub summary: String,
+    /// 原始事件体（开放通道）
+    #[serde(default)]
+    pub payload: Map<String, Value>,
+}

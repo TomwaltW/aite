@@ -1,0 +1,14 @@
+str_enum! {
+    EventKind {
+        Message => "message",
+        MessageEdited => "message_edited",
+        MessageDeleted => "message_deleted",
+        CardAction => "card_action",
+        BotAdded => "bot_added",
+        MemberChanged => "member_changed",
+        /// 表情回应（NormalizedEvent.reaction）；不触发任务，只计数 / 静音
+        Reaction => "reaction",
+        /// 外部系统事件（NormalizedEvent.external）：webhook、云文档 / 审批事件
+        External => "external",
+    }
+}

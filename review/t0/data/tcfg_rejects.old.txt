@@ -1,0 +1,12 @@
+#[test]
+fn rejects_bad_shapes() {
+    assert!(
+        AiteConfig::from_yaml_str("- a\n- b\n").is_err(),
+        "顶层必须是 mapping"
+    );
+    assert!(AiteConfig::from_yaml_str("platform: dingtalk\n").is_err());
+    assert!(
+        AiteConfig::from_yaml_str("worker:\n  max_step: 3\n").is_err(),
+        "未知键必须报错"
+    );
+}

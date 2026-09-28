@@ -1,0 +1,8 @@
+        text: "t".into(),
+        thread_id: Some("r".into()),
+        created_at: Utc.with_ymd_and_hms(2026, 9, 9, 1, 7, 0).unwrap(),
+    };
+    assert_eq!(
+        HistoryMessage::try_from(pb::HistoryMessage::from(h.clone())).unwrap(),
+        h
+    );

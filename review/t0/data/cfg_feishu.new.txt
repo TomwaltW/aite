@@ -1,0 +1,83 @@
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeishuConfig {
+    pub app_id_env: String,
+    pub app_secret_env: String,
+    pub bot_name: String,
+    /// 用于识别 @ 的是不是自己
+    pub bot_open_id_env: String,
+    pub history_window: u32,
+    /// 开放平台 API 根（CC8 的 AITE_FEISHU_API_BASE 转正）
+    pub api_base: String,
+    /// 卡片上出审批 / 表单按钮（要开卡片回调；CC8 的 AITE_FEISHU_CARD_BUTTONS 转正）
+    pub card_buttons: bool,
+    /// 服务用户 user_access_token 的环境变量名；空 = 不开消息搜索（飞书消息搜索只收 user token）
+    pub service_user_token_env: String,
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            app_id_env: "FEISHU_APP_ID".into(),
+            app_secret_env: "FEISHU_APP_SECRET".into(),
+            bot_name: "Aite".into(),
+            bot_open_id_env: "FEISHU_BOT_OPEN_ID".into(),
+            history_window: 50,
+            api_base: "https://open.feishu.cn".into(),
+            card_buttons: false,
+            service_user_token_env: String::new(),
+        }
+    }
+}
+
+/// 钉钉企业内部应用机器人（Stream 模式）。字段与 edge 的 dingtalk 包内镜像逐字同名（CC9）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DingtalkConfig {
+    pub client_id_env: String,
+    pub client_secret_env: String,
+    pub robot_code_env: String,
+    /// AI 卡片模板 id 的环境变量名
+    pub card_template_id_env: String,
+    pub api_base: String,
+    pub bot_name: String,
+}
+
+impl Default for DingtalkConfig {
+    fn default() -> Self {
+        Self {
+            client_id_env: "DINGTALK_CLIENT_ID".into(),
+            client_secret_env: "DINGTALK_CLIENT_SECRET".into(),
+            robot_code_env: "DINGTALK_ROBOT_CODE".into(),
+            card_template_id_env: "DINGTALK_CARD_TEMPLATE_ID".into(),
+            api_base: "https://api.dingtalk.com".into(),
+            bot_name: "Aite".into(),
+        }
+    }
+}
+
+/// 企业微信智能机器人（长连接）。字段与 edge 的 wecom 包内镜像逐字同名（CC10）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WecomConfig {
+    pub bot_id_env: String,
+    pub bot_secret_env: String,
+    pub ws_url: String,
+    /// 另配自建应用换明文 userid 时用（bot 不是超管创建时成员 id 是加密的）；空 = 不用
+    pub corp_id_env: String,
+    pub app_secret_env: String,
+    pub bot_name: String,
+}
+
+impl Default for WecomConfig {
+    fn default() -> Self {
+        Self {
+            bot_id_env: "WECOM_BOT_ID".into(),
+            bot_secret_env: "WECOM_BOT_SECRET".into(),
+            ws_url: "wss://openws.work.weixin.qq.com".into(),
+            corp_id_env: String::new(),
+            app_secret_env: String::new(),
+            bot_name: "Aite".into(),
+        }
+    }
+}

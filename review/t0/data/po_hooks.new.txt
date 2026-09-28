@@ -1,0 +1,23 @@
+/// 控制面注入给 worker 的同步回调。
+#[derive(Clone)]
+pub struct RunHooks {
+    /// 取走并清空该任务排队中的追问（steer），每步开始前调用；带发言人，多人同话题时认得准
+    pub drain_steer: Arc<dyn Fn() -> Vec<SteerMessage> + Send + Sync>,
+    /// 任务是否已被 !stop / 卡片停止
+    pub is_cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// 停止发起人（真人发起的 !stop / 卡片 Stop 才有；收尾硬取消为 None）
+    pub cancelled_by: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+    /// 取走该任务的审批决定（没有就是 None）；等审批时轮询
+    pub take_decision: Arc<dyn Fn() -> Option<ApprovalDecision> + Send + Sync>,
+}
+
+impl RunHooks {
+    pub fn none() -> Self {
+        Self {
+            drain_steer: Arc::new(Vec::new),
+            is_cancelled: Arc::new(|| false),
+            cancelled_by: Arc::new(|| None),
+            take_decision: Arc::new(|| None),
+        }
+    }
+}

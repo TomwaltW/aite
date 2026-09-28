@@ -1,0 +1,22 @@
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FeishuConfig {
+    pub app_id_env: String,
+    pub app_secret_env: String,
+    pub bot_name: String,
+    /// 用于识别 @ 的是不是自己
+    pub bot_open_id_env: String,
+    pub history_window: u32,
+}
+
+impl Default for FeishuConfig {
+    fn default() -> Self {
+        Self {
+            app_id_env: "FEISHU_APP_ID".into(),
+            app_secret_env: "FEISHU_APP_SECRET".into(),
+            bot_name: "Aite".into(),
+            bot_open_id_env: "FEISHU_BOT_OPEN_ID".into(),
+            history_window: 50,
+        }
+    }
+}

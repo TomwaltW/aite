@@ -1,0 +1,12 @@
+sandbox:
+  image: aite-sandbox:p0
+  cpu: 1.0
+  mem_mb: 1024
+  idle_sec: 300
+  exec_timeout_sec: 120    # 单次执行超时
+  network_default: none    # none | trusted | custom | full
+  proxy_url: ""            # edge 出网代理地址；空 = edge 自己起
+  trusted_preset: china
+  extra_trusted_hosts: []
+  allow_full: false        # false：full 档一律拒
+  linger_sec: 600          # 按线程沙箱空闲多久回收；0 = 仍按任务释放

@@ -1,0 +1,3 @@
+    /// "#A17"：edge 从消息自身文本或引用里解析出 #A 编号；core 按它路由到已有任务
+    #[serde(default)]
+    pub task_no: Option<String>,

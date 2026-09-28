@@ -1,0 +1,6 @@
+# core ↔ edge 的进程边界（proto/aite/v1/edge.proto）。两个 socket 都相对仓库根。
+edge:
+  edge_socket: data/run/aite-edge.sock     # edge 监听：PlatformService / SandboxService / EdgeStatusService
+  core_socket: data/run/aite-core.sock     # core 监听：IngressService
+  handle_event_deadline_ms: 1000           # edge 调 HandleEvent 的 deadline（§3.3 "on_event 1s 内返回"）
+  max_message_mb: 64                       # 两边 gRPC 的最大消息体（文件走 bytes）

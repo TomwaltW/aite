@@ -1,0 +1,21 @@
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    pub message_id: String,
+    pub sender_id: String,
+    /// "human" | "bot" | "app" | "system"（沿用旧契约的字符串形态；Gateway 用 == "human" 过滤）
+    pub sender_kind: String,
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentContent {
+    pub title: String,
+    /// markdown
+    pub text: String,
+    pub url: String,
+}

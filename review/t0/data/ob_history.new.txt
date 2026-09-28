@@ -1,0 +1,119 @@
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryMessage {
+    pub message_id: String,
+    pub sender_id: String,
+    /// "human" | "bot" | "app" | "system"（沿用旧契约的字符串形态；Gateway 用 == "human" 过滤）
+    pub sender_kind: String,
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// 被编辑过时的最后编辑时间（飞书没有编辑事件，靠拉历史比对它）
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// 已撤回 / 删除
+    #[serde(default)]
+    pub deleted: bool,
+    /// 它回复 / 引用的消息
+    #[serde(default)]
+    pub reply_to: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentContent {
+    pub title: String,
+    /// markdown
+    pub text: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub user_id: String,
+    pub name: String,
+    /// 外部联系人
+    #[serde(default)]
+    pub is_external: bool,
+    /// 访客 / 未激活成员
+    #[serde(default)]
+    pub is_guest: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatInfo {
+    pub chat_id: String,
+    pub name: String,
+    pub chat_type: ChatType,
+    /// 公开群；平台不给就是 None
+    #[serde(default)]
+    pub is_public: Option<bool>,
+    /// 外部群（含企业外成员）
+    #[serde(default)]
+    pub is_external: bool,
+    #[serde(default)]
+    pub member_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchQuery {
+    pub query: String,
+    /// 空 = 按 access.search_scope
+    #[serde(default)]
+    pub chat_ids: Vec<String>,
+    /// 0 = adapter 默认
+    #[serde(default)]
+    pub limit: u32,
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub chat_id: String,
+    pub message: HistoryMessage,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// 写一篇平台云文档（托管页）。doc_id 有值 = 更新同一页。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocWrite {
+    #[serde(default)]
+    pub doc_id: Option<String>,
+    pub title: String,
+    pub markdown: String,
+    /// 写完共享给哪个群
+    #[serde(default)]
+    pub share_chat_id: Option<String>,
+    /// 页首放 AIGC 标识横幅
+    #[serde(default)]
+    pub aigc_banner: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocRef {
+    pub doc_id: String,
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+/// 管理台 OAuth 登录（平台密钥只在 edge）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthStart {
+    pub redirect_uri: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthUrl {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthCode {
+    pub code: String,
+    pub redirect_uri: String,
+}

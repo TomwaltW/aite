@@ -1,0 +1,58 @@
+str_enum! {
+    /// 一部署一个 IM 平台：选哪个就读哪一段
+    PlatformChoice { Feishu => "feishu", Dingtalk => "dingtalk", Wecom => "wecom", Fake => "fake" }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiteConfig {
+    pub tenant_id: String,
+    pub platform: PlatformChoice,
+    pub feishu: FeishuConfig,
+    pub model: ModelConfig,
+    pub sandbox: SandboxConfig,
+    pub worker: WorkerConfig,
+    pub storage: StorageConfig,
+    pub edge: EdgeConfig,
+    pub dingtalk: DingtalkConfig,
+    pub wecom: WecomConfig,
+    pub models: ModelsConfig,
+    pub search: SearchConfig,
+    pub git: GitConfig,
+    pub pages: PagesConfig,
+    pub memory: MemoryConfig,
+    pub routines: RoutinesConfig,
+    pub ambient: AmbientConfig,
+    pub access: AccessConfig,
+    pub budget: BudgetConfig,
+    pub compliance: ComplianceConfig,
+    pub admin: AdminConfig,
+}
+
+impl Default for AiteConfig {
+    fn default() -> Self {
+        Self {
+            tenant_id: "default".into(),
+            platform: PlatformChoice::Feishu,
+            feishu: FeishuConfig::default(),
+            model: ModelConfig::default(),
+            sandbox: SandboxConfig::default(),
+            worker: WorkerConfig::default(),
+            storage: StorageConfig::default(),
+            edge: EdgeConfig::default(),
+            dingtalk: DingtalkConfig::default(),
+            wecom: WecomConfig::default(),
+            models: ModelsConfig::default(),
+            search: SearchConfig::default(),
+            git: GitConfig::default(),
+            pages: PagesConfig::default(),
+            memory: MemoryConfig::default(),
+            routines: RoutinesConfig::default(),
+            ambient: AmbientConfig::default(),
+            access: AccessConfig::default(),
+            budget: BudgetConfig::default(),
+            compliance: ComplianceConfig::default(),
+            admin: AdminConfig::default(),
+        }
+    }
+}

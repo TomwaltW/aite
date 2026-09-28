@@ -1,0 +1,237 @@
+impl From<HistoryMessage> for pb::HistoryMessage {
+    fn from(h: HistoryMessage) -> Self {
+        pb::HistoryMessage {
+            message_id: h.message_id,
+            sender_id: h.sender_id,
+            sender_kind: h.sender_kind,
+            sender_name: h.sender_name,
+            text: h.text,
+            thread_id: h.thread_id,
+            created_at: Some(chrono_to_ts(h.created_at)),
+            updated_at: h.updated_at.map(chrono_to_ts),
+            deleted: h.deleted,
+            reply_to: h.reply_to,
+        }
+    }
+}
+impl TryFrom<pb::HistoryMessage> for HistoryMessage {
+    type Error = ConvertError;
+    fn try_from(h: pb::HistoryMessage) -> Result<Self, ConvertError> {
+        Ok(HistoryMessage {
+            message_id: h.message_id,
+            sender_id: h.sender_id,
+            sender_kind: h.sender_kind,
+            sender_name: h.sender_name,
+            text: h.text,
+            thread_id: h.thread_id,
+            created_at: ts_to_chrono(h.created_at, "created_at")?,
+            updated_at: h
+                .updated_at
+                .map(|t| ts_to_chrono(Some(t), "updated_at"))
+                .transpose()?,
+            deleted: h.deleted,
+            reply_to: h.reply_to,
+        })
+    }
+}
+
+impl From<DocumentContent> for pb::DocumentContent {
+    fn from(d: DocumentContent) -> Self {
+        pb::DocumentContent {
+            title: d.title,
+            text: d.text,
+            url: d.url,
+        }
+    }
+}
+impl From<pb::DocumentContent> for DocumentContent {
+    fn from(d: pb::DocumentContent) -> Self {
+        DocumentContent {
+            title: d.title,
+            text: d.text,
+            url: d.url,
+        }
+    }
+}
+
+impl From<UserInfo> for pb::UserInfo {
+    fn from(u: UserInfo) -> Self {
+        pb::UserInfo {
+            user_id: u.user_id,
+            name: u.name,
+            is_external: u.is_external,
+            is_guest: u.is_guest,
+        }
+    }
+}
+impl From<pb::UserInfo> for UserInfo {
+    fn from(u: pb::UserInfo) -> Self {
+        UserInfo {
+            user_id: u.user_id,
+            name: u.name,
+            is_external: u.is_external,
+            is_guest: u.is_guest,
+        }
+    }
+}
+
+impl From<ChatInfo> for pb::ChatInfo {
+    fn from(c: ChatInfo) -> Self {
+        pb::ChatInfo {
+            chat_id: c.chat_id,
+            name: c.name,
+            chat_type: pb::ChatType::from(c.chat_type) as i32,
+            is_public: c.is_public,
+            is_external: c.is_external,
+            member_count: c.member_count,
+        }
+    }
+}
+impl TryFrom<pb::ChatInfo> for ChatInfo {
+    type Error = ConvertError;
+    fn try_from(c: pb::ChatInfo) -> Result<Self, ConvertError> {
+        Ok(ChatInfo {
+            chat_id: c.chat_id,
+            name: c.name,
+            chat_type: enum_i32::<ChatType, pb::ChatType>(c.chat_type, "chat_type")?,
+            is_public: c.is_public,
+            is_external: c.is_external,
+            member_count: c.member_count,
+        })
+    }
+}
+
+impl From<SearchQuery> for pb::SearchQuery {
+    fn from(q: SearchQuery) -> Self {
+        pb::SearchQuery {
+            query: q.query,
+            chat_ids: q.chat_ids,
+            limit: q.limit,
+            since: q.since.map(chrono_to_ts),
+        }
+    }
+}
+impl TryFrom<pb::SearchQuery> for SearchQuery {
+    type Error = ConvertError;
+    fn try_from(q: pb::SearchQuery) -> Result<Self, ConvertError> {
+        Ok(SearchQuery {
+            query: q.query,
+            chat_ids: q.chat_ids,
+            limit: q.limit,
+            since: q
+                .since
+                .map(|t| ts_to_chrono(Some(t), "since"))
+                .transpose()?,
+        })
+    }
+}
+
+impl From<SearchHit> for pb::SearchHit {
+    fn from(h: SearchHit) -> Self {
+        pb::SearchHit {
+            chat_id: h.chat_id,
+            message: Some(h.message.into()),
+            url: h.url,
+        }
+    }
+}
+impl TryFrom<pb::SearchHit> for SearchHit {
+    type Error = ConvertError;
+    fn try_from(h: pb::SearchHit) -> Result<Self, ConvertError> {
+        Ok(SearchHit {
+            chat_id: h.chat_id,
+            message: h
+                .message
+                .ok_or(ConvertError::Missing { field: "message" })?
+                .try_into()?,
+            url: h.url,
+        })
+    }
+}
+
+impl From<DocWrite> for pb::DocWrite {
+    fn from(d: DocWrite) -> Self {
+        pb::DocWrite {
+            doc_id: d.doc_id,
+            title: d.title,
+            markdown: d.markdown,
+            share_chat_id: d.share_chat_id,
+            aigc_banner: d.aigc_banner,
+        }
+    }
+}
+impl From<pb::DocWrite> for DocWrite {
+    fn from(d: pb::DocWrite) -> Self {
+        DocWrite {
+            doc_id: d.doc_id,
+            title: d.title,
+            markdown: d.markdown,
+            share_chat_id: d.share_chat_id,
+            aigc_banner: d.aigc_banner,
+        }
+    }
+}
+
+impl From<DocRef> for pb::DocRef {
+    fn from(d: DocRef) -> Self {
+        pb::DocRef {
+            doc_id: d.doc_id,
+            url: d.url,
+            title: d.title,
+        }
+    }
+}
+impl From<pb::DocRef> for DocRef {
+    fn from(d: pb::DocRef) -> Self {
+        DocRef {
+            doc_id: d.doc_id,
+            url: d.url,
+            title: d.title,
+        }
+    }
+}
+
+impl From<OAuthStart> for pb::OAuthStart {
+    fn from(s: OAuthStart) -> Self {
+        pb::OAuthStart {
+            redirect_uri: s.redirect_uri,
+            state: s.state,
+        }
+    }
+}
+impl From<pb::OAuthStart> for OAuthStart {
+    fn from(s: pb::OAuthStart) -> Self {
+        OAuthStart {
+            redirect_uri: s.redirect_uri,
+            state: s.state,
+        }
+    }
+}
+
+impl From<OAuthUrl> for pb::OAuthUrl {
+    fn from(u: OAuthUrl) -> Self {
+        pb::OAuthUrl { url: u.url }
+    }
+}
+impl From<pb::OAuthUrl> for OAuthUrl {
+    fn from(u: pb::OAuthUrl) -> Self {
+        OAuthUrl { url: u.url }
+    }
+}
+
+impl From<OAuthCode> for pb::OAuthCode {
+    fn from(c: OAuthCode) -> Self {
+        pb::OAuthCode {
+            code: c.code,
+            redirect_uri: c.redirect_uri,
+        }
+    }
+}
+impl From<pb::OAuthCode> for OAuthCode {
+    fn from(c: pb::OAuthCode) -> Self {
+        OAuthCode {
+            code: c.code,
+            redirect_uri: c.redirect_uri,
+        }
+    }
+}

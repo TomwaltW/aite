@@ -1,0 +1,11 @@
+str_enum! {
+    /// 卡片按钮 / 卡片回传动作；出站 ChecklistCard.actions 与入站 CardAction.action 共用。
+    /// approve / reject 是审批按钮，submit 是表单提交（value 里带表单）。
+    CardActionKind {
+        Stop => "stop",
+        Evidence => "evidence",
+        Approve => "approve",
+        Reject => "reject",
+        Submit => "submit",
+    }
+}

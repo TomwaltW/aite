@@ -1,0 +1,7 @@
+    #[serde(default)]
+    pub card_action: Option<CardAction>,
+    pub occurred_at: DateTime<Utc>,
+    /// 原始事件，仅供审计；任何逻辑不得依赖 raw
+    #[serde(default)]
+    pub raw: Map<String, Value>,
+}

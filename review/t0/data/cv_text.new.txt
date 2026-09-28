@@ -1,0 +1,24 @@
+impl From<OutboundText> for pb::OutboundText {
+    fn from(t: OutboundText) -> Self {
+        pb::OutboundText {
+            chat_id: t.chat_id,
+            text: t.text,
+            reply_to: t.reply_to,
+            in_thread: t.in_thread,
+            mentions: t.mentions,
+            dedupe_key: t.dedupe_key,
+        }
+    }
+}
+impl From<pb::OutboundText> for OutboundText {
+    fn from(t: pb::OutboundText) -> Self {
+        OutboundText {
+            chat_id: t.chat_id,
+            text: t.text,
+            reply_to: t.reply_to,
+            in_thread: t.in_thread,
+            mentions: t.mentions,
+            dedupe_key: t.dedupe_key,
+        }
+    }
+}

@@ -1,0 +1,83 @@
+impl From<CardLink> for pb::CardLink {
+    fn from(l: CardLink) -> Self {
+        pb::CardLink {
+            label: l.label,
+            url: l.url,
+        }
+    }
+}
+impl From<pb::CardLink> for CardLink {
+    fn from(l: pb::CardLink) -> Self {
+        CardLink {
+            label: l.label,
+            url: l.url,
+        }
+    }
+}
+
+impl From<ApprovalPrompt> for pb::ApprovalPrompt {
+    fn from(a: ApprovalPrompt) -> Self {
+        pb::ApprovalPrompt {
+            approval_id: a.approval_id,
+            summary: a.summary,
+            detail: a.detail,
+        }
+    }
+}
+impl From<pb::ApprovalPrompt> for ApprovalPrompt {
+    fn from(a: pb::ApprovalPrompt) -> Self {
+        ApprovalPrompt {
+            approval_id: a.approval_id,
+            summary: a.summary,
+            detail: a.detail,
+        }
+    }
+}
+
+impl From<ChecklistCard> for pb::ChecklistCard {
+    fn from(c: ChecklistCard) -> Self {
+        pb::ChecklistCard {
+            task_id: c.task_id,
+            task_no: c.task_no,
+            title: c.title,
+            initiator: c.initiator,
+            started_at: c.started_at,
+            status: pb::CardStatus::from(c.status) as i32,
+            items: c.items.into_iter().map(Into::into).collect(),
+            footer: c.footer,
+            actions: c
+                .actions
+                .into_iter()
+                .map(|a| pb::CardActionKind::from(a) as i32)
+                .collect(),
+            links: c.links.into_iter().map(Into::into).collect(),
+            approval: c.approval.map(Into::into),
+        }
+    }
+}
+impl TryFrom<pb::ChecklistCard> for ChecklistCard {
+    type Error = ConvertError;
+    fn try_from(c: pb::ChecklistCard) -> Result<Self, ConvertError> {
+        Ok(ChecklistCard {
+            task_id: c.task_id,
+            task_no: c.task_no,
+            title: c.title,
+            initiator: c.initiator,
+            started_at: c.started_at,
+            status: enum_i32::<CardStatus, pb::CardStatus>(c.status, "status")?,
+            items: c
+                .items
+                .into_iter()
+                .map(TryInto::try_into)
+                .collect::<Result<_, _>>()?,
+            footer: c.footer,
+            actions: c
+                .actions
+                .into_iter()
+                .map(|a| enum_i32::<CardActionKind, pb::CardActionKind>(a, "actions[]"))
+                .collect::<Result<_, _>>()?,
+            links: c.links.into_iter().map(Into::into).collect(),
+            approval: c.approval.map(Into::into),
+        })
+    }
+}

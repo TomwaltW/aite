@@ -1,0 +1,10 @@
+            card_action: e.card_action.map(TryInto::try_into).transpose()?,
+            occurred_at: ts_to_chrono(e.occurred_at, "occurred_at")?,
+            raw: struct_to_map(e.raw),
+            quote: e.quote.map(Into::into),
+            reaction: e.reaction.map(Into::into),
+            external: e.external.map(Into::into),
+            sender_external: e.sender_external,
+        })
+    }
+}

@@ -1,0 +1,16 @@
+#[test]
+fn constants() {
+    assert_eq!(CONTRACT_VERSION, "p0.2");
+    assert_eq!(MAX_TOOL_CONTENT_CHARS, 12_000);
+    assert_eq!(DEFAULT_TOOL_TIMEOUT_SEC, 60);
+    assert_eq!(MAX_EXEC_OUTPUT_CHARS, 20_000);
+    assert_eq!(sandbox::EXEC_TIMEOUT_EXIT_CODE, 124);
+    assert_eq!(
+        ACTIVE_TASK_STATUSES,
+        [
+            TaskStatus::Created,
+            TaskStatus::Planning,
+            TaskStatus::Working
+        ]
+    );
+}

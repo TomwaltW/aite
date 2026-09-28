@@ -1,0 +1,1 @@
+  optional string task_no = 5;         // "#A17"：edge 从自身文本或引用里解析；core 按它路由

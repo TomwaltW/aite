@@ -1,0 +1,5 @@
+    assert_eq!(ExecResult::from(pb::ExecResult::from(res.clone())), res);
+}
+
+#[test]
+fn status_mapping_is_frozen() {

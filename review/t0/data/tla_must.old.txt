@@ -1,0 +1,2 @@
+        "core/crates/contracts/Cargo.toml",
+        "core/crates/proto/Cargo.toml",

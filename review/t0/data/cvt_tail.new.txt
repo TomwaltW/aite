@@ -1,0 +1,237 @@
+    assert_eq!(ExecResult::from(pb::ExecResult::from(res.clone())), res);
+}
+
+// ---------------------------------------------------------------- p1.0
+
+#[test]
+fn p1_enum_values_map_both_ways() {
+    assert_eq!(pb::EventKind::from(EventKind::Reaction) as i32, 7);
+    assert_eq!(pb::EventKind::from(EventKind::External) as i32, 8);
+    assert_eq!(pb::CardActionKind::from(CardActionKind::Approve) as i32, 3);
+    assert_eq!(pb::CardActionKind::from(CardActionKind::Reject) as i32, 4);
+    assert_eq!(pb::CardActionKind::from(CardActionKind::Submit) as i32, 5);
+    assert_eq!(pb::ReactionKind::from(ReactionKind::Muted) as i32, 4);
+    for k in EventKind::ALL {
+        assert_eq!(EventKind::try_from(pb::EventKind::from(*k)).unwrap(), *k);
+    }
+    for k in CardActionKind::ALL {
+        assert_eq!(
+            CardActionKind::try_from(pb::CardActionKind::from(*k)).unwrap(),
+            *k
+        );
+    }
+    for k in ReactionKind::ALL {
+        assert_eq!(
+            ReactionKind::try_from(pb::ReactionKind::from(*k)).unwrap(),
+            *k
+        );
+    }
+}
+
+#[test]
+fn p1_event_shapes_round_trip_through_pb() {
+    let mut r = event();
+    r.kind = EventKind::Reaction;
+    r.reaction = Some(ReactionEvent {
+        message_id: "om_bot".into(),
+        emoji: "THUMBSDOWN".into(),
+        thumbs_down: true,
+        added: true,
+    });
+    let p: pb::NormalizedEvent = r.clone().into();
+    assert_eq!(p.kind(), pb::EventKind::Reaction);
+    assert_eq!(NormalizedEvent::try_from(p).unwrap(), r);
+
+    let mut x = event();
+    x.kind = EventKind::External;
+    x.quote = None;
+    x.external = Some(ExternalEvent {
+        source: "gitlab".into(),
+        topic: "gitlab.merge_request".into(),
+        subject: "修登录".into(),
+        url: Some("https://git.example.test/mr/1".into()),
+        summary: "opened".into(),
+        payload: json!({"object_attributes": {"iid": 1, "draft": true}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    });
+    let p: pb::NormalizedEvent = x.clone().into();
+    assert_eq!(p.external.as_ref().unwrap().topic, "gitlab.merge_request");
+    assert_eq!(NormalizedEvent::try_from(p).unwrap(), x);
+
+    let mut a = event();
+    a.kind = EventKind::CardAction;
+    a.card_action = Some(CardAction {
+        card_id: "om_card".into(),
+        action: CardActionKind::Submit,
+        task_id: Some("t1".into()),
+        value: json!({"form": {"reason": "ok"}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    });
+    assert_eq!(
+        NormalizedEvent::try_from(pb::NormalizedEvent::from(a.clone())).unwrap(),
+        a
+    );
+}
+
+#[test]
+fn p1_outbound_messages_round_trip_through_pb() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 9, 1, 7, 0).unwrap();
+    let u = UserInfo {
+        user_id: "ou_1".into(),
+        name: "张三".into(),
+        is_external: true,
+        is_guest: false,
+    };
+    assert_eq!(UserInfo::from(pb::UserInfo::from(u.clone())), u);
+    let c = ChatInfo {
+        chat_id: "oc_1".into(),
+        name: "研发群".into(),
+        chat_type: ChatType::Group,
+        is_public: None,
+        is_external: false,
+        member_count: Some(7),
+    };
+    assert_eq!(
+        ChatInfo::try_from(pb::ChatInfo::from(c.clone())).unwrap(),
+        c
+    );
+    assert!(
+        ChatInfo::try_from(pb::ChatInfo::default()).is_err(),
+        "chat_type 未指定要拒"
+    );
+    let q = SearchQuery {
+        query: "发布".into(),
+        chat_ids: vec!["oc_1".into()],
+        limit: 20,
+        since: Some(now),
+    };
+    assert_eq!(
+        SearchQuery::try_from(pb::SearchQuery::from(q.clone())).unwrap(),
+        q
+    );
+    let hit = SearchHit {
+        chat_id: "oc_1".into(),
+        message: HistoryMessage {
+            message_id: "om_1".into(),
+            sender_id: "ou_1".into(),
+            sender_kind: "human".into(),
+            sender_name: None,
+            text: "周四发".into(),
+            thread_id: None,
+            created_at: now,
+            updated_at: None,
+            deleted: false,
+            reply_to: None,
+        },
+        url: Some("https://x.example.test/m/om_1".into()),
+    };
+    assert_eq!(
+        SearchHit::try_from(pb::SearchHit::from(hit.clone())).unwrap(),
+        hit
+    );
+    assert!(matches!(
+        SearchHit::try_from(pb::SearchHit::default()),
+        Err(aite_proto::ConvertError::Missing { field: "message" })
+    ));
+    let d = DocWrite {
+        doc_id: Some("doxc1".into()),
+        title: "周报".into(),
+        markdown: "# 周报".into(),
+        share_chat_id: Some("oc_1".into()),
+        aigc_banner: true,
+    };
+    assert_eq!(DocWrite::from(pb::DocWrite::from(d.clone())), d);
+    let r = DocRef {
+        doc_id: "doxc1".into(),
+        url: "https://x.example.test/docx/doxc1".into(),
+        title: "周报".into(),
+    };
+    assert_eq!(DocRef::from(pb::DocRef::from(r.clone())), r);
+    let s = OAuthStart {
+        redirect_uri: "https://admin.example.test/cb".into(),
+        state: "s1".into(),
+    };
+    assert_eq!(OAuthStart::from(pb::OAuthStart::from(s.clone())), s);
+    let url = OAuthUrl {
+        url: "https://open.example.test/authorize".into(),
+    };
+    assert_eq!(OAuthUrl::from(pb::OAuthUrl::from(url.clone())), url);
+    let code = OAuthCode {
+        code: "c1".into(),
+        redirect_uri: "https://admin.example.test/cb".into(),
+    };
+    assert_eq!(OAuthCode::from(pb::OAuthCode::from(code.clone())), code);
+}
+
+#[test]
+fn capability_profiles_round_trip_through_pb() {
+    for caps in [feishu_p0(), dingtalk_v1(), wecom_v1()] {
+        assert_eq!(
+            PlatformCapabilities::from(pb::PlatformCapabilities::from(caps.clone())),
+            caps
+        );
+    }
+    let p = pb::PlatformCapabilities::from(wecom_v1());
+    assert_eq!(
+        (p.card_action_deadline_ms, p.max_upload_bytes),
+        (5000, 20_971_520)
+    );
+}
+
+#[test]
+fn network_levels_and_egress_policy() {
+    for (s, want) in [
+        ("", SandboxNetwork::None),
+        ("none", SandboxNetwork::None),
+        ("trusted", SandboxNetwork::Trusted),
+        ("custom", SandboxNetwork::Custom),
+        ("full", SandboxNetwork::Full),
+    ] {
+        let spec = SandboxSpec::try_from(pb::SandboxSpec {
+            image: "img:1".into(),
+            network: s.into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(spec.network, want, "{s:?}");
+    }
+    let mut spec = SandboxSpec::new("img:1");
+    spec.network = SandboxNetwork::Trusted;
+    assert_eq!(
+        SandboxSpec::try_from(pb::SandboxSpec::from(spec.clone())).unwrap(),
+        spec
+    );
+    let pol = EgressPolicy {
+        level: SandboxNetwork::Custom,
+        allow_hosts: vec!["*.example.test".into(), "git.example.test:8443".into()],
+        credentials: vec![CredentialBinding {
+            host: "git.example.test:8443".into(),
+            header: "Authorization".into(),
+            scheme: "Bearer".into(),
+            secret_ref: "gitlab_bot".into(),
+        }],
+        audit_tag: "t1".into(),
+    };
+    let p = pb::EgressPolicy::from(pol.clone());
+    assert_eq!(p.level, "custom");
+    assert_eq!(EgressPolicy::try_from(p).unwrap(), pol);
+    assert_eq!(
+        EgressPolicy::try_from(pb::EgressPolicy::default()).unwrap(),
+        EgressPolicy::default(),
+        "空 level = none"
+    );
+    assert!(
+        EgressPolicy::try_from(pb::EgressPolicy {
+            level: "bridge".into(),
+            ..Default::default()
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn status_mapping_is_frozen() {

@@ -1,0 +1,3 @@
+        footer: "已用 1 步 · ¥0.00".into(),
+        actions: vec![CardActionKind::Stop, CardActionKind::Evidence],
+    };

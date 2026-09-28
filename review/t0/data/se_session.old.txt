@@ -1,0 +1,4 @@
+    pub last_active_at: DateTime<Utc>,
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
+}

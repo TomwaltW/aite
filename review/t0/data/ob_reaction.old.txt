@@ -1,0 +1,4 @@
+str_enum! {
+    /// adapter 负责映射到平台 emoji（飞书：ack=OnIt, done=DONE, fail=CRY）
+    ReactionKind { Ack => "ack", Done => "done", Fail => "fail" }
+}

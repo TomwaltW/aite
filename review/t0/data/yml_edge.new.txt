@@ -1,0 +1,85 @@
+# core ↔ edge 的进程边界（proto/aite/v1/edge.proto）。两个 socket 都相对仓库根；http_listen 是外部 webhook 入口。
+edge:
+  edge_socket: data/run/aite-edge.sock     # edge 监听：PlatformService / SandboxService / EdgeStatusService
+  core_socket: data/run/aite-core.sock     # core 监听：IngressService
+  handle_event_deadline_ms: 1000           # edge 调 HandleEvent 的 deadline（§3.3 "on_event 1s 内返回"）
+  max_message_mb: 64                       # 两边 gRPC 的最大消息体（文件走 bytes）
+  http_listen: ""                          # edge 的 HTTP 入口（外部 webhook）；空 = 不开
+  webhook_secret_env: AITE_WEBHOOK_SECRET
+
+# —— 以下各段是 p1.0 新增（设计见 docs/p1/contract-p1.md §1）。每个值都是默认值 ——
+
+search:                    # 联网搜索
+  provider: none           # none | bocha | zhipu | baidu
+  api_key_env: AITE_SEARCH_API_KEY
+  endpoint: ""
+  max_results: 5
+  timeout_sec: 15
+
+git:                       # 代码托管：机器人身份开 Draft MR
+  provider: none           # none | gitlab | gitee | codeup | gitea | github
+  base_url: ""
+  token_env: AITE_GIT_TOKEN
+  bot_name: aite-bot
+  draft_prefix: "Draft: "
+  webhook_secret_env: AITE_GIT_WEBHOOK_SECRET
+
+pages:                     # 托管页
+  provider: none           # none | platform_doc
+  folder_token_env: ""
+
+memory:
+  enabled: true
+  max_entries_per_scope: 200
+  auto_extract: false
+
+routines:
+  enabled: true
+  max_per_chat: 20
+  min_interval_min: 15
+  default_tz: Asia/Shanghai
+  default_tz_offset_min: 480
+  tick_sec: 30
+
+ambient:                   # 旁听与主动回复（自动回复默认关）
+  respond_automatically_default: false
+  daily_cap_per_chat: 20
+  stop_reading_after_msgs: 100
+  channel_session_idle_min: 60
+  channel_session_max_age_h: 24
+  stalled_followup_h: 24
+  max_consecutive_bot_turns: 3
+
+access:
+  dm_enabled: true
+  external_chat_mode: restrict   # restrict | channel_only | allow；离开 restrict 要 compliance 两个确认位都为 true
+  allow_chats: []
+  block_chats: []
+  member_allowlist: []
+  search_scope: joined_chats     # current_chat | joined_chats | workspace
+  require_setup: false
+
+budget:                    # 人民币；0 = 不限
+  org_monthly_limit_cny: 0.0
+  channel_monthly_limit_cny: 0.0
+  task_limit_cny: 0.0
+  warn_ratio: 0.8
+  month_start_day: 1
+
+compliance:
+  aigc_label: true
+  label_text: 内容由 AI 生成
+  implicit_metadata: true
+  producer: Aite
+  service_filing_no: ""
+  audit_retention_days: 190
+  content_retention_days: 0      # 0 = 不自动删
+  registration_scope_confirmed: false
+  content_safety_filter: false
+
+admin:                     # 管理台；listen 为空 = 不开
+  listen: ""
+  public_base_url: ""
+  owner_ids: []
+  session_secret_env: AITE_ADMIN_SECRET
+  bootstrap_token_env: AITE_ADMIN_BOOTSTRAP_TOKEN
