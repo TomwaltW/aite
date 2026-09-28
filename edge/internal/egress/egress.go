@@ -8,7 +8,7 @@
 //   - 默认拒绝：档位 none / trusted（china-trusted 预设 ∪ AllowHosts）/ custom（只 AllowHosts）/
 //     full（任意主机的 80 / 443 ∪ AllowHosts）；IM / API 保留主机任何档位都到不了（EE10 之前）。
 //   - 每个请求一行 NetworkEvent JSONL，按 UTC 小时分文件；写审计失败只打日志、不拦请求。
-//   - 上游连接一律走 Config.Dial；不碰 http.DefaultTransport（它读 HTTP(S)_PROXY 环境变量）。
+//   - 上游连接一律走 Config.Dial；不用 net/http 包级的缺省 Transport / Client（它们读 HTTP(S)_PROXY 环境变量）。
 //
 // 日志事件名：`egress.denied` / `egress.upstream_error` / `egress.audit_failed`。
 package egress

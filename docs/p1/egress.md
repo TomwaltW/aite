@@ -173,8 +173,11 @@ NEW12 的 `*`（放行任意主机）由 DD6 映射成 `level=full`；本包对 
 样例（文件 `2026092510.jsonl`）：
 
 ```
-SAMPLE_LINE
+{"ts":"2026-09-25T10:42:07.123456Z","audit_tag":"task-01J9Z","level":"trusted","method":"GET","host":"pypi.tuna.tsinghua.edu.cn","port":80,"decision":"allow","reason":"","status":200,"bytes_up":0,"bytes_down":28,"duration_ms":0,"injected":false}
+{"ts":"2026-09-25T10:42:07.123456Z","audit_tag":"task-01J9Z","level":"trusted","method":"GET","host":"example.test","port":80,"decision":"deny","reason":"host_not_allowed","status":403,"bytes_up":0,"bytes_down":0,"duration_ms":0,"injected":false}
 ```
+
+（上面两行是测试在 `t.TempDir()` 里真实写出的，假时钟定在 `2026-09-25T10:42:07.123456Z`；上游是 httptest。）
 
 - 写审计失败：打 `slog` 错误日志 `egress.audit_failed`，**不拦请求**（不 fail-closed）。这是派单替本轨定的默认，待总管拍板。
 
