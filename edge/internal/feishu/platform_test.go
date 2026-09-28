@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"aite/edge/internal/config"
 )
 
@@ -371,6 +373,8 @@ func TestNewReadsCredentialsFromOptions(t *testing.T) {
 //
 // 启动期缺变量不该在装配时炸；真正打不通是调 API 时的事。
 func TestNewWithMissingEnvDoesNotExplode(t *testing.T) {
+	// CC8 起 New() 读 AITE_FEISHU_*：显式清空，别让外面 shell 导出的值（比如做 H8 的终端）改了结论。
+	clearFeishuEnv(t)
 	p, err := New(config.Default().Feishu, Options{}, nil)
 	if err != nil {
 		t.Fatalf("缺变量不该在装配时炸：%v", err)
@@ -388,4 +392,82 @@ func TestNewWithMissingEnvDoesNotExplode(t *testing.T) {
 	if p.opts.Domain != DefaultDomain {
 		t.Errorf("domain = %q，要 %s", p.opts.Domain, DefaultDomain)
 	}
+}
+
+// clearFeishuEnv 把本包读的三个环境变量显式清空（t.Setenv 结束时还原）。
+func clearFeishuEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{EnvCardButtons, EnvPassiveListen, EnvAPIBase} {
+		t.Setenv(name, "")
+	}
+}
+
+// TestEnvFlagsAreReadInsideThePackage 钉住三个开关都在 New() 里读（main.go 一个字不动）。
+func TestEnvFlagsAreReadInsideThePackage(t *testing.T) {
+	t.Run("全不设", func(t *testing.T) {
+		clearFeishuEnv(t)
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !proto.Equal(p.Capabilities(), FeishuP0()) {
+			t.Errorf("能力 = %v，要 FeishuP0()", p.Capabilities())
+		}
+		if p.opts.Domain != DefaultDomain || p.api.domain != DefaultDomain {
+			t.Errorf("domain = %q / api %q，要 %s", p.opts.Domain, p.api.domain, DefaultDomain)
+		}
+		if p.cardButtons {
+			t.Error("卡片按钮默认要关")
+		}
+	})
+
+	t.Run(EnvPassiveListen, func(t *testing.T) {
+		clearFeishuEnv(t)
+		t.Setenv(EnvPassiveListen, "1")
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.Capabilities().GetSupportsPassiveListen() {
+			t.Error(`AITE_FEISHU_PASSIVE_LISTEN="1" 该打开 supports_passive_listen`)
+		}
+		if FeishuP0().GetSupportsPassiveListen() {
+			t.Error("改的该是实例，不是契约常量")
+		}
+		t.Setenv(EnvPassiveListen, "true")
+		p, _ = New(config.Default().Feishu, Options{}, nil)
+		if p.Capabilities().GetSupportsPassiveListen() {
+			t.Error(`只有恰好 "1" 才开`)
+		}
+	})
+
+	t.Run(EnvAPIBase, func(t *testing.T) {
+		clearFeishuEnv(t)
+		const base = "https://open.larksuite.test"
+		t.Setenv(EnvAPIBase, base)
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.opts.Domain != base || p.api.domain != base {
+			t.Errorf("domain = %q / api %q，要 %s（REST 与长连接同一个域名）", p.opts.Domain, p.api.domain, base)
+		}
+		// 显式的 Options.Domain 优先。
+		p, _ = New(config.Default().Feishu, Options{Domain: "https://explicit.test"}, nil)
+		if p.opts.Domain != "https://explicit.test" {
+			t.Errorf("显式 Domain 该优先，得到 %q", p.opts.Domain)
+		}
+	})
+
+	t.Run(EnvCardButtons, func(t *testing.T) {
+		clearFeishuEnv(t)
+		t.Setenv(EnvCardButtons, "1")
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.cardButtons {
+			t.Error(`AITE_FEISHU_CARD_BUTTONS="1" 该打开按钮`)
+		}
+	})
 }

@@ -182,17 +182,38 @@ func newPlatform(po platformOptions) (*Platform, error) {
 const (
 	// EnvCardButtons 恰好等于 "1" 才在卡片上渲染按钮，别的值一律关。
 	EnvCardButtons = "AITE_FEISHU_CARD_BUTTONS"
+	// EnvPassiveListen 恰好等于 "1" 才 SetPassiveListen(true)（权限核实过的部署才开）。
+	EnvPassiveListen = "AITE_FEISHU_PASSIVE_LISTEN"
+	// EnvAPIBase 非空且 Options.Domain 为空时当域名用（REST 与长连接同一个域名）；
+	// 显式的 Options.Domain 优先。
+	EnvAPIBase = "AITE_FEISHU_API_BASE"
 )
 
 // New 只做装配，不建连接；Start 才起长连接。
 //
 // 环境变量只在这里读：newPlatform（测试都走它）只认 platformOptions 的字段。
 func New(cfg config.Feishu, opts Options, sink EventSink) (*Platform, error) {
-	return newPlatform(platformOptions{
+	cardButtons := os.Getenv(EnvCardButtons) == "1"
+	passiveListen := os.Getenv(EnvPassiveListen) == "1"
+	apiBase := os.Getenv(EnvAPIBase)
+	if opts.Domain == "" && apiBase != "" {
+		opts.Domain = apiBase
+	}
+
+	p, err := newPlatform(platformOptions{
 		cfg: cfg, opts: opts, sink: sink,
-		cardButtons: os.Getenv(EnvCardButtons) == "1",
+		cardButtons: cardButtons,
 		senderNames: true,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if passiveListen {
+		p.SetPassiveListen(true)
+	}
+	p.logger.Info("feishu.env_flags",
+		"card_buttons", cardButtons, "passive_listen", passiveListen, "api_base", apiBase)
+	return p, nil
 }
 
 // ------------------------------------------------------------------
