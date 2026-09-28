@@ -14,6 +14,12 @@
 //!   两个实例指向同一个 .db 时会真撞上 SQLite 的文件锁。
 //! - 不显式 commit / rollback：rusqlite 默认 autocommit，一条写语句就是一个事务，
 //!   天然满足「每次写完立即 commit」与「撞主键那一路不牵连邻居」。
+//!   例外两处：`init()` 里的 schema 迁移（[`migrate`]，一次迁移要么全落要么全不落）与
+//!   `recover_orphan_tasks`（一批孤儿一起改），各自显式开事务、显式 commit。
+mod migrate;
+
+pub use migrate::LATEST_SCHEMA_VERSION;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,46 +37,6 @@ pub const ORPHAN_RESULT_SUMMARY: &str = "进程重启前该任务仍在执行，
 
 /// spec D8：跨实例并发是真线程，撞上文件锁时等一会儿而不是立刻报 SQLITE_BUSY。
 pub const BUSY_TIMEOUT_MS: u64 = 5000;
-
-/// 建表 SQL，逐字照 `aite/control/store.py` 的 `_SCHEMA`。幂等。
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,
-    tenant_id   TEXT NOT NULL,
-    chat_id     TEXT NOT NULL,
-    thread_id   TEXT,
-    status      TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    data        TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions (chat_id, thread_id);
-
-CREATE TABLE IF NOT EXISTS turns (
-    session_id  TEXT NOT NULL,
-    seq         INTEGER NOT NULL,
-    data        TEXT NOT NULL,
-    PRIMARY KEY (session_id, seq)
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id          TEXT PRIMARY KEY,
-    session_id  TEXT NOT NULL,
-    task_no     TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    created_at  TEXT NOT NULL,
-    data        TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks (session_id);
-
-CREATE TABLE IF NOT EXISTS task_counters (
-    tenant_id   TEXT PRIMARY KEY,
-    n           INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS seen_events (
-    event_id    TEXT PRIMARY KEY
-);
-";
 
 fn sq(e: rusqlite::Error) -> StoreError {
     StoreError::Sqlite(e.to_string())
@@ -205,9 +171,11 @@ fn query_texts(
 
 #[async_trait]
 impl SessionStore for SqliteSessionStore {
+    /// 建表 = 把库迁到 [`LATEST_SCHEMA_VERSION`]（流程见 `migrate` 模块头）。幂等：
+    /// 已是最新版本时只读一次版本号，零写入；库比本程序新 → `StoreError::Other`。
+    /// 仍然**不**收孤儿（理由见 `recover_orphan_tasks`）。
     async fn init(&self) -> Result<(), StoreError> {
-        self.with_conn(|c| c.execute_batch(SCHEMA).map_err(sq))
-            .await
+        self.with_conn(migrate::run).await
     }
 
     async fn close(&self) -> Result<(), StoreError> {
