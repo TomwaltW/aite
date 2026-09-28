@@ -90,7 +90,7 @@ func (p *Platform) SendText(ctx context.Context, msg *pb.OutboundText) (*pb.Send
 }
 
 func (p *Platform) SendCard(ctx context.Context, chatID string, replyTo *string, card *pb.ChecklistCard) (*pb.SendResult, error) {
-	content := DumpsCard(BuildChecklistCard(card))
+	content := DumpsCard(buildChecklistCardWith(card, p.cardButtons))
 	// send_card 的 in_thread 写死 true，只有 SendText 透传。
 	messageID, err := p.sendMessage(ctx, chatID, replyTo, "interactive", content, true)
 	if err != nil {
@@ -108,7 +108,7 @@ func (p *Platform) UpdateCard(ctx context.Context, cardID string, card *pb.Check
 	_, _, err := p.api.request(ctx, apiRequest{
 		method:      http.MethodPatch,
 		path:        fmt.Sprintf(PathMessage, cardID),
-		body:        map[string]any{"content": DumpsCard(BuildChecklistCard(card))},
+		body:        map[string]any{"content": DumpsCard(buildChecklistCardWith(card, p.cardButtons))},
 		rateLimited: true,
 	})
 	return err

@@ -9,7 +9,10 @@
 package feishu
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -536,6 +539,115 @@ func TestSDKAgreesThatUpdateIsNotSend(t *testing.T) {
 	}
 	if PathMessage == PathMessages {
 		t.Error("更新与发送的路径不能相同")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CC8：卡片按钮开关（默认关）
+// ---------------------------------------------------------------------------
+
+// cardButtonsOf 数一张卡片（发送用的 JSON 字符串或 map）上的 action 元素，
+// 返回按钮列表（多于一个 action 元素时 count 如实报）与提示行是否还在。
+func cardButtonsOf(t *testing.T, card map[string]any) (count int, buttons []any, hint bool) {
+	t.Helper()
+	for _, e := range asList(card["elements"]) {
+		m := asMap(e)
+		switch mapStr(m, "tag") {
+		case "action":
+			count++
+			buttons = asList(m["actions"])
+		case "note":
+			for _, inner := range asList(m["elements"]) {
+				if strings.Contains(mapStr(asMap(inner), "content"), "!stop") {
+					hint = true
+				}
+			}
+		}
+	}
+	return count, buttons, hint
+}
+
+func cardFromContent(t *testing.T, content string) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal([]byte(content), &out); err != nil {
+		t.Fatalf("content 不是卡片 JSON：%v（%s）", err, content)
+	}
+	return out
+}
+
+// TestButtonsOnlyWithFlag 钉住按钮开关：AITE_FEISHU_CARD_BUTTONS 恰好等于 "1" 才渲染按钮，
+// 渲染时文字提示照留；导出的 BuildChecklistCard 恒不带按钮。
+func TestButtonsOnlyWithFlag(t *testing.T) {
+	card := sampleCard()
+
+	// 构造层：关 → 无 action、有提示；开 → 恰好一个 action、按钮与 buildActions 一致、提示仍在。
+	off := asAnyMap(t, buildChecklistCardWith(card, false))
+	if n, _, hint := cardButtonsOf(t, off); n != 0 || !hint {
+		t.Errorf("开关关：action 元素 %d 个（要 0）、提示 %v（要在）", n, hint)
+	}
+	if n, _, _ := cardButtonsOf(t, asAnyMap(t, BuildChecklistCard(card))); n != 0 {
+		t.Errorf("BuildChecklistCard 该恒不带按钮，得到 %d 个 action 元素", n)
+	}
+	on := asAnyMap(t, buildChecklistCardWith(card, true))
+	checkCardSchema(t, on)
+	n, buttons, hint := cardButtonsOf(t, on)
+	if n != 1 || !hint {
+		t.Fatalf("开关开：action 元素 %d 个（要 1）、提示 %v（要在）", n, hint)
+	}
+	want, err := json.Marshal(buildActions(card))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := json.Marshal(buttons); string(got) != string(want) {
+		t.Errorf("按钮 = %s，要与 buildActions 一致 %s", got, want)
+	}
+	// 终态卡片（没有 actions）开着开关也不多元素。
+	terminal := sampleCard()
+	terminal.Actions = nil
+	if n, _, _ := cardButtonsOf(t, asAnyMap(t, buildChecklistCardWith(terminal, true))); n != 0 {
+		t.Errorf("没有 actions 的卡片不该有 action 元素，得到 %d 个", n)
+	}
+
+	// 装配层：环境变量确实在 New() 里被读，SendCard 与 UpdateCard 的请求体都跟着开关走。
+	for _, c := range []struct {
+		value   string
+		buttons bool
+	}{{"1", true}, {"true", false}, {"0", false}, {"", false}} {
+		t.Run("env="+c.value, func(t *testing.T) {
+			t.Setenv(EnvCardButtons, c.value)
+			f := newFakeFeishu(t)
+			f.mockToken()
+			send := f.on(http.MethodPost, fmt.Sprintf(PathMessageReply, testRootMsgID), jsonResponse(200, map[string]any{
+				"code": 0, "data": map[string]any{"message_id": testCardMsgID},
+			}))
+			patch := f.onJSON(http.MethodPatch, fmt.Sprintf(PathMessage, testCardMsgID), 200,
+				map[string]any{"code": 0, "data": map[string]any{}})
+
+			p, err := New(defaultFeishuConfig(), Options{AppID: testAppID, AppSecret: "s", Domain: f.URL}, nil)
+			if err != nil {
+				t.Fatalf("New 失败：%v", err)
+			}
+			if _, err := p.SendCard(context.Background(), testChatID, strptr(testRootMsgID), card); err != nil {
+				t.Fatalf("SendCard 失败：%v", err)
+			}
+			if err := p.UpdateCard(context.Background(), testCardMsgID, card); err != nil {
+				t.Fatalf("UpdateCard 失败：%v", err)
+			}
+			for name, r := range map[string]*route{"SendCard": send, "UpdateCard": patch} {
+				content := mapStr(r.last(t).jsonBodyOf(t), "content")
+				n, _, hint := cardButtonsOf(t, cardFromContent(t, content))
+				if c.buttons && n != 1 {
+					t.Errorf("%s：开关 %q 该带按钮，action 元素 %d 个", name, c.value, n)
+				}
+				if !c.buttons && n != 0 {
+					t.Errorf("%s：开关 %q 不该带按钮，action 元素 %d 个", name, c.value, n)
+				}
+				if !hint {
+					t.Errorf("%s：文字提示任何时候都要在", name)
+				}
+			}
+		})
 	}
 }
 

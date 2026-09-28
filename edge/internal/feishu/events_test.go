@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -282,6 +283,130 @@ func TestCardActionTriggerReachesTheHandlerOnAnEventFrame(t *testing.T) {
 	if mapStr(envelope, "schema") != "2.0" {
 		t.Errorf("schema = %q", mapStr(envelope, "schema"))
 	}
+}
+
+// platformWSHarness 在 Platform 一层起一条真长连接（Start 的重连循环 + 默认工厂 +
+// 真 larkws.Client），连到假飞书长连接服务端。返回服务端、sink、日志与收尾函数。
+func platformWSHarness(t *testing.T, cardButtons bool) (*fakeWS, *recordingSink, *logCapture, func()) {
+	t.Helper()
+	server := newFakeWS(t)
+	sink := &recordingSink{}
+	capture, logger := newLogCapture()
+	p := mustPlatform(t, platformBuild{
+		domain: server.Server.URL, appID: testAppID, sink: sink, logger: logger,
+		cardButtons: cardButtons,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Start(ctx) }()
+	select {
+	case <-server.ready:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("服务端没等到握手")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !p.Connected() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return server, sink, capture, func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("Start 没在 10s 内退出")
+		}
+	}
+}
+
+// settleSink 等 sink 收到 want 条，再多等一小会让「本不该来的」露头。
+func settleSink(sink *recordingSink, want int) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sink.seen()) < want {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestCardActionTriggerArrivesAsEventFrame 走到 Platform 一层：type=event 帧载卡片回传
+// → OnP2CardActionTrigger → dispatchRaw → sink 收到 CARD_ACTION，且 INFO 日志
+// feishu.card_frame frame_type=event（H8 靠它判定平台发的是新版回调）。
+// 子测试（按钮开关开）：type=card 帧被 SDK 丢掉 → sink 0 条，但日志有 frame_type=card，
+// 且任何日志属性里都不出现 payload 里的两个令牌。
+func TestCardActionTriggerArrivesAsEventFrame(t *testing.T) {
+	server, sink, capture, done := platformWSHarness(t, false)
+	defer done()
+
+	if err := server.send(string(larkws.MessageTypeEvent), cardActionPayload); err != nil {
+		t.Fatalf("发帧失败：%v", err)
+	}
+	settleSink(sink, 1)
+
+	seen := sink.seen()
+	if len(seen) != 1 {
+		t.Fatalf("卡片回传该进 sink 1 条，得到 %d 条", len(seen))
+	}
+	ev := seen[0]
+	if ev.GetKind() != pb.EventKind_EVENT_KIND_CARD_ACTION {
+		t.Errorf("kind = %v，要 CARD_ACTION", ev.GetKind())
+	}
+	ca := ev.GetCardAction()
+	if ca.GetAction() != pb.CardActionKind_CARD_ACTION_KIND_STOP || ca.GetTaskId() != "t-1" || ca.GetCardId() != testCardMsgID {
+		t.Errorf("card_action = %v", ca)
+	}
+	records := capture.find("feishu.card_frame")
+	if len(records) != 1 || records[0].Level != slog.LevelInfo {
+		t.Fatalf("该打一条 INFO 的 feishu.card_frame，得到 %v", records)
+	}
+	if v, _ := attr(records[0], "frame_type"); v.String() != "event" {
+		t.Errorf("frame_type = %v，要 event", v.Any())
+	}
+	if v, _ := attr(records[0], "event_id"); v.String() != "evt_card_frame_0001" {
+		t.Errorf("event_id = %v", v.Any())
+	}
+
+	t.Run("buttons-on/type=card", func(t *testing.T) {
+		server, sink, capture, done := platformWSHarness(t, true)
+		defer done()
+
+		if err := server.send(string(larkws.MessageTypeCard), cardActionPayload); err != nil {
+			t.Fatalf("发帧失败：%v", err)
+		}
+		settleSink(sink, 1)
+
+		if n := len(sink.seen()); n != 0 {
+			t.Errorf("type=card 帧被 SDK 丢掉，sink 该 0 条，得到 %d 条", n)
+		}
+		var frameTypes []string
+		for _, r := range capture.find("feishu.card_frame") {
+			v, _ := attr(r, "frame_type")
+			frameTypes = append(frameTypes, v.String())
+			if r.Level != slog.LevelInfo {
+				t.Errorf("feishu.card_frame 的级别 = %v，要 INFO", r.Level)
+			}
+		}
+		if fmt.Sprint(frameTypes) != "[card]" {
+			t.Errorf("feishu.card_frame 的 frame_type = %v，要 [card]", frameTypes)
+		}
+		secrets := []string{"v-header-verification-token", "c-3f0a1b2c3d4e5f60718293a4b5c6d7e8"}
+		capture.mu.Lock()
+		defer capture.mu.Unlock()
+		for _, r := range capture.records {
+			texts := []string{r.Message}
+			r.Attrs(func(a slog.Attr) bool {
+				texts = append(texts, a.Value.String())
+				return true
+			})
+			for _, text := range texts {
+				for _, secret := range secrets {
+					if strings.Contains(text, secret) {
+						t.Errorf("日志 %s 里出现了 payload 的令牌 %q", r.Message, secret)
+					}
+				}
+			}
+		}
+	})
 }
 
 // TestEventFramesAreDelivered 对应 test_event_frames_are_untouched_by_the_shim。

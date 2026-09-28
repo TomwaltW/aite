@@ -19,6 +19,7 @@ package feishu
 import (
 	"context"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,6 +69,9 @@ type Platform struct {
 	logger  *slog.Logger
 	budget  time.Duration
 
+	// cardButtons=true 时 SendCard / UpdateCard 的卡片带按钮（AITE_FEISHU_CARD_BUTTONS=1，默认关）。
+	cardButtons bool
+
 	// historyWindow 是 config 里的 feishu.history_window，只存不用：
 	// ReadHistory 的条数由调用方按 ports.go 的签名给（Python 版同样只存着）。
 	historyWindow int
@@ -88,6 +92,9 @@ type platformOptions struct {
 	clock   clockFunc
 	logger  *slog.Logger
 	budget  time.Duration
+
+	// cardButtons 见 Platform.cardButtons。New() 从环境变量填，newPlatform 只认字段、不读环境。
+	cardButtons bool
 }
 
 func newPlatform(po platformOptions) (*Platform, error) {
@@ -131,6 +138,7 @@ func newPlatform(po platformOptions) (*Platform, error) {
 		clock:         po.clock,
 		logger:        po.logger,
 		budget:        po.budget,
+		cardButtons:   po.cardButtons,
 		historyWindow: historyWindow,
 	}
 
@@ -154,15 +162,28 @@ func newPlatform(po platformOptions) (*Platform, error) {
 	p.factory = po.factory
 	if p.factory == nil {
 		p.factory = func(onRaw RawEventHandler) Connection {
-			return newLarkConnection(po.opts.AppID, po.opts.AppSecret, po.opts.Domain, onRaw, po.logger)
+			conn := newLarkConnection(po.opts.AppID, po.opts.AppSecret, po.opts.Domain, onRaw, po.logger)
+			conn.cardButtons = po.cardButtons
+			return conn
 		}
 	}
 	return p, nil
 }
 
+// 本包自己读的环境变量（只在 New() 里读；DD8 做 Go 配置镜像后换成 FeishuConfig 的字段）。
+const (
+	// EnvCardButtons 恰好等于 "1" 才在卡片上渲染按钮，别的值一律关。
+	EnvCardButtons = "AITE_FEISHU_CARD_BUTTONS"
+)
+
 // New 只做装配，不建连接；Start 才起长连接。
+//
+// 环境变量只在这里读：newPlatform（测试都走它）只认 platformOptions 的字段。
 func New(cfg config.Feishu, opts Options, sink EventSink) (*Platform, error) {
-	return newPlatform(platformOptions{cfg: cfg, opts: opts, sink: sink})
+	return newPlatform(platformOptions{
+		cfg: cfg, opts: opts, sink: sink,
+		cardButtons: os.Getenv(EnvCardButtons) == "1",
+	})
 }
 
 // ------------------------------------------------------------------

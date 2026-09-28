@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -154,6 +155,9 @@ type larkConnection struct {
 	domain    string
 	onRaw     RawEventHandler
 	logger    *slog.Logger
+	// cardButtons=true（按钮开关开）时建连多装一个 SDK 日志适配器，
+	// 认出被 SDK 丢掉的 type=card 帧并打 feishu.card_frame（见 sdkLogAdapter）。
+	cardButtons bool
 
 	mu     sync.Mutex
 	client *larkws.Client
@@ -194,6 +198,13 @@ func (c *larkConnection) buildDispatcher() *dispatcher.EventDispatcher {
 				if event == nil || event.EventReq == nil {
 					return nil, nil
 				}
+				// SDK 在任何 handler 之前就丢掉 type=card 帧，所以走到这里的一定是 event 帧。
+				// 无论开关开没开都打：H8 靠这一行判定平台用的是新版回调。
+				eventID := ""
+				if event.EventV2Base != nil && event.EventV2Base.Header != nil {
+					eventID = event.EventV2Base.Header.EventID
+				}
+				c.logger.Info("feishu.card_frame", "frame_type", "event", "event_id", eventID)
 				return nil, c.deliver(ctx, event.EventReq.Body)
 			})
 			continue
@@ -221,14 +232,20 @@ func (c *larkConnection) deliver(ctx context.Context, body []byte) error {
 }
 
 func (c *larkConnection) Connect(ctx context.Context) error {
-	client := larkws.NewClient(c.appID, c.appSecret,
+	options := []larkws.ClientOption{
 		larkws.WithEventHandler(c.buildDispatcher()),
 		larkws.WithDomain(c.domain),
 		// 重连归 Platform 管，SDK 自己那套固定间隔不要掺和进来。
 		larkws.WithAutoReconnect(false),
 		larkws.WithLogLevel(larkcore.LogLevelWarn),
 		larkws.WithOnReady(func() { c.readyOnce.Do(func() { close(c.ready) }) }),
-	)
+	}
+	if c.cardButtons {
+		// 装了 logger 之后 SDK 的 WithLogLevel 不再生效（ws/client.go:216-218 只在
+		// logger == nil 时用它），级别过滤由适配器自己做。开关关时建连参数与原来逐字相同。
+		options = append(options, larkws.WithLogger(sdkLogAdapter{logger: c.logger}))
+	}
+	client := larkws.NewClient(c.appID, c.appSecret, options...)
 
 	runCtx, cancel := context.WithCancel(ctx)
 	c.mu.Lock()
@@ -294,6 +311,70 @@ func (c *larkConnection) Close() error {
 		c.logger.Warn("feishu.close_timeout", "note", "长连接 5s 内没退干净，放手")
 	}
 	return nil
+}
+
+// sdkFrameLogPrefix 是 SDK 收到数据帧时那条 Debug 行的开头（ws/client_message.go:77）：
+// "receive message, message_type: <X>, message_id: …, trace_id: …, payload: …"。
+const sdkFrameLogPrefix = "receive message, message_type: "
+
+// sdkLogAdapter 把 lark SDK 的日志接进 slog，只在卡片按钮开关打开时装上。
+//
+// 它存在的唯一理由是看见被 SDK 丢掉的 type=card 帧：丢弃（client_message.go:79）发生在
+// 任何 handler 之前，唯一留下痕迹的是 :77 那条 Debug 行。所以：
+//   - Debug：只认那一行，message_type 为 card 时打 INFO feishu.card_frame frame_type=card；
+//     其余 Debug 一律丢。**绝不记 payload**（里面有校验令牌与消息正文）。
+//   - Info：丢（SDK 的 Info 是建连握手之类的噪音，装 logger 前它们也被 WithLogLevel(Warn) 滤掉）。
+//   - Warn / Error：照级别转进 slog。
+type sdkLogAdapter struct {
+	logger *slog.Logger
+}
+
+func (a sdkLogAdapter) Debug(_ context.Context, args ...any) {
+	if frameType, ok := sdkFrameType(args); ok && frameType == "card" {
+		a.logger.Info("feishu.card_frame", "frame_type", "card")
+	}
+}
+
+func (a sdkLogAdapter) Info(context.Context, ...any) {}
+
+func (a sdkLogAdapter) Warn(_ context.Context, args ...any) {
+	a.logger.Warn("feishu.sdk", "msg", sdkLogText(args))
+}
+
+func (a sdkLogAdapter) Error(_ context.Context, args ...any) {
+	a.logger.Error("feishu.sdk", "msg", sdkLogText(args))
+}
+
+// sdkFrameType 从 :77 那条 Debug 行里取出 message_type。
+//
+// 注意 :77 传的是 c.fmtLog(...) 返回的整个切片、没有 ... 展开，所以参数是嵌套切片
+// （args[0] 是 []interface{}{"receive message, …"}），这里逐层摊平再认。
+func sdkFrameType(args []any) (string, bool) {
+	for _, s := range flattenLogArgs(args) {
+		rest, ok := strings.CutPrefix(s, sdkFrameLogPrefix)
+		if !ok {
+			continue
+		}
+		frameType, _, _ := strings.Cut(rest, ",")
+		return strings.TrimSpace(frameType), true
+	}
+	return "", false
+}
+
+func sdkLogText(args []any) string {
+	return strings.Join(flattenLogArgs(args), " ")
+}
+
+func flattenLogArgs(args []any) []string {
+	var out []string
+	for _, arg := range args {
+		if nested, ok := arg.([]any); ok {
+			out = append(out, flattenLogArgs(nested)...)
+			continue
+		}
+		out = append(out, fmt.Sprint(arg))
+	}
+	return out
 }
 
 // dispatchRaw 把原始事件归一化后同步交给 sink。

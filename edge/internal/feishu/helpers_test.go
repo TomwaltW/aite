@@ -299,6 +299,8 @@ type platformBuild struct {
 	botOpenID  string
 	appID      string
 	httpClient *http.Client
+	// 与 platformOptions 同名的装配字段：测试直接设，不经环境变量。
+	cardButtons bool
 }
 
 func mustPlatform(t *testing.T, b platformBuild) *Platform {
@@ -325,6 +327,8 @@ func mustPlatform(t *testing.T, b platformBuild) *Platform {
 		clock:   b.clock,
 		logger:  b.logger,
 		budget:  b.budget,
+
+		cardButtons: b.cardButtons,
 	}
 	if b.domain != "" {
 		api, err := newAPIClient(apiOptions{
