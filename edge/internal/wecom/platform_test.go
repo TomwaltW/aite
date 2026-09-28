@@ -91,15 +91,18 @@ func TestDisconnectedEventEntersStandby(t *testing.T) {
 	}
 	sc.close()
 
-	waitFor(t, "进备用", h.p.Standby)
-	if h.p.Connected() {
-		t.Fatalf("备用状态下 Connected() 必须为 false")
-	}
+	waitFor(t, "进备用或重拨", func() bool { return h.p.Standby() || fs.dials() >= 2 })
 	// 注入的 sleep 立即返回：要是走了普通断线分支，退避「瞬间」就过完，远超 30s 封顶，
 	// 新一轮拨号马上就会到。给它充足的真实时间去犯错。
 	time.Sleep(200 * time.Millisecond)
 	if n := fs.dials(); n != 1 {
 		t.Fatalf("备用后又拨了号：共 %d 次（主备会互踢）", n)
+	}
+	if !h.p.Standby() {
+		t.Fatalf("收到 disconnected_event 后 Standby() 要为 true")
+	}
+	if h.p.Connected() {
+		t.Fatalf("备用状态下 Connected() 必须为 false")
 	}
 	if calls := rs.recorded(); len(calls) != 0 {
 		t.Fatalf("备用后不该进退避：%v", calls)
