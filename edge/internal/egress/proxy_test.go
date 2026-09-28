@@ -174,6 +174,7 @@ func TestConnectTunnelToTLSServerMovesBytes(t *testing.T) {
 	if br.Buffered() != 0 {
 		t.Fatalf("200 之后还有 %d 字节缓冲", br.Buffered())
 	}
+	c.SetDeadline(time.Now().Add(10 * time.Second)) // 隧道坏了（比如只通一个方向）就红，不挂到测试超时
 	pool := x509.NewCertPool()
 	pool.AddCert(srv.Certificate())
 	// ServerName 用 httptest 证书签的名，只用于校验，不产生任何对外连接。
