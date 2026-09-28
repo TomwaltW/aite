@@ -63,7 +63,7 @@ core/target/debug/aite evals run evals/p0 --platform fake --model live \
 |---|---|
 | 每步调了什么 | `runs[].steps_detail[].tool_calls` |
 | 参数合不合 `ToolSpec.parameters` | `schema_violations` |
-| 调了协议外的名字吗 | `unknown_tools`（外加 `fallbacks.not_found`） |
+| 调了协议外的名字吗 | `unknown_tools`（外加 `fallbacks.not_found`）；判据是**这次 `chat` 实际提供的工具**，不是冻结的 `all_model_tools()`（CC7） |
 | 几步收敛 | `runs[].steps_to_final`、`hit_max_steps` |
 | 兜底触发了没 | `fallbacks.*`（逐条见下） |
 
@@ -138,6 +138,50 @@ core/target/debug/aite evals demo-fixture history --count 6
 同样参数跑两次字节一致（抖动走 CPython `random.Random` 那一套的梅森旋转，
 所以与旧 `scripts/demo_fixture.py` 的产物 `cmp` 得上）。默认落 `/tmp/aite-demo/`，
 不往 `data/` 写 —— `data/` 是运行时目录，演示前经常要清空。
+
+## 5. evals/p1：P1 新行为的场景
+
+```bash
+core/target/debug/aite evals run evals/p1 --platform fake --model scripted
+```
+
+期望末行 `passed k/k`、退出码 0。`scripts/check.sh` 的 B9 门（CC1 加的）在 `evals/p1` 顶层有
+`*.yaml` 时跑它，没有场景时打 skip、不算红。
+
+**规矩**：
+
+* `evals/p0` 冻结，新行为的场景只放 `evals/p1/<轨号>_*.yaml`（文件名以轨号开头，
+  形如 `CC7_`、`T0c_`、`FF10_`；`name` 必须等于文件名去掉扩展名）。只认顶层，子目录
+  （如 `evals/p1/live/`）不进 B9。
+* **每轨只写自己的 `<轨号>_*.yaml`，改不了别轨的。** 所以断言取最小：只钉本轨要证明的事实，
+  不断言回帖全文、不断言工具目录全集、不断言会被别轨合法翻掉的路由细节 ——
+  别轨的合法改动翻掉你的断言，B9 就在 main 上红、而且没人能修。
+
+### 五个新检查项（CC7）
+
+比较子仍是 `equals` / `min` / `max`（整数）。写错断言 = CheckError，没过 = 「期望…实际…」。
+
+| check | 参数 | 语义 |
+|---|---|---|
+| `evidence_ops` | `kind`（必填）；`key` + `value`（可选，成对）；`equals/min/max` | 全部任务证据链里 `kind` 相符、且 `payload[key]` 的文本等于 `value` 的条数。只给其一 = CheckError |
+| `model_saw` | `contains` / `not_contains`（至少一个）；`role`（可选：system / user / assistant / tool） | 在模型收到的全部 messages 的 `content` 里找子串。读的是脚本化模型记下的原文，**只在 `--model scripted` 下可用**，live 下是 CheckError |
+| `outbound_text_matches` | `pattern`（`regex_mini`）；`equals/min/max` | 发出去的文本里**匹配的条数**（`text` 的 `matches` 只判有没有） |
+| `task_cost_max` | `max`（数字，可为小数）；`which`（all 默认 / last / any） | `Task.cost <= max`，浮点比较。一个任务都没有 = 没过。价格默认 0.0，要配 `config.model.price_*_per_mtok` 与 `model_script[].usage` 才有意义 |
+| `offered_tools` | `contains` / `not_contains`（工具名）；`which`（all 默认 / any / first / last） | 每次 `chat` 实际提供给模型的工具名。模型一次都没被调 = 没过 |
+
+### 三个场景旋钮（CC7）
+
+| 旋钮 | 写法 | 说明 |
+|---|---|---|
+| `platform.capabilities` | `platform: {capabilities: {supports_thread: false}}` | 逐键叠在 `fake_p0()` 上（部分覆盖）。不认识的键、类型错都以 `phase="wiring"` 报一行人话并列出合法键 |
+| `EventSpec.platform` | `events: [{event_id: e1, platform: dingtalk, …}]` | 事件与锚点上的平台名，默认 `fake` |
+| `worker_options` | 顶层 `worker_options: {aigc_label: false}` | 场景级 worker 旋钮（不走 `config:`，契约的 `AiteConfig` 不认新键）。**接上消费方之前只认默认值**：`aigc_label: true` 以 `phase="wiring"` 报「还没有消费方」，不静默无效。接进 `WorkerDeps` 归 T0c |
+
+### `unknown_tools` 的新口径
+
+探针（`ModelProbe`）按**这次 `chat` 实际提供的 `tools`** 判协议外：提供了的就认、参数按提供的那份
+`ToolSpec.parameters` 校验；没提供却调了的才进 `unknown_tools`。网关注册表的外部工具、按 bundle
+裁剪的目录都不会再被误报。今天 worker 提供的仍是内建的那十个，所以 p0 的 `unknown_tools` 逐字不变。
 
 ## 场景文件
 

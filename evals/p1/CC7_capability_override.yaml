@@ -1,0 +1,31 @@
+# CC7 种子 · CT07（平台能力位可在场景里覆盖）
+#
+# 覆盖**确实生效**由 Rust 测试 capabilities_fixture_reaches_platform_port 证明，不靠这个 yaml。
+# 这里只挑 R7 路径上的事实：顶层 @ 没有已存在的会话，不经过 R6（话题续接）直接走 R7，
+# 所以关掉话题能力位后行为不变。
+#
+# 刻意不写「话题内免 @ 追问被续接」：CC2 已把 R6 改成按 supports_thread 路由，那条路径的行为
+# 随能力位翻转、而且还会被后续轨改；无话题平台上 R6 的行为场景归 DD3（DD3_dingtalk_anchor.yaml）。
+name: CC7_capability_override
+title: 关掉话题能力位，顶层 @ 照常建任务并回复
+verifies: 顶层 @ 走 R7、不读 supports_thread（CC2 之后只有 R6 话题续接读它），覆盖 supports_thread=false 后仍建 1 个会话、回 1 条
+spec_ref: "总计划 §2 A 表 CT07；§6.1 CC7"
+
+platform:
+  capabilities:
+    supports_thread: false
+
+events:
+  - event_id: e1
+    text: 今天的站会几点开
+    mentioned: true
+
+model_script:
+  - tool_calls:
+      - name: final
+        arguments: {reply: 站会十点开。}
+
+expect:
+  - {check: platform_calls, method: send_text, equals: 1}
+  - {check: store, sessions_equals: 1, tasks_equals: 1}
+  - {check: task, which: last, status: delivered}

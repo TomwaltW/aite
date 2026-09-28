@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use aite_contracts::{Message, ModelError, ModelPort, ModelTurn, ToolSpec, all_model_tools};
+use aite_contracts::{Message, ModelError, ModelPort, ModelTurn, ToolSpec};
 use aite_testing::recorder::CallLog;
 use aite_testing::{kwargs, validate};
 use async_trait::async_trait;
@@ -109,9 +109,10 @@ pub struct ToolCallObservation {
     pub call_id: String,
     pub name: String,
     pub arguments: Map<String, Value>,
-    /// 名字在不在 all_model_tools() 里
+    /// 名字在不在**这次 chat 实际提供的** `tools` 里（CC7 ⑤；以前比的是冻结的
+    /// `all_model_tools()`，网关注册表 / 按 bundle 裁剪的目录一接上就会误报）
     pub in_protocol: bool,
-    /// 按 ToolSpec.parameters 校验的结果；协议外的工具没有 spec，记 None
+    /// 按这次提供的那份 ToolSpec.parameters 校验的结果；协议外的工具没有 spec，记 None
     pub schema_ok: Option<bool>,
     pub schema_error: Option<String>,
 }
@@ -231,7 +232,6 @@ pub struct ModelProbe {
     pub inner: Arc<dyn ModelPort>,
     pub name: String,
     pub calls: CallLog,
-    specs: BTreeMap<String, ToolSpec>,
     state: Mutex<ProbeState>,
     in_flight: AtomicUsize,
     last_failed: AtomicBool,
@@ -244,10 +244,6 @@ impl ModelProbe {
             inner,
             name,
             calls: CallLog::new(),
-            specs: all_model_tools()
-                .iter()
-                .map(|t| (t.name.clone(), t.clone()))
-                .collect(),
             state: Mutex::new(ProbeState {
                 run: -1,
                 ..ProbeState::default()
@@ -342,10 +338,11 @@ impl ModelProbe {
         state.observations.len() - 1
     }
 
-    fn absorb(&self, idx: usize, turn: &ModelTurn) {
+    /// 判据是**这次**提供的 `offered`：给了就认、参数按给的那份 schema 校验。
+    fn absorb(&self, idx: usize, turn: &ModelTurn, offered: &[ToolSpec]) {
         let mut calls = Vec::new();
         for tc in turn.message.tool_calls.iter().flatten() {
-            let spec = self.specs.get(&tc.name);
+            let spec = offered.iter().find(|t| t.name == tc.name);
             let (schema_ok, schema_error) = match spec {
                 None => (None, None),
                 Some(spec) => {
@@ -438,7 +435,7 @@ impl ModelPort for ModelProbe {
                     state.prev_reply = Some(message_key(&turn.message));
                 }
                 self.last_failed.store(false, Ordering::SeqCst);
-                self.absorb(obs_idx, &turn);
+                self.absorb(obs_idx, &turn, tools);
                 let names: Vec<String> = turn
                     .message
                     .tool_calls

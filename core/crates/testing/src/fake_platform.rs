@@ -66,13 +66,16 @@ struct State {
     card_order: Vec<String>,
     /// 方法名 -> 下一次调用要报的错（报完即清），用来演失败面
     fail_next: BTreeMap<String, String>,
+    /// `with_capabilities` 给的覆盖；None = `fake_p0()`
+    capabilities: Option<PlatformCapabilities>,
     next_id: u64,
     started: bool,
     stopped: bool,
     on_event: Option<EventHandler>,
 }
 
-/// `PlatformPort` 的替身。构造后可用 `with_history / with_documents / with_files` 喂数据。
+/// `PlatformPort` 的替身。构造后可用 `with_history / with_documents / with_files` 喂数据，
+/// `with_capabilities` 换能力位。
 pub struct FakePlatform {
     pub calls: CallLog,
     state: Mutex<State>,
@@ -107,6 +110,13 @@ impl FakePlatform {
 
     pub fn with_files(self, files: BTreeMap<(String, String), Vec<u8>>) -> Self {
         self.state.lock().expect("FakePlatform 锁").files = files;
+        self
+    }
+
+    /// 换掉 `capabilities()` 的返回值（不给就是 `fake_p0()`）。评测场景的
+    /// `platform.capabilities` 走这条；只读、不记账。
+    pub fn with_capabilities(self, capabilities: PlatformCapabilities) -> Self {
+        self.state.lock().expect("FakePlatform 锁").capabilities = Some(capabilities);
         self
     }
 
@@ -253,7 +263,12 @@ impl FakePlatform {
 #[async_trait]
 impl PlatformPort for FakePlatform {
     fn capabilities(&self) -> PlatformCapabilities {
-        fake_p0()
+        self.state
+            .lock()
+            .expect("FakePlatform 锁")
+            .capabilities
+            .clone()
+            .unwrap_or_else(fake_p0)
     }
 
     async fn start(&self, on_event: EventHandler) -> Result<(), PlatformError> {

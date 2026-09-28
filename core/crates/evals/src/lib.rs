@@ -37,4 +37,6 @@ pub use real_stack::{DockerProbe, GatewayProbe, SandboxProbe, docker_preflight};
 pub use runner::{
     PlaneFactory, RunOptions, ScenarioResult, SuiteResult, run_scenario, run_suite, settle,
 };
-pub use scenario::{EventAfter, EventSpec, Scenario, ScenarioError, load_scenario, load_suite};
+pub use scenario::{
+    EventAfter, EventSpec, Scenario, ScenarioError, WorkerOptions, load_scenario, load_suite,
+};
