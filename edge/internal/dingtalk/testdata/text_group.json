@@ -1,0 +1,20 @@
+{
+  "conversationId": "cidGROUP0001==",
+  "conversationType": "2",
+  "conversationTitle": "Q3 项目群",
+  "msgId": "msgGROUPTEXT01",
+  "msgtype": "text",
+  "text": {"content": "  @Aite 把 Q3 销售数据画成趋势图  "},
+  "isInAtList": true,
+  "senderStaffId": "staff_0001",
+  "senderId": "$:LWCP_v1:$fakeSender01",
+  "senderNick": "张三",
+  "senderCorpId": "ding_corp_sender",
+  "chatbotCorpId": "ding_corp_0001",
+  "chatbotUserId": "$:LWCP_v1:$fakeBot",
+  "robotCode": "ding_fake_robot",
+  "isAdmin": false,
+  "createAt": 1700000000123,
+  "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=FAKESESSIONTOKEN01",
+  "sessionWebhookExpiredTime": 1700005400000
+}

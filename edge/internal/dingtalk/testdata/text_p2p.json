@@ -1,0 +1,14 @@
+{
+  "conversationId": "cidP2P0001==",
+  "conversationType": "1",
+  "msgId": "msgP2PTEXT01",
+  "msgtype": "text",
+  "text": {"content": "帮我看看 #ah 进展"},
+  "isInAtList": false,
+  "senderId": "$:LWCP_v1:$fakeSender02",
+  "senderNick": "李四",
+  "senderCorpId": "ding_corp_0001",
+  "robotCode": "ding_fake_robot",
+  "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=FAKESESSIONTOKEN02",
+  "sessionWebhookExpiredTime": 1700005400000
+}

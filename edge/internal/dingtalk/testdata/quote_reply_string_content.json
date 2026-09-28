@@ -1,0 +1,23 @@
+{
+  "conversationId": "cidGROUP0001==",
+  "conversationType": "2",
+  "msgId": "msgQUOTE02",
+  "msgtype": "text",
+  "text": {
+    "content": "@Aite #az8 那个呢",
+    "isReplyMsg": true,
+    "repliedMsg": {
+      "msgId": "msgROOT0002",
+      "senderId": "$:LWCP_v1:$fakeSender01",
+      "msgType": "text",
+      "content": "看 #a10 的结果"
+    }
+  },
+  "isInAtList": true,
+  "senderStaffId": "staff_0001",
+  "senderNick": "张三",
+  "chatbotCorpId": "ding_corp_0001",
+  "createAt": 1700000400000,
+  "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=FAKESESSIONTOKEN06",
+  "sessionWebhookExpiredTime": 1700005400000
+}
