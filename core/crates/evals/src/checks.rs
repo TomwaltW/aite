@@ -29,19 +29,24 @@ pub struct CheckError(pub String);
 type Outcome = Result<Option<String>, CheckError>;
 
 /// 全部 check 名字（`--list` 与错误消息里要列）。
-pub const CHECK_NAMES: [&str; 12] = [
+pub const CHECK_NAMES: [&str; 17] = [
     "cards",
     "distinct_matches",
     "evidence",
+    "evidence_ops",
     "file",
     "gateway_calls",
     "gateway_result",
     "model_calls",
+    "model_saw",
     "model_tools",
+    "offered_tools",
+    "outbound_text_matches",
     "outbound_total",
     "platform_calls",
     "sandbox_calls",
     "store",
+    "task_cost_max",
     // NOTE: `task` 与 `text` 见下面的 EXTRA_CHECK_NAMES（数组长度是编译期常量，
     // 两段拼起来才是全集）
 ];
@@ -138,6 +143,11 @@ pub fn run_check(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
         "store" => store_check(deps, spec),
         "task" => task_check(deps, spec),
         "evidence" => evidence_check(deps, spec),
+        "evidence_ops" => evidence_ops(deps, spec),
+        "model_saw" => model_saw(deps, spec),
+        "outbound_text_matches" => outbound_text_matches(deps, spec),
+        "task_cost_max" => task_cost_max(deps, spec),
+        "offered_tools" => offered_tools(deps, spec),
         other => Err(CheckError(format!(
             "未知的 check={other:?}，可用：{:?}",
             all_check_names()
@@ -572,6 +582,222 @@ fn evidence_check(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
         return Err(CheckError(
             "check=evidence 至少要给 equals / min / max / verified".to_string(),
         ));
+    }
+    Ok(None)
+}
+
+/// 某类证据（可再按 payload 的一个键值筛）写了几条（CC7 ④）。`evidence` 只数总条数，
+/// 这里数「`kind` 相符且 `payload[key]` 的文本等于 `value`」的条数，跨全部任务链。
+fn evidence_ops(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
+    let kind = need_str(spec, "kind")?;
+    let filter = match (spec.get("key"), spec.get("value")) {
+        (None, None) => None,
+        (Some(k), Some(v)) => Some((text_of(k), text_of(v))),
+        (None, Some(_)) => {
+            return Err(CheckError(
+                "check=evidence_ops 给了 value 却没给 key（两者成对）".to_string(),
+            ));
+        }
+        (Some(_), None) => {
+            return Err(CheckError(
+                "check=evidence_ops 给了 key 却没给 value（两者成对）".to_string(),
+            ));
+        }
+    };
+    let count = deps
+        .evidence
+        .chains()
+        .iter()
+        .flat_map(|(_, chain)| chain.iter())
+        .filter(|ev| ev.kind.as_str() == kind)
+        .filter(|ev| match &filter {
+            None => true,
+            Some((key, value)) => ev
+                .payload
+                .as_ref()
+                .and_then(|p| p.get(key))
+                .is_some_and(|got| text_of(got) == *value),
+        })
+        .count();
+    let label = match &filter {
+        None => format!("证据 {kind} 条数"),
+        Some((key, value)) => format!("证据 {kind}[{key}={value}] 条数"),
+    };
+    compare(&label, count as i64, spec)
+}
+
+const ROLES: [&str; 4] = ["system", "user", "assistant", "tool"];
+
+/// 模型收到的 messages 里有没有某段文字（CC7 ④）。读 `FakeModel` 记下的全文，
+/// 所以只在 `--model scripted` 下可用。
+fn model_saw(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
+    if !has_any(spec, &["contains", "not_contains"]) {
+        return Err(CheckError(
+            "check=model_saw 至少要给 contains / not_contains".to_string(),
+        ));
+    }
+    let role = spec.get("role").map(text_of);
+    if let Some(r) = &role
+        && !ROLES.contains(&r.as_str())
+    {
+        return Err(CheckError(format!(
+            "check=model_saw 的 role 只能是 {ROLES:?}，收到 {r:?}"
+        )));
+    }
+    let Some(model) = &deps.scripted_model else {
+        return Err(CheckError(
+            "check=model_saw 只在 --model scripted 下可用（要读脚本化模型记下的 messages 原文）"
+                .to_string(),
+        ));
+    };
+    let seen = model.seen_messages();
+    let pool: Vec<&str> = seen
+        .iter()
+        .flatten()
+        .filter(|m| role.as_deref().is_none_or(|r| m.role.as_str() == r))
+        .map(|m| m.content.as_str())
+        .collect();
+    let scope = match &role {
+        Some(r) => format!("{} 次调用里 role={r} 的 messages", seen.len()),
+        None => format!("{} 次调用里的 messages", seen.len()),
+    };
+    if let Some(want) = spec.get("contains") {
+        let want = text_of(want);
+        if !pool.iter().any(|c| c.contains(&want)) {
+            return Ok(Some(format!(
+                "模型没看到 {want:?}（查了 {scope}，共 {} 条）",
+                pool.len()
+            )));
+        }
+    }
+    if let Some(bad) = spec.get("not_contains") {
+        let bad = text_of(bad);
+        let hits = pool.iter().filter(|c| c.contains(&bad)).count();
+        if hits > 0 {
+            return Ok(Some(format!(
+                "模型不该看到 {bad:?}，但在 {scope} 里出现了 {hits} 次"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// 发出去的文本里**匹配 pattern 的条数**（CC7 ④）。`text` 的 `matches` 只判「有没有」，
+/// 这里数条数，给「标识在同一条回复里」这类断言用。
+fn outbound_text_matches(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
+    let raw = need_str(spec, "pattern")?;
+    let re = Regex::new(&raw)
+        .map_err(|e| CheckError(format!("check=outbound_text_matches 的 pattern：{e}")))?;
+    let texts = deps.platform.texts();
+    let count = texts.iter().filter(|t| re.is_match(t)).count();
+    let result = compare(&format!("匹配 /{raw}/ 的出站文本条数"), count as i64, spec)?;
+    Ok(result.map(|r| {
+        if texts.is_empty() {
+            format!("{r}（一条文本都没发）")
+        } else {
+            format!("{r}（文本：{texts:?}）")
+        }
+    }))
+}
+
+/// 任务花费 `Task.cost <= max`（CC7 ④）。`compare` 只收整数，这里单写浮点比较。
+/// which: all（默认）/ last / any。一个任务都没有 = 没过，不许空转通过。
+fn task_cost_max(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
+    let max = match need(spec, "max")? {
+        Value::Number(n) => n
+            .as_f64()
+            .ok_or_else(|| CheckError(format!("check=task_cost_max 的 max 要是数字，收到 {n}")))?,
+        other => {
+            return Err(CheckError(format!(
+                "check=task_cost_max 的 max 要是数字，收到 {other}"
+            )));
+        }
+    };
+    let which = spec.get("which").map(text_of).unwrap_or("all".to_string());
+    if !["all", "last", "any"].contains(&which.as_str()) {
+        return Err(CheckError(format!(
+            "check=task_cost_max 的 which 只能是 all / last / any，收到 {which:?}"
+        )));
+    }
+    let tasks = deps.store.task_list();
+    if tasks.is_empty() {
+        return Ok(Some(format!("期望任务花费 <= {max}，实际一个任务都没建")));
+    }
+    let pool: Vec<&aite_contracts::Task> = match which.as_str() {
+        "last" => tasks.last().into_iter().collect(),
+        _ => tasks.iter().collect(),
+    };
+    let within = |t: &&aite_contracts::Task| t.cost <= max;
+    let ok = if which == "any" {
+        pool.iter().any(within)
+    } else {
+        pool.iter().all(within)
+    };
+    if !ok {
+        let got: Vec<(String, f64)> = pool.iter().map(|t| (t.task_no.clone(), t.cost)).collect();
+        return Ok(Some(format!(
+            "任务花费（which={which}）期望 <= {max}，实际 {got:?}"
+        )));
+    }
+    Ok(None)
+}
+
+/// 每次 `chat` 实际提供给模型的工具名（CC7 ④，读探针 CallLog 的 `tools`）。
+/// which: all（默认）/ any / first / last。模型一次都没被调 = 没过。
+fn offered_tools(deps: &Deps, spec: &Map<String, Value>) -> Outcome {
+    if !has_any(spec, &["contains", "not_contains"]) {
+        return Err(CheckError(
+            "check=offered_tools 至少要给 contains / not_contains".to_string(),
+        ));
+    }
+    let which = spec.get("which").map(text_of).unwrap_or("all".to_string());
+    if !["all", "any", "first", "last"].contains(&which.as_str()) {
+        return Err(CheckError(format!(
+            "check=offered_tools 的 which 只能是 all / any / first / last，收到 {which:?}"
+        )));
+    }
+    let offered: Vec<Vec<String>> = deps
+        .model
+        .calls
+        .of("chat")
+        .iter()
+        .map(|c| {
+            c.arg("tools")
+                .and_then(Value::as_array)
+                .map(|names| names.iter().map(text_of).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    if offered.is_empty() {
+        return Ok(Some("模型一次都没被调用，没有提供过工具可看".to_string()));
+    }
+    let pool: Vec<&Vec<String>> = match which.as_str() {
+        "first" => offered.first().into_iter().collect(),
+        "last" => offered.last().into_iter().collect(),
+        _ => offered.iter().collect(),
+    };
+    let judge = |pred: &dyn Fn(&Vec<String>) -> bool| {
+        if which == "any" {
+            pool.iter().any(|t| pred(t))
+        } else {
+            pool.iter().all(|t| pred(t))
+        }
+    };
+    if let Some(want) = spec.get("contains") {
+        let want = text_of(want);
+        if !judge(&|t: &Vec<String>| t.contains(&want)) {
+            return Ok(Some(format!(
+                "提供的工具（which={which}）期望含 {want:?}，实际 {pool:?}"
+            )));
+        }
+    }
+    if let Some(bad) = spec.get("not_contains") {
+        let bad = text_of(bad);
+        if !judge(&|t: &Vec<String>| !t.contains(&bad)) {
+            return Ok(Some(format!(
+                "提供的工具（which={which}）不该含 {bad:?}，实际 {pool:?}"
+            )));
+        }
     }
     Ok(None)
 }

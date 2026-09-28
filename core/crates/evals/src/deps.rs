@@ -9,16 +9,17 @@
 //!   是真实现套一层 `real_stack` 的探针，两档下断言读到的是同名同义的东西。
 use std::sync::Arc;
 
-use aite_contracts::{AiteConfig, SandboxPort, ToolGateway, ToolResult};
+use aite_contracts::{AiteConfig, PlatformCapabilities, SandboxPort, ToolGateway, ToolResult};
 use aite_testing::recorder::CallLog;
 use aite_testing::{
     FakeEvidenceWriter, FakeModel, FakePlatform, FakeSandbox, FakeSessionStore, FakeToolGateway,
+    fake_p0,
 };
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
 use crate::protocol_probe::ModelProbe;
-use crate::scenario::Scenario;
+use crate::scenario::{Scenario, WorkerOptions};
 
 /// `--sandbox` 认哪几档。默认 `fake` —— 默认路径逐字节不变是硬约束。
 pub const SANDBOXES: [&str; 2] = ["fake", "docker"];
@@ -94,6 +95,12 @@ pub struct Deps {
     pub gateway: Arc<dyn GatewayFacade>,
     pub store: Arc<FakeSessionStore>,
     pub evidence: Arc<FakeEvidenceWriter>,
+    /// 脚本化模型的句柄（CC7 ③）：`model` 里包的是擦了类型的 `Arc<dyn ModelPort>`，读不回
+    /// `FakeModel`，所以另存一份。它开着 messages 记录，`model_saw` 读这里；
+    /// `--model live`（或别的注入模型）时为 None
+    pub scripted_model: Option<Arc<FakeModel>>,
+    /// 场景级 worker 旋钮（CC7 ⑥）。接上消费方之前只可能是默认值，见 `build_deps`
+    pub worker_options: WorkerOptions,
 }
 
 impl Deps {
@@ -218,15 +225,18 @@ pub fn build_deps(sc: &Scenario, options: &DepsOptions) -> Result<Deps, PhaseErr
     }
 
     let config = config_of(sc)?;
+    let worker_options = worker_options_of(sc)?;
     let files = sc
         .build_files()
         .map_err(|e| PhaseError::new("wiring", format!("platform.files 读不出来：{}", e.0)))?;
-    let platform = Arc::new(
-        FakePlatform::new()
-            .with_history(sc.build_history())
-            .with_documents(sc.build_documents())
-            .with_files(files),
-    );
+    let mut platform = FakePlatform::new()
+        .with_history(sc.build_history())
+        .with_documents(sc.build_documents())
+        .with_files(files);
+    if let Some(caps) = capabilities_of(sc)? {
+        platform = platform.with_capabilities(caps);
+    }
+    let platform = Arc::new(platform);
     let store = Arc::new(FakeSessionStore::new());
 
     let (sandbox, gateway): (Arc<dyn SandboxFacade>, Arc<dyn GatewayFacade>) = if kind == "docker" {
@@ -247,9 +257,14 @@ pub fn build_deps(sc: &Scenario, options: &DepsOptions) -> Result<Deps, PhaseErr
         (sandbox, gateway)
     };
 
-    let inner: Arc<dyn aite_contracts::ModelPort> = match &options.model {
-        Some(m) => m.clone(),
-        None => Arc::new(FakeModel::new(sc.model_script.clone())),
+    let (inner, scripted_model): (Arc<dyn aite_contracts::ModelPort>, _) = match &options.model {
+        Some(m) => (m.clone(), None),
+        None => {
+            // 记录只进 FakeModel 自己的一格，不进 CallLog、不打日志 —— p0 的
+            // stdout / stderr 逐字节不变
+            let fake = Arc::new(FakeModel::new(sc.model_script.clone()).recording_messages());
+            (fake.clone(), Some(fake))
+        }
     };
     Ok(Deps {
         config,
@@ -259,7 +274,59 @@ pub fn build_deps(sc: &Scenario, options: &DepsOptions) -> Result<Deps, PhaseErr
         gateway,
         store,
         evidence: Arc::new(FakeEvidenceWriter::new()),
+        scripted_model,
+        worker_options,
     })
+}
+
+/// `platform.capabilities` 逐键叠在 `fake_p0()` 上（CC7 ②）。空 mapping = None，
+/// 走原样的 `fake_p0()`（p0 的接线一个字都不变）。
+///
+/// 契约的 `PlatformCapabilities` 没有 serde 默认值（所以得先把整份底座序列化出来再叠），
+/// 也没有 `deny_unknown_fields`（所以拼错的键得在这里拦，不然就是静默忽略）。
+pub fn capabilities_of(sc: &Scenario) -> Result<Option<PlatformCapabilities>, PhaseError> {
+    let overrides = &sc.platform.capabilities;
+    if overrides.is_empty() {
+        return Ok(None);
+    }
+    let Value::Object(mut map) = serde_json::to_value(fake_p0())
+        .map_err(|e| PhaseError::new("wiring", format!("fake_p0() 序列化失败：{e}")))?
+    else {
+        return Err(PhaseError::new(
+            "wiring",
+            "fake_p0() 序列化出来不是 mapping",
+        ));
+    };
+    let legal: Vec<String> = map.keys().cloned().collect();
+    let unknown: Vec<&String> = overrides.keys().filter(|k| !map.contains_key(*k)).collect();
+    if !unknown.is_empty() {
+        return Err(PhaseError::new(
+            "wiring",
+            format!("platform.capabilities 里有不认识的键 {unknown:?}，合法键：{legal:?}"),
+        ));
+    }
+    for (k, v) in overrides {
+        map.insert(k.clone(), v.clone());
+    }
+    serde_json::from_value(Value::Object(map))
+        .map(Some)
+        .map_err(|e| {
+            PhaseError::new(
+                "wiring",
+                format!("platform.capabilities 的值类型不对：{e}（合法键：{legal:?}）"),
+            )
+        })
+}
+
+/// 场景级 worker 旋钮（CC7 ⑥）。W1 没有消费方：非默认值当场拒掉，不许静默无效。
+pub fn worker_options_of(sc: &Scenario) -> Result<WorkerOptions, PhaseError> {
+    if sc.worker_options.aigc_label {
+        return Err(PhaseError::new(
+            "wiring",
+            "worker_options.aigc_label 还没有消费方（T0c 在 plane_factory 里把它接进 WorkerDeps 后才生效）",
+        ));
+    }
+    Ok(sc.worker_options.clone())
 }
 
 /// 场景的 `config:` 片段叠在 `platform: fake` 之上（与 Python 的

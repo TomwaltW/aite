@@ -174,6 +174,10 @@ pub struct FakeModel {
     holds: AtomicUsize,
     hold_ticks_yielded: AtomicUsize,
     holds_released: AtomicBool,
+    /// `recording_messages()` 打开后，每次 chat 收到的 messages 全文存这里。
+    /// 刻意**不进 CallLog**：开着与关着时 CallLog 逐条相同（CallLog 的形状有测试钉着）
+    record_messages: bool,
+    seen_messages: Mutex<Vec<Vec<Message>>>,
 }
 
 impl FakeModel {
@@ -187,7 +191,22 @@ impl FakeModel {
             holds: AtomicUsize::new(0),
             hold_ticks_yielded: AtomicUsize::new(0),
             holds_released: AtomicBool::new(false),
+            record_messages: false,
+            seen_messages: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 打开 messages 原文记录（默认关）。评测的 `model_saw` 断言读它：CallLog 只有
+    /// 条数 / 角色 / 工具名，探针的 delta 又截过，做子串断言不够。
+    pub fn recording_messages(mut self) -> Self {
+        self.record_messages = true;
+        self
+    }
+
+    /// 每次 chat 一份 messages 全文（按调用先后；含脚本用尽 / 报错的那几次）。
+    /// 没打开记录时恒为空。
+    pub fn seen_messages(&self) -> Vec<Vec<Message>> {
+        self.seen_messages.lock().expect("FakeModel 锁").clone()
     }
 
     /// 从 JSON / YAML 值造脚本（场景 yaml 的 `model_script:` 走这条）。
@@ -305,6 +324,12 @@ impl ModelPort for FakeModel {
         max_tokens: u32,
         temperature: f32,
     ) -> Result<ModelTurn, ModelError> {
+        if self.record_messages {
+            self.seen_messages
+                .lock()
+                .expect("FakeModel 锁")
+                .push(messages.to_vec());
+        }
         let idx = self.calls.record(
             "chat",
             kwargs! {

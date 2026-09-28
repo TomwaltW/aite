@@ -6,11 +6,12 @@
 //! name: 03_checklist_progress
 //! title: 卡片进度原地更新
 //! verifies: send_card x1、update_card>=3、无第二条卡片
-//! platform:            # FakePlatform 的初始数据：群历史 / 云文档 / 附件
+//! platform:            # FakePlatform 的初始数据：群历史 / 云文档 / 附件 / 能力位覆盖
 //! sandbox:             # FakeSandbox 的 exec 脚本
 //! events:              # 按顺序投给 ControlPlane 的归一化事件
 //! model_script:        # FakeModel 每一步出什么牌
 //! expect:              # 断言清单，语义见 checks.rs
+//! worker_options:      # 场景级 worker 旋钮（接上消费方之前只认默认值）
 //! ```
 //!
 //! 字段默认值给得很足，场景 yaml 里只写关心的那几个 —— 场景文件是给人读的，
@@ -113,6 +114,9 @@ fn default_human() -> String {
 fn default_someone() -> String {
     "ou_someone".to_string()
 }
+fn default_platform() -> String {
+    "fake".to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,6 +179,9 @@ pub struct EventSpec {
     /// 上面那个等待的上限（秒）
     #[serde(default = "default_after_timeout")]
     pub after_timeout_sec: f64,
+    /// 事件与锚点上的平台名（CC7 ①）。默认 `fake`；DD3 起的钉钉 / 企微场景改它
+    #[serde(default = "default_platform")]
+    pub platform: String,
 }
 
 impl EventSpec {
@@ -191,7 +198,7 @@ impl EventSpec {
         NormalizedEvent {
             event_id: self.event_id.clone(),
             kind: self.kind,
-            platform: "fake".to_string(),
+            platform: self.platform.clone(),
             tenant_id: self.tenant_id.clone(),
             workspace_id: self.workspace_id.clone(),
             chat_id: self.chat_id.clone(),
@@ -203,7 +210,7 @@ impl EventSpec {
             raw_text: self.raw_text.clone(),
             mentioned: self.mentioned,
             anchor: Anchor {
-                platform: "fake".to_string(),
+                platform: self.platform.clone(),
                 chat_id: self.chat_id.clone(),
                 message_id: message_id.clone(),
                 thread_id: self.thread_id.clone(),
@@ -312,6 +319,21 @@ pub struct PlatformFixture {
     pub history: Vec<HistorySpec>,
     pub documents: Vec<DocumentSpec>,
     pub files: Vec<FileSpec>,
+    /// 叠在 `fake_p0()` 上的能力位（CC7 ②），只写要改的键，例如 `{supports_thread: false}`。
+    /// 契约结构没有 serde 默认值、也不拒未知键，所以逐键叠加与校验在 `build_deps` 里做
+    pub capabilities: Map<String, Value>,
+}
+
+/// 场景级的 worker 旋钮（CC7 ⑥）。不走 `config:` —— 那条路反序列化成契约的 `AiteConfig`，
+/// 契约结构不认新键。W1 只有一个字段作形状样板，DD2 往里加。
+///
+/// **还没有消费方**：`WorkerDeps` 在 `plane_factory` 里造（app 的 wiring），接线归 T0c。
+/// 在那之前非默认值由 `build_deps` 以 `phase="wiring"` 拒掉，不许静默无效。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerOptions {
+    /// AIGC 标识（与 T0c 的 `WorkerDeps.aigc_label`、契约的 `compliance.aigc_label` 同名）
+    pub aigc_label: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -343,6 +365,9 @@ pub struct Scenario {
     pub events: Vec<EventSpec>,
     #[serde(default)]
     pub expect: Vec<Value>,
+    /// 场景级 worker 旋钮（CC7 ⑥），见 `WorkerOptions`
+    #[serde(default)]
+    pub worker_options: WorkerOptions,
     /// 单个场景的驱动上限（秒）
     #[serde(default = "default_timeout_sec")]
     pub timeout_sec: f64,

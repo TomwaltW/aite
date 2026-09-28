@@ -1,0 +1,33 @@
+# CC7 种子 · CT07 / CT27（两个群的顶层 @ 各起各的会话；event_received 的 route 能数出来）
+#
+# 两步 final 用**一模一样的回复**：T0c 把并发默认翻成 4 以后，脚本步的消费顺序不再确定，
+# 回复相同就与顺序无关。所以这里不用 where: last 之类的跨群顺序断言，也不用 after 串两个群。
+name: CC7_two_chats_independent
+title: 两个群各起一个任务会话
+verifies: 两个 chat_id 的顶层 @ 各建 1 个 Task 会话、各回 1 条；event_received(route=new_task) 恰好 2 条
+spec_ref: "总计划 §2 A 表 CT07、CT27；§6.1 CC7"
+
+events:
+  - event_id: e1
+    chat_id: oc_alpha
+    text: 帮我查一下本周值班表
+    mentioned: true
+  - event_id: e2
+    chat_id: oc_beta
+    text: 帮我查一下本周值班表
+    mentioned: true
+
+model_script:
+  - tool_calls:
+      - name: final
+        arguments: {reply: 本周值班表已整理好。}
+  - tool_calls:
+      - name: final
+        arguments: {reply: 本周值班表已整理好。}
+
+expect:
+  - {check: store, sessions_equals: 2, tasks_equals: 2, task_sessions_equals: 2}
+  - {check: platform_calls, method: send_text, equals: 2}
+  - {check: outbound_text_matches, pattern: "值班表已整理好", equals: 2}
+  - {check: evidence_ops, kind: event_received, key: route, value: new_task, equals: 2}
+  - {check: task, which: all, status: delivered}
