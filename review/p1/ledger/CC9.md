@@ -3,9 +3,10 @@
 - 轨号：CC9（第 1 波，云端）· 派单 `review/paste-CC9.md` · 分支 `claude/cc9-dingtalk-stream`
 - 基线：`8458435`（HEAD 起点 `30b00e5` = 基线 + 总管 D0 文档提交），**情形 A**
 - 可写面内新建：`edge/internal/dingtalk/**`（8 个源文件 + 8 个测试文件 + 6 份夹具）、`docs/p1/dingtalk.md`、本文件。可写面外一个字没动。
-- **推送 / draft PR 没做成**：本容器的仓库**没有 `origin` 远端**（`git remote -v` 为空，`git push -u origin claude/cc9-dingtalk-stream` →
+- **推送 / draft PR**：会话起初的仓库**没有 `origin` 远端**（`git push -u origin claude/cc9-dingtalk-stream` →
   `fatal: 'origin' does not appear to be a git repository`），也**没有 `gh` 命令**（`/bin/bash: line 1: gh: command not found`）。
-  没有去猜远端地址、没有自己加远端。提交都在本地分支上，见文末「交付状态」。
+  总管随后要求推送：经会话把 `TomwaltW/aite` 挂上推送权限后加了 `origin`（`origin/main` = `30b00e5`，与本分支起点一致），推送成功；
+  draft PR 用 GitHub REST API 开（容器里仍没有 `gh`），见文末「交付状态」。
 
 ## 1. 开场自检原文
 
@@ -460,7 +461,7 @@ Go 侧 `^ok` 从 N0 = 7 → 8，多出来的那一行是 `ok  	aite/edge/interna
 
 ## 8. 没做的与原因
 
-- **推送与 draft PR**：见文首 —— 容器里没有 `origin` 远端、没有 `gh`。两个提交在本地分支 `claude/cc9-dingtalk-stream` 上。需要总管/人在有远端的环境里推送并开 draft PR（标题「CC9: 钉钉 Stream 适配器包（不接线）」，描述用本文件）。
+- **推送与 draft PR**：起初做不成（见文首），总管要求后已补上推送与 draft PR。
 - **一切只在假件上验过**：httptest 假 REST、假 Stream 网关、gorilla 假 ws 服务端；没连过真钉钉（云端打不开 open.dingtalk.com，也没有凭证）。
   等 H9 真机核实的点逐条列在 `docs/p1/dingtalk.md` §9（9 条）：`repliedMsg` 真实形状；`repliedMsg.msgId` 能否对上 `processQueryKey` / `outTrackId` / 原 `msgId`；
   群里 `text.content` 带不带 `@名`；失败 ACK 会不会重推、回调 ACK data 形状；卡片回调时延与 data 形状；`PUT /v1.0/card/instances` 能更新多久；
@@ -477,6 +478,7 @@ Go 侧 `^ok` 从 N0 = 7 → 8，多出来的那一行是 `ok  	aite/edge/interna
 | 项 | 状态 |
 |---|---|
 | 本地分支 `claude/cc9-dingtalk-stream` | 提交见下 |
-| 推送 / draft PR | **未完成**（无远端、无 gh） |
+| 推送 | 已推到 `origin/claude/cc9-dingtalk-stream` |
+| draft PR | 标题「CC9: 钉钉 Stream 适配器包（不接线）」，正文 = 本文件 |
 
-`git log --oneline main..claude/cc9-dingtalk-stream` 共三个提交：代码包、`docs/p1/dingtalk.md`、本回执（附带 `stream_test.go` 一行注释修正）。
+`git log --oneline main..claude/cc9-dingtalk-stream` 共四个提交：代码包、`docs/p1/dingtalk.md`、本回执（附带 `stream_test.go` 一行注释修正）、回执交付状态更新（推送 / PR）。
