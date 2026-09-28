@@ -1,0 +1,33 @@
+{
+  "id": "chatcmpl-doubao-1",
+  "object": "chat.completion",
+  "created": 1790000000,
+  "model": "doubao-seed-1-6-250615",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "encrypted_content": "gAAAAABfake-encrypted-reasoning-blob==",
+        "tool_calls": [
+          {
+            "id": "call_doubao_0",
+            "type": "function",
+            "function": {
+              "name": "search",
+              "arguments": "{\"q\":\"北京天气\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1000,
+    "completion_tokens": 30,
+    "total_tokens": 1030,
+    "prompt_tokens_details": {"cached_tokens": 0}
+  }
+}

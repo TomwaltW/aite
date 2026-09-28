@@ -16,6 +16,15 @@
 //! * 重试（§3.3「模型调用异常 / 5xx → worker 重试 2 次」是 worker 的事）
 //! * §3.3 那条兜底 —— 模型既无 tool_call 也无 final 只回文本时，`steps==0` 视为
 //!   `final(reply=文本)`。本层如实返回「content 有值、tool_calls 为空」的 `ModelTurn`。
+//!
+//! CC6 起按厂商微调（[`vendor`]）：Kimi 不发 `temperature`、Qwen 有工具时开
+//! `parallel_tool_calls`；思考字段镜像进 `raw["provider_extra"]` 并按 `tool_call_id`
+//! 进程内回挂（`echo`）。认不出厂商（`Generic`）且响应不带思考字段时，请求体与之前逐字节一致。
+mod echo;
+pub mod vendor;
+
+pub use vendor::{Vendor, infer_vendor};
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -27,7 +36,10 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 
 /// 没配超时的话 HTTP 会一直挂着；worker 的重试计数因此永远走不到。
-const REQUEST_TIMEOUT_SEC: u64 = 120;
+///
+/// 600 秒是 CC6 卡片与总计划 §6.1 给定的值，与 T0 将加的 `ModelConfig.timeout_sec` 默认 600
+/// 一致；思考模型一轮常超过 120 秒（CC6 之前的值）。
+const REQUEST_TIMEOUT_SEC: u64 = 600;
 
 // --------------------------------------------------------------------------
 // 契约 -> OpenAI
@@ -106,10 +118,14 @@ pub fn usage_from_openai(raw: Option<&Value>) -> Usage {
     let Some(raw) = raw.filter(|v| !v.is_null()) else {
         return Usage::default();
     };
+    // 缓存命中三种写法，先出现的为准：OpenAI / 百炼的 `prompt_tokens_details.cached_tokens`
+    // → DeepSeek 的 `prompt_cache_hit_tokens` → Kimi 的顶层 `cached_tokens`
     let cached = raw
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(Value::as_u64)
+        .or_else(|| raw.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .or_else(|| raw.get("cached_tokens").and_then(Value::as_u64))
         .unwrap_or(0);
     Usage {
         input_tokens: raw
@@ -307,6 +323,10 @@ pub struct OpenAiCompatModel {
     api_key: String,
     http: reqwest::Client,
     acct: Mutex<Accounting>,
+    /// 在 `from_config` 里按 `cfg.model` + `cfg.base_url` 算一次；`with_base_url` 不重算。
+    vendor: Vendor,
+    /// 思考字段的进程内回挂缓存（见 `echo.rs`）。
+    echo: Mutex<echo::EchoCache>,
 }
 
 impl OpenAiCompatModel {
@@ -336,7 +356,14 @@ impl OpenAiCompatModel {
             api_key,
             http,
             acct: Mutex::new(Accounting::default()),
+            vendor: infer_vendor(&cfg.model, &cfg.base_url),
+            echo: Mutex::new(echo::EchoCache::default()),
         })
+    }
+
+    /// 推断出的厂商档（`from_config` 时定下，`with_base_url` 不改它）。
+    pub fn vendor(&self) -> Vendor {
+        self.vendor
     }
 
     /// 测试注入：把端点指到本地假服务。只动 base_url，别的都不变。
@@ -365,19 +392,72 @@ impl OpenAiCompatModel {
         max_tokens: u32,
         temperature: f32,
     ) -> Result<Value, ModelError> {
-        let messages =
+        let mut rows =
             to_openai_messages(messages).map_err(|e| ModelError::Upstream(e.to_string()))?;
+        self.reattach_thinking(messages, &mut rows);
         let mut body = Map::new();
         body.insert("model".into(), Value::String(self.cfg.model.clone()));
-        body.insert("messages".into(), Value::Array(messages));
+        body.insert("messages".into(), Value::Array(rows));
         body.insert("max_tokens".into(), json!(max_tokens));
-        body.insert("temperature".into(), json!(clean_f32(temperature)));
+        // Kimi 传 temperature 会 400：整个键不发（不是写 0）
+        if self.vendor != Vendor::Kimi {
+            body.insert("temperature".into(), json!(clean_f32(temperature)));
+        }
         if !tools.is_empty() {
             body.insert("tools".into(), Value::Array(to_openai_tools(tools)));
-            // 永远 auto：要不要调工具归模型判断，worker 只管接住它的出牌
+            // 永远 auto：要不要调工具归模型判断，worker 只管接住它的出牌。
+            // GLM 的 tool_choice 只支持 auto —— 这里对所有厂商都是 auto，正好满足（CC6 钉住）
             body.insert("tool_choice".into(), Value::String("auto".into()));
+            // Qwen 的 parallel_tool_calls 默认关；没有工具时不加
+            if self.vendor == Vendor::Qwen {
+                body.insert("parallel_tool_calls".into(), Value::Bool(true));
+            }
         }
         Ok(Value::Object(body))
+    }
+
+    /// `to_openai_messages` 与输入一一对应：逐个带 `tool_calls` 的 assistant 行按 `call_id`
+    /// 查回挂缓存。缓存是空的（Generic 且响应从不带思考字段）时什么都不动。
+    fn reattach_thinking(&self, messages: &[Message], rows: &mut [Value]) {
+        let Ok(cache) = self.echo.lock() else {
+            // 锁中毒只可能来自别处 panic；这一轮不回挂，不影响请求本身
+            return;
+        };
+        for (m, row) in messages.iter().zip(rows.iter_mut()) {
+            if m.role != Role::Assistant {
+                continue;
+            }
+            let (Some(calls), Some(row)) = (m.tool_calls.as_ref(), row.as_object_mut()) else {
+                continue;
+            };
+            if !calls.is_empty() {
+                cache.reattach(row, calls);
+            }
+        }
+    }
+
+    /// 响应侧：思考字段镜像进 `raw["provider_extra"]`（MiniMax 先剥 `<think>`），
+    /// 带 `tool_calls` 时按 `call_id` 记进回挂缓存。
+    fn capture_thinking(&self, payload: &Value, turn: &mut ModelTurn) {
+        let message = payload
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|c| c.first())
+            .and_then(|c| c.get("message"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let thinking = echo::capture(&message, self.vendor, &mut turn.message.content);
+        if !thinking.extra.is_empty() {
+            turn.raw.insert(
+                "provider_extra".into(),
+                Value::Object(thinking.extra.clone()),
+            );
+        }
+        if let Some(calls) = turn.message.tool_calls.as_ref()
+            && let Ok(mut cache) = self.echo.lock()
+        {
+            cache.remember(calls, &thinking);
+        }
     }
 }
 
@@ -427,6 +507,12 @@ impl ModelPort for OpenAiCompatModel {
             .map_err(|e| ModelError::Upstream(redact(&error_chain(&e), &self.api_key)))?;
 
         let status = response.status();
+        // 响应头要在 text() 消费响应之前取
+        let retry_after_ms = if status.as_u16() == 429 {
+            retry_after_ms(response.headers())
+        } else {
+            None
+        };
         let text = response
             .text()
             .await
@@ -435,12 +521,20 @@ impl ModelPort for OpenAiCompatModel {
         // 响应体也要过 redact：国内网关在 4xx 的调试信息里回显请求头不是没有过的事，
         // 一旦回显 Authorization，这条错误会原样进 worker 的失败日志和群里的回帖路径。
         // 同函数上面两处已经确立了这个约定，这里不能漏（派单纪律 5：任何输出不得出现取值）。
+        //
+        // 形状与 CC3（worker 按状态码分类重试）约定，逐字：
+        //   HTTP {status}: {detail}                    半角冒号 + 一个空格
+        //   HTTP 429: {detail} retry-after-ms={n}      仅 429 且拿得到 n；追加在 clip 之后，永不被截
         if !status.is_success() {
-            return Err(ModelError::Upstream(format!(
-                "HTTP {}：{}",
+            let mut msg = format!(
+                "HTTP {}: {}",
                 status.as_u16(),
                 redact(&clip_chars(&text, 500), &self.api_key)
-            )));
+            );
+            if let Some(ms) = retry_after_ms {
+                msg.push_str(&format!(" retry-after-ms={ms}"));
+            }
+            return Err(ModelError::Upstream(msg));
         }
         let payload: Value = serde_json::from_str(&text).map_err(|e| {
             ModelError::BadResponse(format!(
@@ -450,6 +544,7 @@ impl ModelPort for OpenAiCompatModel {
         })?;
 
         let mut turn = turn_from_response(&payload)?;
+        self.capture_thinking(&payload, &mut turn);
         let cost = cost_of(&turn.usage, &self.cfg);
         let total = match self.acct.lock() {
             Ok(mut acct) => {
@@ -463,6 +558,18 @@ impl ModelPort for OpenAiCompatModel {
         turn.raw.insert("cost_cny".into(), json!(round6(total)));
         Ok(turn)
     }
+}
+
+/// 429 的退避毫秒数：`retry-after-ms`（整数毫秒）优先，其次 `retry-after` 的整数秒 ×1000；
+/// HTTP-date 形式或解析不了 → `None`（交给 worker 自己退避）。
+fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let int = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    };
+    int("retry-after-ms").or_else(|| int("retry-after").and_then(|s| s.checked_mul(1000)))
 }
 
 fn round6(v: f64) -> f64 {
@@ -548,6 +655,12 @@ mod tests {
 
     fn layer(msg: &str, inner: Option<Layer>) -> Layer {
         Layer(msg.to_string(), inner.map(Box::new))
+    }
+
+    /// 超时 600 秒（CC6 卡片 / 总计划 §6.1；T0 `ModelConfig.timeout_sec` 默认同值）。
+    #[test]
+    fn request_timeout_is_600_seconds() {
+        assert_eq!(REQUEST_TIMEOUT_SEC, 600);
     }
 
     /// 链一路走到底 —— 根因在最后一层，而 `Display` 只给得出第一层。

@@ -1,0 +1,33 @@
+{
+  "id": "chatcmpl-qwen-1",
+  "object": "chat.completion",
+  "created": 1790000000,
+  "model": "qwen-plus",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_qwen_0",
+            "index": 0,
+            "type": "function",
+            "function": {
+              "name": "search",
+              "arguments": {"q": "北京天气"}
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 900,
+    "completion_tokens": 20,
+    "total_tokens": 920,
+    "prompt_tokens_details": {"cached_tokens": 512}
+  }
+}
