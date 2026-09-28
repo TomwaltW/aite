@@ -141,7 +141,7 @@ func TestReconnectReopensWithFreshTicket(t *testing.T) {
 	}
 }
 
-// 钉：open 失败时按 1,2,4,8,16,30,30 退避，成功后才 ReconnectCount+1。
+// 钉：退避序列 1,2,4,8,16,30,30…（30 秒封顶）。
 func TestBackoffDelaySequence(t *testing.T) {
 	var got []time.Duration
 	for i := 1; i <= 8; i++ {
