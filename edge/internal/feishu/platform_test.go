@@ -8,14 +8,15 @@ package feishu
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
-	pb "aite/edge/gen/aitepb"
+	"google.golang.org/protobuf/proto"
+
+	"aite/edge/internal/config"
 )
 
 // expectedBackoff 是点名的序列。
@@ -137,34 +138,6 @@ func reconnectHarness(t *testing.T, script []string, stopAfter int) (*recordingS
 		t.Fatal("Start 没有在 5s 内停下")
 	}
 	return sleep, cs, capture
-}
-
-// recordingSink 是 EventSink 的假实现。
-type recordingSink struct {
-	mu     sync.Mutex
-	events []*pb.NormalizedEvent
-	err    error
-	before func()
-}
-
-func (s *recordingSink) HandleEvent(_ context.Context, ev *pb.NormalizedEvent) error {
-	s.mu.Lock()
-	before := s.before
-	err := s.err
-	s.events = append(s.events, ev)
-	s.mu.Unlock()
-	if before != nil {
-		before()
-	}
-	return err
-}
-
-func (s *recordingSink) seen() []*pb.NormalizedEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]*pb.NormalizedEvent, len(s.events))
-	copy(out, s.events)
-	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -331,177 +304,170 @@ func TestConnectedAndReconnectCountTrackTheLoop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 事件投递
+// 从 config.Feishu 装配
 // ---------------------------------------------------------------------------
 
-func dispatchPlatform(t *testing.T, sink *recordingSink, budget time.Duration, clock *fakeClock) (*Platform, *logCapture) {
+// TestConfigCarriesEnvVarNamesNotValues 对应 test_from_config_reads_credentials_by_env_var_name
+// 的前半：契约里配置只存环境变量名不存值。
+//
+// Go 侧的差异：取环境变量这一步在 cmd/aite-edge（R2）里做，feishu.New 收的是
+// 解析好的 Options —— 所以这里分成「config 里是变量名」与「New 按 Options 取值」两条。
+func TestConfigCarriesEnvVarNamesNotValues(t *testing.T) {
+	cfg := config.Default().Feishu
+	for name, got := range map[string]string{
+		"app_id_env":      cfg.AppIDEnv,
+		"app_secret_env":  cfg.AppSecretEnv,
+		"bot_open_id_env": cfg.BotOpenIDEnv,
+	} {
+		if got == "" {
+			t.Errorf("%s 不能为空", name)
+		}
+	}
+	if cfg.AppIDEnv != "FEISHU_APP_ID" || cfg.AppSecretEnv != "FEISHU_APP_SECRET" ||
+		cfg.BotOpenIDEnv != "FEISHU_BOT_OPEN_ID" {
+		t.Errorf("默认变量名跑偏了：%+v", cfg)
+	}
+	if cfg.HistoryWindow != 50 {
+		t.Errorf("history_window = %d，要 50", cfg.HistoryWindow)
+	}
+}
+
+// TestNewReadsCredentialsFromOptions 对应 test_from_config_reads_credentials_by_env_var_name
+// 的后半与 test_from_config_honours_renamed_env_vars。
+func TestNewReadsCredentialsFromOptions(t *testing.T) {
+	// main 按 cfg 里记的变量名从环境变量取值，再传进来（改名也好、原名也好，
+	// 到了 feishu 这一层只剩取好的值）。
+	env := map[string]string{
+		"MY_APP_ID":     "cli_from_env",
+		"MY_APP_SECRET": "secret_from_env",
+		"MY_BOT":        "ou_bot_from_env",
+	}
+	cfg := config.Feishu{
+		AppIDEnv: "MY_APP_ID", AppSecretEnv: "MY_APP_SECRET",
+		BotOpenIDEnv: "MY_BOT", BotName: "Aite", HistoryWindow: 30,
+	}
+	p, err := New(cfg, Options{
+		AppID:     env[cfg.AppIDEnv],
+		AppSecret: env[cfg.AppSecretEnv],
+		BotOpenID: env[cfg.BotOpenIDEnv],
+		TenantID:  "default",
+	}, nil)
+	if err != nil {
+		t.Fatalf("New 失败：%v", err)
+	}
+	if p.opts.AppID != "cli_from_env" {
+		t.Errorf("app_id = %q", p.opts.AppID)
+	}
+	if p.opts.BotOpenID != "ou_bot_from_env" {
+		t.Errorf("bot_open_id = %q", p.opts.BotOpenID)
+	}
+	if p.api.appSecret != "secret_from_env" {
+		t.Errorf("app_secret = %q", p.api.appSecret)
+	}
+	if p.historyWindow != cfg.HistoryWindow {
+		t.Errorf("history_window = %d，要 %d", p.historyWindow, cfg.HistoryWindow)
+	}
+}
+
+// TestNewWithMissingEnvDoesNotExplode 对应 test_from_config_with_missing_env_does_not_explode。
+//
+// 启动期缺变量不该在装配时炸；真正打不通是调 API 时的事。
+func TestNewWithMissingEnvDoesNotExplode(t *testing.T) {
+	// CC8 起 New() 读 AITE_FEISHU_*：显式清空，别让外面 shell 导出的值（比如做 H8 的终端）改了结论。
+	clearFeishuEnv(t)
+	p, err := New(config.Default().Feishu, Options{}, nil)
+	if err != nil {
+		t.Fatalf("缺变量不该在装配时炸：%v", err)
+	}
+	if p.opts.AppID != "" {
+		t.Errorf("app_id = %q，要空", p.opts.AppID)
+	}
+	if p.opts.BotOpenID != "" {
+		t.Errorf("bot_open_id = %q，要空", p.opts.BotOpenID)
+	}
+	// 缺 tenant_id / domain 时用默认值填上。
+	if p.opts.TenantID != "default" {
+		t.Errorf("tenant_id = %q，要 default", p.opts.TenantID)
+	}
+	if p.opts.Domain != DefaultDomain {
+		t.Errorf("domain = %q，要 %s", p.opts.Domain, DefaultDomain)
+	}
+}
+
+// clearFeishuEnv 把本包读的三个环境变量显式清空（t.Setenv 结束时还原）。
+func clearFeishuEnv(t *testing.T) {
 	t.Helper()
-	capture, logger := newLogCapture()
-	b := platformBuild{sink: sink, logger: logger, budget: budget, appID: testAppID}
-	if clock != nil {
-		b.clock = clock.Now
-		b.sleep = clock.Sleep
-	}
-	return mustPlatform(t, b), capture
-}
-
-// TestRawEventsAreNormalizedAndDelivered
-// 对应 test_raw_events_are_normalized_and_delivered。
-func TestRawEventsAreNormalizedAndDelivered(t *testing.T) {
-	sink := &recordingSink{}
-	p, _ := dispatchPlatform(t, sink, 0, nil)
-
-	if err := p.dispatchRaw(context.Background(),
-		loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
-		t.Fatalf("dispatchRaw 失败：%v", err)
-	}
-
-	seen := sink.seen()
-	if len(seen) != 1 {
-		t.Fatalf("事件数 = %d，要 1", len(seen))
-	}
-	if got := seen[0].GetText(); got != "把这个季度的销售数据画成趋势图" {
-		t.Errorf("text = %q", got)
-	}
-	if !seen[0].GetMentioned() {
-		t.Error("mentioned 要是 true")
-	}
-	if got := seen[0].GetWorkspaceId(); got != testAppID {
-		t.Errorf("workspace_id = %q", got)
+	for _, name := range []string{EnvCardButtons, EnvPassiveListen, EnvAPIBase} {
+		t.Setenv(name, "")
 	}
 }
 
-// TestAdapterDoesNotDeduplicateReplayedEvents
-// 对应 test_adapter_does_not_deduplicate_replayed_events。
-//
-// 重连后平台重推的重复事件由 core 靠 event_id 去重，adapter 不管。
-func TestAdapterDoesNotDeduplicateReplayedEvents(t *testing.T) {
-	sink := &recordingSink{}
-	p, _ := dispatchPlatform(t, sink, 0, nil)
-
-	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
-	for i := 0; i < 2; i++ {
-		if err := p.dispatchRaw(context.Background(), raw); err != nil {
-			t.Fatalf("第 %d 次 dispatchRaw 失败：%v", i+1, err)
+// TestEnvFlagsAreReadInsideThePackage 钉住三个开关都在 New() 里读（main.go 一个字不动）。
+func TestEnvFlagsAreReadInsideThePackage(t *testing.T) {
+	t.Run("全不设", func(t *testing.T) {
+		clearFeishuEnv(t)
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-
-	seen := sink.seen()
-	if len(seen) != 2 {
-		t.Fatalf("事件数 = %d，要 2（adapter 私自去重的话 core 的 events.duplicate 就永远是 0）", len(seen))
-	}
-	if seen[0].GetEventId() != seen[1].GetEventId() {
-		t.Error("两条的 event_id 该相同")
-	}
-}
-
-// TestUnsubscribedEventIsDroppedWithoutCallingHandler
-// 对应 test_unsubscribed_event_is_dropped_without_calling_handler。
-func TestUnsubscribedEventIsDroppedWithoutCallingHandler(t *testing.T) {
-	sink := &recordingSink{}
-	p, capture := dispatchPlatform(t, sink, 0, nil)
-
-	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
-	asMap(raw["header"])["event_type"] = "im.chat.member.user.added_v1"
-	if err := p.dispatchRaw(context.Background(), raw); err != nil {
-		t.Fatalf("没订阅的事件不该报错：%v", err)
-	}
-
-	if got := sink.seen(); len(got) != 0 {
-		t.Errorf("没订阅的事件不该进 sink，得到 %d 条", len(got))
-	}
-	if !capture.has("feishu.event_ignored") {
-		t.Error("该打一条 feishu.event_ignored")
-	}
-}
-
-// TestHandlerFailureDoesNotKillTheConnection
-// 对应 test_handler_exception_does_not_kill_the_connection。
-//
-// 与 Python 的一处有意差异：Python 把回调异常吞掉只打日志；Go 版把 error 返回给
-// SDK 让平台重推（spec §2.1）。「不带走长连接」这条不变 —— Start 的循环照转。
-func TestHandlerFailureDoesNotKillTheConnection(t *testing.T) {
-	boom := errors.New("上游炸了")
-	sink := &recordingSink{err: boom}
-	p, capture := dispatchPlatform(t, sink, 0, nil)
-
-	err := p.dispatchRaw(context.Background(), loadFixture(t, "message_at_bot_toplevel", ".json"))
-	if !errors.Is(err, boom) {
-		t.Errorf("HandleEvent 失败要一路返回给 SDK（让平台重推），得到 %v", err)
-	}
-
-	records := capture.find("feishu.on_event_failed")
-	if len(records) != 1 {
-		t.Fatalf("该打一条 feishu.on_event_failed，得到 %d 条", len(records))
-	}
-	if records[0].Level != slog.LevelError {
-		t.Errorf("feishu.on_event_failed 的级别 = %v，要 ERROR", records[0].Level)
-	}
-	if v, ok := attr(records[0], "event_id"); !ok || v.String() != "evt_at_bot_toplevel_0001" {
-		t.Errorf("event_id = %v", v.Any())
-	}
-
-	// 长连接不受影响：投递一路失败，Start 的重连循环照转到 ctx 取消为止。
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sleep := &recordingSleep{stopAfter: 3, cancel: cancel}
-	cs := &connectionScript{script: []string{"ok", "ok", "ok"}}
-	_, logger := newLogCapture()
-	loopP := mustPlatform(t, platformBuild{
-		factory: cs.factory, sleep: sleep.Sleep, logger: logger, sink: sink, appID: testAppID,
+		if !proto.Equal(p.Capabilities(), FeishuP0()) {
+			t.Errorf("能力 = %v，要 FeishuP0()", p.Capabilities())
+		}
+		if p.opts.Domain != DefaultDomain || p.api.domain != DefaultDomain {
+			t.Errorf("domain = %q / api %q，要 %s", p.opts.Domain, p.api.domain, DefaultDomain)
+		}
+		if p.cardButtons {
+			t.Error("卡片按钮默认要关")
+		}
 	})
-	raw := loadFixture(t, "message_at_bot_toplevel", ".json")
-	sleep.onSleep = func(int) {
-		for _, c := range cs.all() {
-			if c.onRaw != nil {
-				_ = c.onRaw(context.Background(), raw)
-			}
+
+	t.Run(EnvPassiveListen, func(t *testing.T) {
+		clearFeishuEnv(t)
+		t.Setenv(EnvPassiveListen, "1")
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if err := loopP.Start(ctx); err != nil {
-		t.Fatalf("投递一直失败也不该让 Start 抛出去：%v", err)
-	}
-	if len(sink.seen()) < 3 {
-		t.Errorf("投递该一直在发生，得到 %d 条", len(sink.seen()))
-	}
-}
+		if !p.Capabilities().GetSupportsPassiveListen() {
+			t.Error(`AITE_FEISHU_PASSIVE_LISTEN="1" 该打开 supports_passive_listen`)
+		}
+		if FeishuP0().GetSupportsPassiveListen() {
+			t.Error("改的该是实例，不是契约常量")
+		}
+		t.Setenv(EnvPassiveListen, "true")
+		p, _ = New(config.Default().Feishu, Options{}, nil)
+		if p.Capabilities().GetSupportsPassiveListen() {
+			t.Error(`只有恰好 "1" 才开`)
+		}
+	})
 
-// TestSlowHandlerIsReported 对应 test_slow_handler_is_reported。
-//
-// HandleEvent 必须 1s 内返回。超了不拦（拦了会丢事件），但要吼一声。
-func TestSlowHandlerIsReported(t *testing.T) {
-	clock := newFakeClock()
-	sink := &recordingSink{before: func() { clock.Advance(2 * time.Second) }}
-	p, capture := dispatchPlatform(t, sink, time.Second, clock)
+	t.Run(EnvAPIBase, func(t *testing.T) {
+		clearFeishuEnv(t)
+		const base = "https://open.larksuite.test"
+		t.Setenv(EnvAPIBase, base)
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.opts.Domain != base || p.api.domain != base {
+			t.Errorf("domain = %q / api %q，要 %s（REST 与长连接同一个域名）", p.opts.Domain, p.api.domain, base)
+		}
+		// 显式的 Options.Domain 优先。
+		p, _ = New(config.Default().Feishu, Options{Domain: "https://explicit.test"}, nil)
+		if p.opts.Domain != "https://explicit.test" {
+			t.Errorf("显式 Domain 该优先，得到 %q", p.opts.Domain)
+		}
+	})
 
-	if err := p.dispatchRaw(context.Background(),
-		loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
-		t.Fatalf("慢不等于失败：%v", err)
-	}
-
-	records := capture.find("feishu.on_event_slow")
-	if len(records) != 1 {
-		t.Fatalf("该打一条 feishu.on_event_slow，得到 %d 条", len(records))
-	}
-	if records[0].Level != slog.LevelWarn {
-		t.Errorf("feishu.on_event_slow 的级别 = %v，要 WARN", records[0].Level)
-	}
-	if v, ok := attr(records[0], "elapsed_sec"); !ok || v.Float64() != 2 {
-		t.Errorf("elapsed_sec = %v，要 2", v.Any())
-	}
-	if v, ok := attr(records[0], "budget_sec"); !ok || v.Float64() != 1 {
-		t.Errorf("budget_sec = %v，要 1", v.Any())
-	}
-
-	// 没超时就不打。
-	clock2 := newFakeClock()
-	sink2 := &recordingSink{}
-	p2, capture2 := dispatchPlatform(t, sink2, time.Second, clock2)
-	if err := p2.dispatchRaw(context.Background(),
-		loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
-		t.Fatal(err)
-	}
-	if capture2.has("feishu.on_event_slow") {
-		t.Error("没超预算不该打 feishu.on_event_slow")
-	}
+	t.Run(EnvCardButtons, func(t *testing.T) {
+		clearFeishuEnv(t)
+		t.Setenv(EnvCardButtons, "1")
+		p, err := New(config.Default().Feishu, Options{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.cardButtons {
+			t.Error(`AITE_FEISHU_CARD_BUTTONS="1" 该打开按钮`)
+		}
+	})
 }

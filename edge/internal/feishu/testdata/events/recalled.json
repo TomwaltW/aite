@@ -1,0 +1,16 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt_recalled_0101",
+    "create_time": "1788916080000",
+    "event_type": "im.message.recalled_v1",
+    "tenant_key": "tk_p0_demo",
+    "app_id": "cli_a1b2c3d4e5f60123"
+  },
+  "event": {
+    "message_id": "om_toplevel_0001",
+    "chat_id": "oc_chat_p0_demo_0001",
+    "recall_time": "1788916079000",
+    "recall_type": "message_owner"
+  }
+}

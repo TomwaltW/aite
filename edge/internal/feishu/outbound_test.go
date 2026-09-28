@@ -553,3 +553,130 @@ func TestUploadsDoNotConsumeTheOutboundQuota(t *testing.T) {
 		t.Errorf("上传不该占出站额度，slept = %v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CC8：每群 5 QPS + 发送 uuid
+// ---------------------------------------------------------------------------
+
+func pacedPlatform(t *testing.T, f *fakeFeishu, ratePerMin int) (*Platform, *fakeClock) {
+	t.Helper()
+	clock := newFakeClock()
+	_, logger := newLogCapture()
+	p := mustPlatform(t, platformBuild{
+		domain: f.URL, ratePerMin: ratePerMin,
+		clock: clock.Now, sleep: clock.Sleep, logger: logger,
+	})
+	return p, clock
+}
+
+func sendTo(t *testing.T, p *Platform, chatID string) {
+	t.Helper()
+	if _, err := p.SendText(context.Background(), &pb.OutboundText{ChatId: chatID, Text: "hi"}); err != nil {
+		t.Fatalf("SendText(%s) 失败：%v", chatID, err)
+	}
+}
+
+// TestPerChatPacing 钉住每群一个桶（300/分、容量 5），先过群桶再过全局桶。
+func TestPerChatPacing(t *testing.T) {
+	const chatB = "oc_chat_other_0002"
+
+	t.Run("同一群第 6 条等 200ms，别的群不受影响", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodPost, PathMessages, okSend("om_sent"))
+		p, clock := pacedPlatform(t, f, 6000) // 全局额度调大，只看群桶
+
+		for i := 0; i < 5; i++ {
+			sendTo(t, p, testChatID)
+		}
+		if got := clock.Slept(); len(got) != 0 {
+			t.Fatalf("前 5 条不该等，slept = %v", got)
+		}
+		sendTo(t, p, chatB) // 穿插另一群：它有自己的满桶
+		if got := clock.Slept(); len(got) != 0 {
+			t.Fatalf("另一个群不该被本群的桶卡住，slept = %v", got)
+		}
+		sendTo(t, p, testChatID)
+		if got := clock.Slept(); len(got) != 1 || got[0] != 200*time.Millisecond {
+			t.Errorf("同一群第 6 条 slept = %v，要 [200ms]", got)
+		}
+	})
+
+	t.Run("全局额度调小时全局桶照样卡", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodPost, PathMessages, okSend("om_sent"))
+		p, clock := pacedPlatform(t, f, 2)
+
+		for _, chat := range []string{testChatID, chatB, "oc_chat_third_0003"} {
+			sendTo(t, p, chat)
+		}
+		if got := clock.Slept(); len(got) != 1 || got[0] != 30*time.Second {
+			t.Errorf("slept = %v，要 [30s]（三个不同的群，第三条由全局桶卡）", got)
+		}
+	})
+
+	t.Run("UpdateCard 过它所在群的桶", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodPost, pathReply, okSend(testCardMsgID))
+		f.on(http.MethodPatch, pathPatchCard, okEmpty())
+		p, clock := pacedPlatform(t, f, 6000)
+
+		if _, err := p.SendCard(context.Background(), testChatID, strptr(testRootMsgID), sampleCard()); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 4; i++ {
+			if err := p.UpdateCard(context.Background(), testCardMsgID, sampleCard()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := clock.Slept(); len(got) != 0 {
+			t.Fatalf("SendCard + 4 次 UpdateCard = 5 次，不该等，slept = %v", got)
+		}
+		if err := p.UpdateCard(context.Background(), testCardMsgID, sampleCard()); err != nil {
+			t.Fatal(err)
+		}
+		if got := clock.Slept(); len(got) != 1 || got[0] != 200*time.Millisecond {
+			t.Errorf("同一张卡第 6 次出站 slept = %v，要 [200ms]", got)
+		}
+	})
+}
+
+// TestSendCarriesAStableUUIDAcrossRetries：先 500 后 200 → 两次请求同一个非空 uuid；
+// 两次独立发送 uuid 不同；回复接口也带；PATCH 不带。
+func TestSendCarriesAStableUUIDAcrossRetries(t *testing.T) {
+	f := newFakeFeishu(t)
+	f.mockToken()
+	send := f.on(http.MethodPost, PathMessages,
+		jsonResponse(500, map[string]any{"code": 500, "msg": "boom"}),
+		okSend("om_sent_0001"),
+	)
+	reply := f.on(http.MethodPost, pathReply, okSend(testCardMsgID))
+	p, _ := outboundPlatform(t, f)
+
+	sendTo(t, p, testChatID)
+	if send.count() != 2 {
+		t.Fatalf("先 500 后 200 该请求 2 次，得到 %d 次", send.count())
+	}
+	first := mapStr(send.at(t, 0).jsonBodyOf(t), "uuid")
+	retry := mapStr(send.at(t, 1).jsonBodyOf(t), "uuid")
+	if first == "" || len(first) > 50 {
+		t.Fatalf("uuid = %q，要非空且 ≤50 字符", first)
+	}
+	if retry != first {
+		t.Errorf("重试换了 uuid：%q → %q（平台就去不了重）", first, retry)
+	}
+
+	sendTo(t, p, testChatID)
+	if again := mapStr(send.last(t).jsonBodyOf(t), "uuid"); again == "" || again == first {
+		t.Errorf("两次独立发送的 uuid 该不同，得到 %q 与 %q", first, again)
+	}
+
+	if _, err := p.SendCard(context.Background(), testChatID, strptr(testRootMsgID), sampleCard()); err != nil {
+		t.Fatal(err)
+	}
+	if got := mapStr(reply.last(t).jsonBodyOf(t), "uuid"); got == "" {
+		t.Error("回复接口的请求体也要带 uuid")
+	}
+}

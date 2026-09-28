@@ -10,9 +10,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
+
+	pb "aite/edge/gen/aitepb"
 )
 
 // T0 是 2026-09-09T01:02:00Z；每条 +1 分钟。
@@ -193,9 +197,14 @@ func TestHistoryCarriesSenderNameAndThreadID(t *testing.T) {
 //
 // 飞书的 container_id_type=thread 收的是 omt_ 话题 id，而锚点里存的是话题 root
 // 消息 id，两者不是一个 id 空间，所以在客户端筛。
+//
+// CC8 起带 threadID 先查 root 的 thread_id、走 thread 容器；这条注册的 root 不带
+// thread_id，**有意地**钉住回落 ①（非话题消息 → 整群拉取、客户端筛），期望不变。
 func TestHistoryCanBeNarrowedToOneThread(t *testing.T) {
 	f := newFakeFeishu(t)
 	f.mockToken()
+	f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(
+		historyItem(testRootMsgID, "话题根消息", historyT0)))
 	f.on(http.MethodGet, PathMessages, historyPage([]map[string]any{
 		historyItem("om_other", "别的话题", historyT0+120_000),
 		historyItem("om_in", "本话题里的", historyT0+60_000, withRootID(testRootMsgID)),
@@ -214,6 +223,137 @@ func TestHistoryCanBeNarrowedToOneThread(t *testing.T) {
 	if fmt.Sprint(ids) != fmt.Sprintf("[%s om_in]", testRootMsgID) {
 		t.Errorf("message_id = %v", ids)
 	}
+}
+
+// messageGet 是「获取指定消息的内容」的响应：data.items 是数组（SDK GetMessageRespData）。
+func messageGet(item map[string]any) func(http.ResponseWriter) {
+	return jsonResponse(200, map[string]any{"code": 0, "data": map[string]any{"items": []any{item}}})
+}
+
+func withThreadID(id string) historyOpt {
+	return func(m map[string]any) { m["thread_id"] = id }
+}
+
+func historyIDs(messages []*pb.HistoryMessage) string {
+	var ids []string
+	for _, m := range messages {
+		ids = append(ids, m.GetMessageId())
+	}
+	return fmt.Sprint(ids)
+}
+
+// TestThreadHistoryUsesThreadContainer 钉住话题历史走 thread 容器，以及两条回落。
+func TestThreadHistoryUsesThreadContainer(t *testing.T) {
+	const omt = "omt_x"
+	rootItem := historyItem(testRootMsgID, "话题根消息", historyT0, withThreadID(omt))
+	// 整群那一页：回落时客户端筛出 [root om_in]。
+	chatPage := historyPage([]map[string]any{
+		historyItem("om_other", "别的话题", historyT0+120_000),
+		historyItem("om_in", "本话题里的", historyT0+60_000, withRootID(testRootMsgID)),
+		historyItem(testRootMsgID, "话题根消息", historyT0),
+	}, false, "")
+	permissionDenied := jsonResponse(400, map[string]any{"code": 230002, "msg": "bot not in chat"})
+
+	read := func(t *testing.T, f *fakeFeishu) ([]*pb.HistoryMessage, error) {
+		t.Helper()
+		return readPlatform(t, f).ReadHistory(context.Background(), testChatID, 10, strptr(testRootMsgID))
+	}
+	containers := func(r *route) []string {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		var out []string
+		for _, c := range r.calls {
+			out = append(out, c.query.Get("container_id_type")+":"+c.query.Get("container_id"))
+		}
+		return out
+	}
+
+	t.Run("thread 容器", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(rootItem))
+		// thread 列表里没有 root（倒序）：结果要把 root 补上、按时间归位。
+		list := f.on(http.MethodGet, PathMessages, historyPage([]map[string]any{
+			historyItem("om_r2", "第二条回复", historyT0+120_000, withRootID(testRootMsgID)),
+			historyItem("om_r1", "第一条回复", historyT0+60_000, withRootID(testRootMsgID)),
+		}, false, ""))
+
+		messages, err := read(t, f)
+		if err != nil {
+			t.Fatalf("ReadHistory 失败：%v", err)
+		}
+		if got := fmt.Sprint(containers(list)); got != "[thread:omt_x]" {
+			t.Errorf("列表请求 = %s，要恰好一次 thread:omt_x、没有 chat 容器请求", got)
+		}
+		q := list.last(t).query
+		for key, want := range map[string]string{
+			"sort_type": "ByCreateTimeDesc", "with_sender_name": "true", "page_size": "10",
+		} {
+			if got := q.Get(key); got != want {
+				t.Errorf("query[%s] = %q，要 %q（预算不再 ×4）", key, got, want)
+			}
+		}
+		if got := historyIDs(messages); got != fmt.Sprintf("[%s om_r1 om_r2]", testRootMsgID) {
+			t.Errorf("message_id = %s，要含 root 且正序", got)
+		}
+	})
+
+	t.Run("thread 列表权限错误 → 回落整群筛法", func(t *testing.T) {
+		for name, denied := range map[string]func(http.ResponseWriter){
+			"业务码 230002": permissionDenied,
+			"HTTP 403":   jsonResponse(403, map[string]any{"code": 99999, "msg": "forbidden"}),
+		} {
+			t.Run(name, func(t *testing.T) {
+				f := newFakeFeishu(t)
+				f.mockToken()
+				f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(rootItem))
+				list := f.on(http.MethodGet, PathMessages, denied, chatPage)
+
+				messages, err := read(t, f)
+				if err != nil {
+					t.Fatalf("权限错误该回落而不是上抛：%v", err)
+				}
+				want := fmt.Sprintf("[thread:omt_x chat:%s]", testChatID)
+				if got := fmt.Sprint(containers(list)); got != want {
+					t.Errorf("列表请求 = %s，要 %s（恰好一次 chat 容器请求）", got, want)
+				}
+				if got := historyIDs(messages); got != fmt.Sprintf("[%s om_in]", testRootMsgID) {
+					t.Errorf("message_id = %s，要与整群筛法一致", got)
+				}
+			})
+		}
+	})
+
+	t.Run("非权限错误上抛；root 查询失败回落", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		f.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID), messageGet(rootItem))
+		list := f.on(http.MethodGet, PathMessages,
+			jsonResponse(400, map[string]any{"code": 230001, "msg": "invalid params"}))
+		if _, err := read(t, f); err == nil {
+			t.Fatal("thread 列表回非权限错误该上抛")
+		}
+		if got := fmt.Sprint(containers(list)); got != "[thread:omt_x]" {
+			t.Errorf("非权限错误不该回落，列表请求 = %s", got)
+		}
+
+		// root 查询失败（生产里 root 被撤回就是这样）→ 回落、不上抛。
+		f2 := newFakeFeishu(t)
+		f2.mockToken()
+		f2.on(http.MethodGet, fmt.Sprintf(PathMessage, testRootMsgID),
+			jsonResponse(400, map[string]any{"code": 230011, "msg": "message recalled"}))
+		list2 := f2.on(http.MethodGet, PathMessages, chatPage)
+		messages, err := read(t, f2)
+		if err != nil {
+			t.Fatalf("root 查询失败该回落：%v", err)
+		}
+		if got := fmt.Sprint(containers(list2)); got != fmt.Sprintf("[chat:%s]", testChatID) {
+			t.Errorf("列表请求 = %s", got)
+		}
+		if got := historyIDs(messages); got != fmt.Sprintf("[%s om_in]", testRootMsgID) {
+			t.Errorf("message_id = %s", got)
+		}
+	})
 }
 
 // TestHistoryPaginatesUntilTheLimitIsFilled
@@ -442,4 +582,135 @@ func TestDownloadImageUsesTypeImage(t *testing.T) {
 	if got := route.last(t).query.Get("type"); got != "image" {
 		t.Errorf("type = %q，要 image", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 发言人姓名（CC8）
+// ---------------------------------------------------------------------------
+
+const zhangSanOpenID = "ou_zhang_san_00000000000000000001"
+
+var pathZhangSan = fmt.Sprintf(PathContactUser, zhangSanOpenID)
+
+func senderNamePlatform(t *testing.T, f *fakeFeishu, clock *fakeClock) (*Platform, *recordingSink, *logCapture) {
+	t.Helper()
+	sink := &recordingSink{}
+	capture, logger := newLogCapture()
+	b := platformBuild{domain: f.URL, appID: testAppID, sink: sink, logger: logger, senderNames: true}
+	if clock != nil {
+		b.clock, b.sleep = clock.Now, clock.Sleep
+	}
+	return mustPlatform(t, b), sink, capture
+}
+
+// TestSenderNameFromContactAPIIsCached：同一发送人两条事件 → 通讯录请求 1 次、两条都有名字。
+func TestSenderNameFromContactAPIIsCached(t *testing.T) {
+	f := newFakeFeishu(t)
+	f.mockToken()
+	users := f.onJSON(http.MethodGet, pathZhangSan, 200, map[string]any{
+		"code": 0, "data": map[string]any{"user": map[string]any{"open_id": zhangSanOpenID, "name": "张三"}},
+	})
+	p, sink, _ := senderNamePlatform(t, f, newFakeClock())
+
+	for _, fixture := range []string{"message_at_bot_toplevel", "message_in_thread_no_at"} {
+		if err := p.dispatchRaw(context.Background(), loadFixture(t, fixture, ".json")); err != nil {
+			t.Fatalf("dispatchRaw 失败：%v", err)
+		}
+	}
+	if users.count() != 1 {
+		t.Errorf("通讯录请求 %d 次，要 1（第二条该命中缓存）", users.count())
+	}
+	if got := users.last(t).query.Get("user_id_type"); got != "open_id" {
+		t.Errorf("user_id_type = %q，要 open_id", got)
+	}
+	seen := sink.seen()
+	if len(seen) != 2 {
+		t.Fatalf("sink 收到 %d 条，要 2", len(seen))
+	}
+	for i, ev := range seen {
+		if ev.SenderName == nil || ev.GetSenderName() != "张三" {
+			t.Errorf("第 %d 条 sender_name = %v，要 张三", i+1, ev.SenderName)
+		}
+	}
+
+	// 机器人发的消息不查（非 HUMAN）。
+	if err := p.dispatchRaw(context.Background(), loadFixture(t, "message_from_bot", ".json")); err != nil {
+		t.Fatal(err)
+	}
+	if users.count() != 1 {
+		t.Errorf("机器人消息不该查通讯录，请求 %d 次", users.count())
+	}
+}
+
+// TestSenderNameDegradesWithin300ms：慢路由 → 事件照送、名字 nil、耗时 < 1s；
+// 权限错误 → nil 且熔断期内第二条不再请求。
+func TestSenderNameDegradesWithin300ms(t *testing.T) {
+	t.Run("慢", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		slow := f.onReq(http.MethodGet, pathZhangSan, func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+		})
+		p, sink, _ := senderNamePlatform(t, f, nil)
+
+		// 外层 ctx 给 5s：去掉 300ms 超时的变异下也能在几秒内红，而不是等 http 客户端的 30s。
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		started := time.Now()
+		if err := p.dispatchRaw(ctx, loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+			t.Fatalf("查名字超时不该让事件失败：%v", err)
+		}
+		elapsed := time.Since(started)
+		if elapsed >= time.Second {
+			t.Errorf("耗时 %v，要 < 1s（查询该被 300ms 截断）", elapsed)
+		}
+		if !slow.called() {
+			t.Error("该真的去查过通讯录")
+		}
+		seen := sink.seen()
+		if len(seen) != 1 {
+			t.Fatalf("事件该照送，sink 收到 %d 条", len(seen))
+		}
+		if seen[0].SenderName != nil {
+			t.Errorf("超时 → sender_name 该是 nil，得到 %q", seen[0].GetSenderName())
+		}
+	})
+
+	t.Run("权限错误熔断", func(t *testing.T) {
+		f := newFakeFeishu(t)
+		f.mockToken()
+		denied := f.onJSON(http.MethodGet, pathZhangSan, 403, map[string]any{"code": 99991672, "msg": "no permission"})
+		clock := newFakeClock()
+		p, sink, capture := senderNamePlatform(t, f, clock)
+
+		for i := 0; i < 2; i++ {
+			if err := p.dispatchRaw(context.Background(), loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+				t.Fatalf("第 %d 条 dispatchRaw 失败：%v", i+1, err)
+			}
+		}
+		if denied.count() != 1 {
+			t.Errorf("熔断期内第二条不该再请求，请求了 %d 次", denied.count())
+		}
+		for i, ev := range sink.seen() {
+			if ev.SenderName != nil {
+				t.Errorf("第 %d 条 sender_name 该是 nil，得到 %q", i+1, ev.GetSenderName())
+			}
+		}
+		warns := capture.find("feishu.sender_name_denied")
+		if len(warns) != 1 || warns[0].Level != slog.LevelWarn {
+			t.Errorf("该恰好一条 WARN feishu.sender_name_denied，得到 %v", warns)
+		}
+
+		// 熔断期过了再试一次。
+		clock.Advance(senderNameTripFor + time.Second)
+		if err := p.dispatchRaw(context.Background(), loadFixture(t, "message_at_bot_toplevel", ".json")); err != nil {
+			t.Fatal(err)
+		}
+		if denied.count() != 2 {
+			t.Errorf("熔断期过后该重试，请求 %d 次", denied.count())
+		}
+	})
 }

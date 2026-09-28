@@ -84,7 +84,7 @@ func itemLines(card *pb.ChecklistCard) []string {
 	return lines
 }
 
-func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
+func cardElements(card *pb.ChecklistCard, lines []string, dropped int, buttons bool) []any {
 	label, ok := statusLabel[card.GetStatus()]
 	if !ok {
 		label = card.GetStatus().String()
@@ -117,7 +117,14 @@ func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
 		})
 	}
 
-	// 按钮**当前不渲染**（RΩ 的处置，见 review-findings §二 G1）。
+	// 按钮**默认不渲染**，只有 AITE_FEISHU_CARD_BUTTONS=1（New() 里读，见 platform.go）才渲染；
+	// 渲染时文字提示照留（按钮点不动时用户还有路可走）。默认值等 H8 真机点一次再定：
+	// 飞书官方 2026-06-11《使用长连接接收回调》写明新版 card.action.trigger 走 type=event 帧
+	// （那样 OnP2CardActionTrigger 收得到，按钮就是活的）；平台若仍按旧版发 type=card 帧，
+	// 下面这段事实仍然成立。帧类型由 events.go 的 feishu.card_frame 日志报出来（INFO），
+	// H8 看它定结论，DD10 按结论翻默认值。
+	//
+	// 下面是 RΩ 当初不渲染按钮的理由（review-findings §二 G1），对 type=card 帧仍然成立。
 	//
 	// 事实（BB5 2026-09-15 在 lark-oapi-go v3.12.0 源码上一手复核。模块 zip 的
 	// h1 与 sum.golang.org 逐字一致，读的就是官方发布件，不是本机改过的副本）：
@@ -149,8 +156,13 @@ func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
 	//     接回来了，渲染出来的仍然只有「停止」一个按钮，「证据」一个都不会有。
 	//     **「看证据」的缺口不在 SDK 上**，见 README §已知边界。
 	//
-	// 闸门这件事有 `card_frames_test.go` 的真长连接实测钉着：那条测试红了就说明
-	// SDK 修好了（或平台改用 event 帧发卡片回传），那时才轮到重新算第 2 条。
+	// 闸门这件事有 events_test.go 的真长连接实测钉着（TestGoSDKDropsCardFramesOnTheWire）：
+	// 那条测试红了就说明 SDK 修好了。平台是否已改用 event 帧，看 H8 的 feishu.card_frame。
+	if buttons {
+		if actions := buildActions(card); len(actions) > 0 {
+			elements = append(elements, map[string]any{"tag": "action", "actions": actions})
+		}
+	}
 	if hint := actionHint(card); hint != "" {
 		elements = append(elements, map[string]any{
 			"tag":      "note",
@@ -164,7 +176,7 @@ func cardElements(card *pb.ChecklistCard, lines []string, dropped int) []any {
 // buildActions 按 card.actions 原样渲染按钮：什么时候还该留「停止」是 worker 的决定，
 // adapter 不替它判断。不认识的名字静默丢弃。
 //
-// 现在没有调用方把它拼进卡片（见 `cardElements` 里那段注释），但它与
+// 只有按钮开关打开时才拼进卡片（见 `cardElements` 里那段注释）；它与
 // `NormalizeCardAction` 是一对：按钮 value 的形状与读回来的口径必须始终对得上，
 // 所以留着并继续测。
 func buildActions(card *pb.ChecklistCard) []any {
@@ -211,8 +223,14 @@ func actionHint(card *pb.ChecklistCard) string {
 	return ""
 }
 
-// BuildChecklistCard 把 ChecklistCard 渲染成飞书卡片 JSON。
+// BuildChecklistCard 把 ChecklistCard 渲染成飞书卡片 JSON（不带按钮，只有文字提示）。
 func BuildChecklistCard(card *pb.ChecklistCard) map[string]any {
+	return buildChecklistCardWith(card, false)
+}
+
+// buildChecklistCardWith 是带按钮开关的版本：buttons=true 且 card.actions 非空时多一个
+// action 元素。≤30KB 的裁剪照旧（按钮在待办之后，裁剪只动待办行）。
+func buildChecklistCardWith(card *pb.ChecklistCard, buttons bool) map[string]any {
 	title := strings.TrimSpace(card.GetTaskNo() + " " + card.GetTitle())
 	lines := itemLines(card)
 	dropped := 0
@@ -229,7 +247,7 @@ func BuildChecklistCard(card *pb.ChecklistCard) map[string]any {
 				"template": template,
 				"title":    plainText(title),
 			},
-			"elements": cardElements(card, lines, dropped),
+			"elements": cardElements(card, lines, dropped, buttons),
 		}
 		if len(DumpsCard(payload)) <= CardMaxBytes || len(lines) == 0 {
 			return payload

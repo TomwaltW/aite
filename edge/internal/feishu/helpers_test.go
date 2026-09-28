@@ -34,6 +34,8 @@ const (
 	testRootMsgID   = "om_toplevel_0001"
 	testCardMsgID   = "om_checklist_card_0001"
 	testFixturesDir = "../../testdata/feishu"
+	// testEventFixturesDir 是 CC8 新事件的夹具（本包自己的 testdata）。
+	testEventFixturesDir = "testdata/events"
 )
 
 // ---------------------------------------------------------------------------
@@ -160,7 +162,7 @@ type route struct {
 	// 也必须持。不持的话 -race 会在服务端 goroutine 还没退出时抓现行 ——
 	// TestTransportErrorIsRetryable 就是这种形状：连接被掐断，断言先跑到了。
 	mu        *sync.Mutex
-	responses []func(w http.ResponseWriter)
+	responses []func(w http.ResponseWriter, r *http.Request)
 	calls     []recordedRequest
 }
 
@@ -184,6 +186,16 @@ func routeKey(method, path string) string { return method + " " + path }
 
 // on 注册一条路由，每次调用按顺序取一个响应；用完后重复最后一个。
 func (f *fakeFeishu) on(method, path string, responses ...func(w http.ResponseWriter)) *route {
+	wrapped := make([]func(http.ResponseWriter, *http.Request), 0, len(responses))
+	for _, respond := range responses {
+		wrapped = append(wrapped, func(w http.ResponseWriter, _ *http.Request) { respond(w) })
+	}
+	return f.onReq(method, path, wrapped...)
+}
+
+// onReq 是拿得到 *http.Request 的路由变体（比如慢路由要 select 在 r.Context().Done() 上，
+// 否则 httptest.Server.Close 会一直等 handler）。
+func (f *fakeFeishu) onReq(method, path string, responses ...func(w http.ResponseWriter, r *http.Request)) *route {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r := &route{mu: &f.mu, responses: responses}
@@ -249,7 +261,7 @@ func (f *fakeFeishu) serve(w http.ResponseWriter, req *http.Request) {
 	}
 	respond := r.responses[idx]
 	f.mu.Unlock()
-	respond(w)
+	respond(w, req)
 }
 
 func (r *route) count() int {
@@ -297,6 +309,9 @@ type platformBuild struct {
 	botOpenID  string
 	appID      string
 	httpClient *http.Client
+	// 与 platformOptions 同名的装配字段：测试直接设，不经环境变量。
+	cardButtons bool
+	senderNames bool
 }
 
 func mustPlatform(t *testing.T, b platformBuild) *Platform {
@@ -323,6 +338,9 @@ func mustPlatform(t *testing.T, b platformBuild) *Platform {
 		clock:   b.clock,
 		logger:  b.logger,
 		budget:  b.budget,
+
+		cardButtons: b.cardButtons,
+		senderNames: b.senderNames,
 	}
 	if b.domain != "" {
 		api, err := newAPIClient(apiOptions{
@@ -363,26 +381,49 @@ func outboundPlatform(t *testing.T, f *fakeFeishu) (*Platform, *fakeClock) {
 // fixture
 // ---------------------------------------------------------------------------
 
+// fixtureRoots 是黄金循环扫的两个根：老的 7 对（dev-spec B1 钉着，一个字节都不许动）
+// 与 CC8 新事件的夹具（本包 testdata/events/）。glob 不递归，表情夹具放子目录 reaction/，
+// 不进黄金循环（它们不产出 NormalizedEvent，没有 expected 可比）。
+var fixtureRoots = []string{testFixturesDir, testEventFixturesDir}
+
 func fixtureNames(t *testing.T) []string {
 	t.Helper()
-	entries, err := filepath.Glob(filepath.Join(testFixturesDir, "*.json"))
-	if err != nil {
-		t.Fatalf("列 fixture 失败：%v", err)
-	}
 	var names []string
-	for _, p := range entries {
-		base := filepath.Base(p)
-		if len(base) > len(".expected.json") && base[len(base)-len(".expected.json"):] == ".expected.json" {
-			continue
+	for _, root := range fixtureRoots {
+		entries, err := filepath.Glob(filepath.Join(root, "*.json"))
+		if err != nil {
+			t.Fatalf("列 fixture 失败：%v", err)
 		}
-		names = append(names, base[:len(base)-len(".json")])
+		for _, p := range entries {
+			base := filepath.Base(p)
+			if len(base) > len(".expected.json") && base[len(base)-len(".expected.json"):] == ".expected.json" {
+				continue
+			}
+			names = append(names, base[:len(base)-len(".json")])
+		}
 	}
 	return names
 }
 
+// fixtureDir 返回 name.json 所在的根；两个根都没有就回老根（让调用方按老口径报「读不到」）。
+func fixtureDir(name string) string {
+	for _, root := range fixtureRoots {
+		if _, err := os.Stat(filepath.Join(root, name+".json")); err == nil {
+			return root
+		}
+	}
+	return testFixturesDir
+}
+
 func loadFixture(t *testing.T, name, suffix string) map[string]any {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(testFixturesDir, name+suffix))
+	return loadFixtureFile(t, filepath.Join(fixtureDir(name), name+suffix))
+}
+
+// loadFixtureFile 按显式路径读一份夹具（表情夹具不在黄金循环里，按路径读）。
+func loadFixtureFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("读 fixture 失败：%v", err)
 	}
@@ -436,5 +477,61 @@ func sampleCard() *pb.ChecklistCard {
 // defaultFeishuConfig 是 config 契约的默认 feishu 段。
 func defaultFeishuConfig() config.Feishu { return config.Default().Feishu }
 
+// registerTestEvent 在分发表里临时登记一个事件类型，测试结束时撤销（别污染其它测试）。
+func registerTestEvent(t *testing.T, eventType string, entry eventEntry) {
+	t.Helper()
+	registerEvent(eventType, entry)
+	t.Cleanup(func() { unregisterTestEvent(eventType) })
+}
+
+func unregisterTestEvent(eventType string) {
+	eventTableMu.Lock()
+	defer eventTableMu.Unlock()
+	delete(eventTable, eventType)
+}
+
 // strptr 是 optional string 字段的取址助手。
 func strptr(s string) *string { return &s }
+
+// ---------------------------------------------------------------------------
+// 事件投递（原 reconnect_test.go）
+// ---------------------------------------------------------------------------
+
+// recordingSink 是 EventSink 的假实现。
+type recordingSink struct {
+	mu     sync.Mutex
+	events []*pb.NormalizedEvent
+	err    error
+	before func()
+}
+
+func (s *recordingSink) HandleEvent(_ context.Context, ev *pb.NormalizedEvent) error {
+	s.mu.Lock()
+	before := s.before
+	err := s.err
+	s.events = append(s.events, ev)
+	s.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	return err
+}
+
+func (s *recordingSink) seen() []*pb.NormalizedEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*pb.NormalizedEvent, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+func dispatchPlatform(t *testing.T, sink *recordingSink, budget time.Duration, clock *fakeClock) (*Platform, *logCapture) {
+	t.Helper()
+	capture, logger := newLogCapture()
+	b := platformBuild{sink: sink, logger: logger, budget: budget, appID: testAppID}
+	if clock != nil {
+		b.clock = clock.Now
+		b.sleep = clock.Sleep
+	}
+	return mustPlatform(t, b), capture
+}
