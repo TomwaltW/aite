@@ -108,8 +108,8 @@ Go 侧：`edge/internal/config` 用宽松 `yaml.Unmarshal`，新段被忽略；`
 
 | 类型 | 改动 | 服务 |
 |---|---|---|
-| `SandboxNetwork` | `none | trusted | custom | full`（proto 仍是 string；空串 = none；其余拒） | CT17 / CT18 / NEW11 / NEW12 |
-| `ExecLanguage` | `python | bash`（`ExecRequest::bash(code, timeout)` 便捷构造） | DD6 `run_shell` |
+| `SandboxNetwork` | `none`、`trusted`、`custom`、`full`（proto 仍是 string；空串 = none；其余拒） | CT17 / CT18 / NEW11 / NEW12 |
+| `ExecLanguage` | `python`、`bash`（`ExecRequest::bash(code, timeout)` 便捷构造） | DD6 `run_shell` |
 | `CredentialBinding`（新） | `host (1)`、`header (2)`、`scheme (3)`、`secret_ref (4)`——**只是名字**，取值由 edge 持有，永不过 gRPC | EE10（CC11 `CredentialBinding` 逐字同形） |
 | `EgressPolicy`（新） | `level: SandboxNetwork (1, string)`、`allow_hosts: Vec (2)`、`credentials: Vec<CredentialBinding> (3)`、`audit_tag (4)`；`Default` = `level none`、其余空 | CC11 `Policy{Level, AllowHosts, AuditTag, Credentials}` |
 | `AcquireRequest` += | `EgressPolicy egress = 3`（缺省 / 空 = none） | DD6 / DD8 |
@@ -388,7 +388,34 @@ EE12 的 `aite evidence show` / `!evidence` 按本表渲染（`renders_approval_
 
 ## 12. 契约测试（锁面内，K 条新增；与补丁一起落）
 
-锁面保持 26 个文件：**不新建测试文件**，新测试都加进现有的 `frozen_values.rs` / `config.rs` / `roundtrip.rs`；`layout.rs` 的 `must` 加 `domain.rs`。清单与每条钉什么见 `review/t0/APPLY.md` 与回执 `review/p1/ledger/T0.md` §3。
+锁面保持 26 个文件：**不新建测试文件**，新测试都加进现有的 `frozen_values.rs` / `config.rs` / `roundtrip.rs`；`layout.rs` 的 `must` 加 `domain.rs`。
+自测实测 `contracts passed = 27 + 15 = 42`、`proto passed = 5 + 5 = 10`：
+
+| 文件 | 新测试（K = 15） | 钉什么 |
+|---|---|---|
+| `frozen_values.rs` | `open_task_statuses_are_frozen` | `OPEN_TASK_STATUSES` 的 5 个值与顺序；`AwaitingApproval` 不是 active |
+| | `p1_enum_string_forms` | 全部新枚举的字符串与 `ALL.len()`（`ModelVendor` 8 个含 `selfhost`、`PlatformChoice` 4 个…） |
+| | `capability_profiles_p1` | `feishu_p0()` 的 14 个新位；`dingtalk_v1()` / `wecom_v1()` 全部取值 |
+| `config.rs` | `dingtalk_and_wecom_platforms_accepted` | `platform: dingtalk / wecom` 可用、没写的键取默认（原 `:63` 的拒 dingtalk 改成拒 `slack`，仍在 `rejects_bad_shapes`） |
+| | `p1_defaults_match_spec` | 新段的默认值逐项（点名 `allow_overseas_endpoint` 默认 false、自动回复默认关） |
+| | `p1_sections_reject_unknown_keys_and_bad_values` | 新段 `deny_unknown_fields`、坏枚举值被拒；catalog 项也走默认值 |
+| `roundtrip.rs` | `p0_json_without_p1_fields_still_loads` | **缺新字段的旧 JSON（P0 SQLite 行）照样能读**；新字段为空时 `Message` / `Turn` 落盘 JSON 与 p0.2 逐键相同 |
+| | `p1_event_shapes_round_trip` | Quote / Reaction / External 事件与新卡片动作的 JSON 形状 |
+| | `p1_outbound_shapes_round_trip` | OutboundText 新字段、HistoryMessage 新字段、UserInfo…OAuthCode |
+| | `sandbox_egress_shapes` | `EgressPolicy` 默认 none、`CredentialBinding`、坏档位被拒、`ExecRequest::bash` |
+| | `domain_types_round_trip` | domain.rs 全部类型；`compute_snapshot_hash` 不含自身、设置变了就变；`RoutineTrigger` / `RoutineOutput` 的 `kind` 标签 |
+| | `network_event_reads_edge_jsonl_line` | 能读 edge 出网代理写的 13 键 JSONL 行（含 `level: ""` 的拒绝行） |
+| | `services_default_and_debug` | `Services::default()` 全空、手写 `Debug` 的输出 |
+| | `model_error_p1_variants` | 三个新 `ModelError` 的文案 |
+| | `old_impls_compile_and_new_methods_are_unimplemented` | 只实现 p0.2 方法的替身能编过；12 + 14 个新默认方法回 unimplemented（逐个点名）；`acquire_scoped` none 档转调 `acquire`、其余档 Unavailable；`submit_internal` 默认错；`RunHooks::none()` |
+
+| `core/crates/proto/tests/convert.rs` 新测试（M' = 5） | 钉什么 |
+|---|---|
+| `p1_enum_values_map_both_ways` | 新枚举值的 proto 编号（7 / 8、3 / 4 / 5、4）与双向互转 |
+| `p1_event_shapes_round_trip_through_pb` | Reaction / External（payload ↔ Struct）/ Submit 事件经 pb 往返 |
+| `p1_outbound_messages_round_trip_through_pb` | UserInfo…OAuthCode 往返；`ChatInfo` 的 UNSPECIFIED 拒、`SearchHit` 缺 message 拒 |
+| `capability_profiles_round_trip_through_pb` | 三份能力档经 pb 往返无损 |
+| `network_levels_and_egress_policy` | network 认空串、`none`、`trusted`、`custom`、`full`；`EgressPolicy` 往返、空 level = none、`bridge` 拒 |
 
 ## 13. 交给 T0c 的伴随清单（原样交接；T0c 不改锁定面、不重生成 `edge/gen`）
 
@@ -431,3 +458,8 @@ EE12 的 `aite evidence show` / `!evidence` 按本表渲染（`renders_approval_
 - `find_task_by_no` 按 `chat_id` 限定（原卡只写「incl. delivered」）：任务编号租户内唯一，但路由只该命中本群的任务。
 - `policy_denied` 的证据写端跨 DD6 / DD4 两轨（§10）。
 - 能力位里标 0 的数值（§3）是占位，等 DD11 / H9 实测。
+- `MessageIndexEntry` 进了契约：CC5 派单（`review/paste-CC5.md` §5②）让 store 自定义返回结构体（当时契约锁着）；p1.0 之后 DD1 的 trait 实现直接用契约类型，
+  CC5 的固有方法可以保留、由 trait 方法做一行转换（不冲突，只是提醒）。
+- prost / tonic 会把 `OAuthAuthorizeUrl` / `OAuthExchange` 两个 RPC 生成成 `o_auth_authorize_url` / `o_auth_exchange`（DD2 写客户端时别找错名字）；
+  Go 侧生成的是 `OAuthAuthorizeUrl` / `OAuthExchange`。
+- `RunHooks.drain_steer` 改类型（§8.4）是本批唯一的非追加改动。

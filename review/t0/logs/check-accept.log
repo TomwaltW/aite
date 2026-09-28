@@ -1,0 +1,74 @@
+
+=== A1 cargo build --workspace ===
+$ bash -c cd core && cargo build --workspace
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+-> exit 0
+
+=== A2 go build ./... ===
+$ bash -c cd edge && go build ./...
+
+-> exit 0
+
+=== A3/C2 契约锁 --check ===
+$ core/target/debug/aite contracts lock --check
+OK 25 files
+-> exit 0
+
+=== A4a cargo clippy -D warnings ===
+$ bash -c cd core && cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+-> exit 0
+
+=== A4b cargo fmt --check ===
+$ bash -c cd core && cargo fmt --check
+
+-> exit 0
+
+=== A4c go vet ===
+$ bash -c cd edge && go vet ./...
+
+-> exit 0
+
+=== A4d gofmt ===
+$ bash -c cd edge && test -z "$(gofmt -l .)"
+
+-> exit 0
+
+=== A5 cargo test --no-run（全部测试可编译） ===
+$ bash -c cd core && cargo test --workspace --no-run
+  Executable tests/test_context.rs (target/debug/deps/test_context-0c9eaf634dbf20e3)
+  Executable tests/test_final.rs (target/debug/deps/test_final-6e70a09cb9f97835)
+  Executable tests/test_in_flight.rs (target/debug/deps/test_in_flight-9cf74d9da741dd8b)
+  Executable tests/test_limits.rs (target/debug/deps/test_limits-37cdb5e9a29c39a5)
+  Executable tests/test_loop_fallbacks.rs (target/debug/deps/test_loop_fallbacks-4493b78700529fd8)
+  Executable tests/test_prompts_checklist.rs (target/debug/deps/test_prompts_checklist-e9d7c93d76b8d9d7)
+  Executable tests/test_sandbox_handoff.rs (target/debug/deps/test_sandbox_handoff-0384a5fa7bf2bfc7)
+  Executable tests/test_steer.rs (target/debug/deps/test_steer-0e71edf6a13bb207)
+-> exit 0
+
+=== C1 契约测试 ===
+$ bash -c cd core && cargo test -p aite-contracts 2>&1 | grep -E "^test result" | awk "{p+=\$4; f+=\$6} END {print \"contracts passed=\" p \" failed=\" f; exit (f>0)}"
+contracts passed=25 failed=0
+-> exit 0
+
+=== B 全量 cargo test ===
+$ setpriv --bounding-set=-dac_override,-dac_read_search --inh-caps=-dac_override,-dac_read_search -- bash -c cd core && o=$(cargo test --workspace --no-fail-fast 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^(---- .* stdout ----|error(: test failed|: could not compile|\[E[0-9]+\]))" | sort -u | head -n 7; printf "%s\n" "$o" | grep -E "^test result" | awk -v c="$c" "{p+=\$4; f+=\$6} END {print \"cargo passed=\" p+0 \" failed=\" f+0; exit (c != 0 || f > 0 || NR == 0)}"
+cargo passed=946 failed=0
+-> exit 0
+
+=== B 全量 go test（-race） ===
+$ setpriv --bounding-set=-dac_override,-dac_read_search --inh-caps=-dac_override,-dac_read_search -- bash -c cd edge && o=$(go test -race ./... -count=1 2>&1); c=$?; printf "%s\n" "$o" | grep -E "^FAIL[[:space:]]+aite/edge/" | head -n 5; ok=$(printf "%s\n" "$o" | grep -cE "^(ok|\?)[[:space:]]"); fail=$(printf "%s\n" "$o" | grep -cE "^FAIL[[:space:]]+aite/edge/"); echo "go packages ok=${ok} fail=${fail}"; exit "$c"
+go packages ok=9 fail=0
+-> exit 0
+
+=== B8 评测（passed 10/10） ===
+$ bash -c o=$(core/target/debug/aite evals run evals/p0 --platform fake --model scripted 2>&1); c=$?; printf "%s\n" "$o" | tail -n 2; [ "$c" = 0 ] && printf "%s\n" "$o" | tail -n 1 | grep -qx "passed 10/10"
+}
+passed 10/10
+-> exit 0
+
+=== B9 评测 evals/p1 ===
+B9 skip：evals/p1 尚无场景
+
+全部通过
+exit=0

@@ -517,7 +517,8 @@ def estimate(root: pathlib.Path, out: pathlib.Path) -> int:
         "",
         "> 生成：`python3 review/t0/p1-contract-patch.py --estimate --root <副本>`（副本 = B0 + P0-CLOSE + T0 补丁）。",
         "> `cargo check --workspace --all-targets --keep-going` 的 error 按文件归并。**只是估计**：一个 crate 编不过时，",
-        "> 依赖它的 crate 不会被检查，所以下游 crate 的条目在上游修好之前看不见（见末尾「没检查到的 crate」）。",
+        "> 依赖它的 crate 不会被检查，所以下游 crate 的条目在上游修好之前看不见（见末尾两节）。",
+        "> 行号是副本上的（B0 = `8458435` + P0-CLOSE），T0c 起点若在更新的 main 上，按符号找。",
         "",
         f"共 {sum(len(v) for v in by_file.values())} 条 error，{len(by_file)} 个文件。",
         "",
@@ -532,7 +533,21 @@ def estimate(root: pathlib.Path, out: pathlib.Path) -> int:
     lines.append("")
     for b in blocked:
         lines.append(f"- `{b}`")
-    lines.append("")
+    lines += [
+        "",
+        "## 本估计看不到、但已知要改的（交接清单见 docs/p1/contract-p1.md §13）",
+        "",
+        "- 依赖上面编不过的 crate 的（至少 `aite-evals`、`aite`〈app〉及其测试）没被检查：它们的结构体字面量与穷举 match 要等上游修好才报。",
+        "- `edge-client/tests/common/mod.rs` 的 fake `PlatformService`：tonic 生成的服务 trait 多了 12 个 RPC，没有默认实现就要补。",
+        "- 5 处 `p0.2` 字面量钉：`edge/cmd/aite-edge/main_test.go`、`core/crates/evidence/tests/manifest.rs`、`core/crates/evals/tests/evals_runner.rs`、"
+        "`core/crates/evals/tests/protocol_probe.rs`、`core/crates/app/tests/cli_smoke.rs`（运行期才红，cargo check 看不到）。",
+        "- `RunHooks.drain_steer` 改成 `Vec<SteerMessage>`：control 入队处与 worker 消费处（上面 `dispatch.rs` / `loop.rs` 的 E0308）要一起改，",
+        "  入队时就把事件的 `sender_id` / `sender_name` / `message_id` 带上。",
+        "- `core/crates/app/src/lock.rs` 注释里的「= 25」→ 26。",
+        "- Go：`go build` / `go vet` 在补丁后已过（自测第 j 步）；`go test` 已知会红的是 `main_test.go` 的版本钉"
+        "（T0 只另跑过 `internal/config` 与 `internal/server` 两个包，都绿；其余包没跑）。",
+        "",
+    ]
     out.write_text("\n".join(lines), encoding="utf-8")
     print(f"写了 {out}：{sum(len(v) for v in by_file.values())} 条 error / {len(by_file)} 个文件；编不过的 crate {blocked}")
     return 0
