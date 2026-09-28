@@ -1,0 +1,14 @@
+{
+  "msgid": "fb-msg-3",
+  "aibotid": "bot-test",
+  "chatid": "chat-fb",
+  "chattype": "group",
+  "from": {"userid": "u-dislike"},
+  "event": {
+    "eventtype": "feedback_event",
+    "feedback_event": {
+      "id": "stream-abc",
+      "type": 3
+    }
+  }
+}
